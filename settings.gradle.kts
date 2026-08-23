@@ -15,7 +15,8 @@ dependencyResolutionManagement {
 
 rootProject.name = "CoolDownloadManager"
 
-include("android:app")
+// Android packaging is temporarily disabled on this branch.
+// include("android:app")
 include("desktop:app")
 include("desktop:app-utils")
 include("desktop:shared")

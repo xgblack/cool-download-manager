@@ -131,16 +131,6 @@ class AppComponent(
         }
     }
 
-    fun activateHomeIfNotOpen() {
-        scope.launch {
-            showHomeSlot.value.child?.instance.let {
-                if (it == null) {
-                    showHome.activate(HomePageConfig())
-                }
-            }
-        }
-    }
-
     fun closeHome() {
         scope.launch {
             showHome.dismiss()
@@ -1275,4 +1265,3 @@ interface PowerActionManager {
 
     fun dismissPowerAction()
 }
-

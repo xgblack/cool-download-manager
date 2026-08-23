@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
-  <title>Cool download manager icon</title>
-  <desc>Compatibility path for the light rounded folder and download arrow icon.</desc>
+  <title>Cool download manager light icon</title>
+  <desc>A minimal rounded folder and download arrow mark for light appearance.</desc>
 
   <defs>
     <linearGradient id="background" x1="110" y1="82" x2="916" y2="942" gradientUnits="userSpaceOnUse">
@@ -19,6 +19,7 @@
 
   <rect x="32" y="32" width="960" height="960" rx="286" fill="url(#background)"/>
   <rect x="33.5" y="33.5" width="957" height="957" rx="284.5" stroke="#172536" stroke-opacity="0.14" stroke-width="3"/>
+
   <path d="M152 414V380C152 336 188 302 232 302H388C414 302 438 314 453 335L488 382H792C840 382 872 414 872 462V700C872 756 832 796 776 796H248C192 796 152 756 152 700V414Z" fill="url(#folder)"/>
   <path d="M512 132C489 132 471 150 471 173V430H395C371 430 350 444 342 466C334 488 340 511 357 528L482 653C499 670 525 670 542 653L667 528C684 511 690 488 682 466C674 444 653 430 629 430H553V173C553 150 535 132 512 132Z" fill="url(#arrow)"/>
 </svg>

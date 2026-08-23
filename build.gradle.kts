@@ -68,12 +68,11 @@ val createChangeNoteForCi = tasks.register("createChangeNoteForCi") {
 val createReleaseFolderForCi = tasks.register("createReleaseFolderForCi") {
     val createBinariesForCi = CiUtils.getCreateBinaryFolderForCiTaskName()
     dependsOn("desktop:app:$createBinariesForCi")
-    val skipAndroidBuild = System.getenv("SKIP_ANDROID_BUILD")
-        ?.toBoolean()
-        ?: false
-    if (!skipAndroidBuild) {
-        dependsOn("android:app:$createBinariesForCi")
-    }
+    // Android packaging is temporarily disabled on this branch.
+    // val skipAndroidBuild = System.getenv("SKIP_ANDROID_BUILD")?.toBoolean() ?: false
+    // if (!skipAndroidBuild) {
+    //     dependsOn("android:app:$createBinariesForCi")
+    // }
     val shouldGenerateChangelog = true
     if (shouldGenerateChangelog) {
         dependsOn(createChangeNoteForCi)

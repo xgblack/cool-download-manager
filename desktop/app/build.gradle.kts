@@ -165,12 +165,6 @@ nucleus {
             }
             macOS {
                 iconFile = project.file("icons/icon.icns")
-                infoPlist {
-                    extraKeysRawXml = """
-                            <key>LSUIElement</key>
-                            <string>true</string>
-                        """.trimIndent()
-                }
                 if (Platform.isMac()) {
                     jvmArgs("-Dapple.awt.enableTemplateImages=true")
                 }

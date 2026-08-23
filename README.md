@@ -1,6 +1,10 @@
 <div align="center">
   <a href="https://abdownloadmanager.com" target="_blank">
-    <img width="180" src="assets/logo/app_logo_with_background.svg" alt="Cool download manager Logo">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo/app_logo_redesign_dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="assets/logo/app_logo_redesign_light.svg">
+      <img width="180" src="assets/logo/app_logo_redesign_light.svg" alt="Cool download manager Logo">
+    </picture>
   </a>
 </div>
 <h1 align="center">Cool download manager</h1>
@@ -25,7 +29,8 @@
 - ⚡️ Faster Download Speed
 - ⏰ Queues and Schedulers
 - 🌐 Browser Extensions
-- 💻 Multiplatform (Android / Windows / Linux / Mac)
+- 💻 Multiplatform (Windows / Linux / Mac)
+<!-- Android packaging is temporarily disabled on this branch. -->
 - 🌙 Multiple Themes (Dark/Light/Black and more) with modern UI
 - ❤️ Free and Open Source
 
@@ -159,6 +164,29 @@ follow these steps:
 
 > **Note**. This project is compiled and published by GitHub actions [here](./.github/workflows/publish.yml), so if you
 > faced any problem you can check that too.
+
+### Build macOS Package
+
+The macOS installer requires [create-dmg](https://github.com/create-dmg/create-dmg). Install it with Homebrew once:
+
+```bash
+brew install create-dmg
+```
+
+From the project directory, build only the macOS DMG package:
+
+```bash
+./gradlew :desktop:app:createInstallerDmg --console=plain
+```
+
+The installer is written to:
+
+```
+desktop/app/build/custom-installer/CoolDownloadManager.dmg
+```
+
+The task first creates the release `.app` bundle and then packages it into the DMG. The output uses the architecture of
+the macOS machine running the build (`arm64` on Apple Silicon and `x86_64` on Intel).
 
 ## Translations
 

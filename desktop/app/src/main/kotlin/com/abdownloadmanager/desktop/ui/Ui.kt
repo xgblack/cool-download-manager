@@ -51,7 +51,6 @@ import com.abdownloadmanager.shared.util.ui.ProvideDebugInfo
 import com.abdownloadmanager.shared.util.ui.icon.MyIcons
 import ir.amirab.util.compose.action.buildMenu
 import ir.amirab.util.compose.localizationmanager.LanguageManager
-import ir.amirab.util.desktop.PlatformDockToggler
 import ir.amirab.util.desktop.mac.event.MacEventHandler
 import ir.amirab.util.platform.Platform
 import ir.amirab.util.platform.isMac
@@ -81,7 +80,7 @@ object Ui : KoinComponent {
         }
         if (Platform.isMac()) {
             MacEventHandler.configure(
-                onClickIcon = appComponent::activateHomeIfNotOpen,
+                onClickIcon = appComponent::openHome,
                 onAboutClick = {
                     appComponent.showAboutPage.value = true
                 },
@@ -205,7 +204,6 @@ private fun SystemTray(
 ) {
     val useSystemTray by component.useSystemTray.collectAsState()
     if (useSystemTray) {
-        LaunchedEffect(Unit) { PlatformDockToggler.hide() }
         val menu = remember {
             buildMenu {
                 +showDownloadList
@@ -223,7 +221,5 @@ private fun SystemTray(
             primaryAction = { showDownloadList.onClick() },
             menu = menu,
         )
-    } else {
-        LaunchedEffect(Unit) { PlatformDockToggler.show() }
     }
 }

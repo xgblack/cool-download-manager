@@ -25,15 +25,31 @@ fun Tray(
         Platform.Desktop.Linux -> false
         Platform.Desktop.Windows -> false
     }
-    if (shouldBeMonochrome && icon is IconSource.VectorIconSource) {
+    if (shouldBeMonochrome) {
         // for tray icon the library automatically converts the ImageVector to monochrome
         // we want this behavior only for macOS
-        Tray(
-            icon = icon.value,
-            tooltip = tooltip,
-            primaryAction = primaryAction,
-            menuContent = menuContent,
-        )
+        when (icon) {
+            is IconSource.VectorIconSource -> Tray(
+                icon = icon.value,
+                tooltip = tooltip,
+                primaryAction = primaryAction,
+                menuContent = menuContent,
+            )
+
+            is IconSource.ThemeAwareVectorIconSource -> Tray(
+                icon = icon.rememberVector(),
+                tooltip = tooltip,
+                primaryAction = primaryAction,
+                menuContent = menuContent,
+            )
+
+            else -> Tray(
+                icon = icon.rememberPainter(),
+                tooltip = tooltip,
+                primaryAction = primaryAction,
+                menuContent = menuContent,
+            )
+        }
     } else {
         Tray(
             icon = icon.rememberPainter(),
@@ -71,6 +87,13 @@ private fun ComposableTrayMenuScope.RenderTraySingleItem(item: MenuItem.SingleIt
             isEnabled = isEnabled,
             onClick = onClick,
             icon = iconSource.value,
+        )
+
+        is IconSource.ThemeAwareVectorIconSource -> Item(
+            label = title,
+            isEnabled = isEnabled,
+            onClick = onClick,
+            icon = iconSource.rememberVector(),
         )
 
         is IconSource.PainterIconSource -> Item(
@@ -120,6 +143,15 @@ private fun ComposableTrayMenuScope.RenderTraySubMenu(submenu: MenuItem.SubMenu)
                 isEnabled = isEnabled,
                 submenuContent = submenuContent,
                 icon = iconSource.value,
+            )
+        }
+
+        is IconSource.ThemeAwareVectorIconSource -> {
+            SubMenu(
+                label = title,
+                isEnabled = isEnabled,
+                submenuContent = submenuContent,
+                icon = iconSource.rememberVector(),
             )
         }
 

@@ -26,6 +26,22 @@ sealed interface IconSource {
     }
 
     @Immutable
+    data class ThemeAwareVectorIconSource(
+        val vectorProvider: @Composable () -> ImageVector,
+        override val requiredTint: Boolean,
+        override val uri: String? = null,
+    ) : IconSource {
+        override val value: Any
+            get() = vectorProvider
+
+        @Composable
+        override fun rememberPainter(): Painter = rememberVectorPainter(vectorProvider())
+
+        @Composable
+        fun rememberVector(): ImageVector = vectorProvider()
+    }
+
+    @Immutable
     data class PainterIconSource(
         override val value: Painter,
         override val requiredTint: Boolean,

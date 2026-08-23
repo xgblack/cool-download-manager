@@ -3,10 +3,18 @@ package com.abdownloadmanager.shared.util.ui.icon
 import com.abdownloadmanager.resources.icons.ABDMIcons
 import com.abdownloadmanager.resources.icons.*
 import com.abdownloadmanager.shared.util.ui.BaseMyColors
+import com.abdownloadmanager.shared.util.ui.myColors
 import ir.amirab.util.compose.IconSource
+import ir.amirab.util.compose.contants.ICON_PROTOCOL
 
 object MyIcons : BaseMyColors() {
-    override val appIcon = ABDMIcons.AppIcon.asIconSource("appIcon", false)
+    override val appIcon = IconSource.ThemeAwareVectorIconSource(
+        vectorProvider = {
+            if (myColors.isLight) ABDMIcons.AppIconLight else ABDMIcons.AppIconDark
+        },
+        requiredTint = false,
+        uri = "$ICON_PROTOCOL:appIcon",
+    ).asIconSource()
 
     override val settings = ABDMIcons.Settings.asIconSource("settings")
     override val flag = ABDMIcons.Flag.asIconSource("flag")
