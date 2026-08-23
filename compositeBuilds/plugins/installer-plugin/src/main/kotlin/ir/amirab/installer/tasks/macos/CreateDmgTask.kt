@@ -128,6 +128,7 @@ abstract class CreateDmgTask : DefaultTask() {
             append("--eula ${context["license_file"]} ")
             append("--volicon ${context["volume_icon"]} ")
             append("--window-pos ${context["window_x"]} ${context["window_y"]} ")
+            append("--overwrite ")
             append("${context["output_file"]} ")
             append("${context["input_dir"]}")
         }
