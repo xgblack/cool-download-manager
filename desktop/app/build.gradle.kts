@@ -209,7 +209,7 @@ installerPlugin {
             "app_version_with_build" to "${getAppVersionStringForPackaging(TargetFormat.Exe)}.0",
             "source_code_url" to "https://github.com/amir1376/ab-download-manager",
             "project_website" to "www.abdownloadmanager.com",
-            "copyright" to "© 2024-present AB Download Manager App",
+            "copyright" to "© 2024-present Cool download manager App",
             "header_image_file" to project.file("resources/installer/abdm-header-image.bmp"),
             "sidebar_image_file" to project.file("resources/installer/abdm-sidebar-image.bmp")
         )

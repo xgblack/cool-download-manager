@@ -26,7 +26,7 @@ fun Project.getAppName(): String {
 }
 
 fun Project.getPrettifiedAppName(): String {
-    return "AB Download Manager"
+    return "Cool download manager"
 }
 fun Project.getAppDataDirName(): String {
     return ".abdm"

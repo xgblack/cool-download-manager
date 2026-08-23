@@ -16,7 +16,7 @@ import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.versionOption
 import ir.amirab.util.logger.AppLogger
 
-class Cli : SuspendingCliktCommand("ABDownloadManagerCli") {
+class Cli : SuspendingCliktCommand("CoolDownloadManagerCli") {
 
     val debug by option(AppArguments.Args.DEBUG).flag()
 

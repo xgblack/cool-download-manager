@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">AB Download Manager</string>
-    <string name="app_short_name">AB DM</string>
-    <string name="app_browser">AB DM Browser</string>
+    <string name="app_name">Cool download manager</string>
+    <string name="app_short_name">Cool download manager</string>
+    <string name="app_browser">Cool download manager Browser</string>
 </resources>

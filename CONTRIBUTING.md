@@ -1,6 +1,6 @@
-# Contributing to AB Download Manager
+# Contributing to Cool download manager
 
-Thank you for your interest in contributing to AB Download Manager! I appreciate any help you can offer.
+Thank you for your interest in contributing to Cool download manager! I appreciate any help you can offer.
 
 ## What Contributions Are Accepted?
 
@@ -10,7 +10,7 @@ I welcome the following types of contributions:
 
 - **Feature Requests**: Have an idea for a new feature? Let me know by opening an issue or starting a discussion.
 
-- **Translations**: You can translate AB Download Manager into other languages on Crowdin. See the Translations section
+- **Translations**: You can translate Cool download manager into other languages on Crowdin. See the Translations section
   below for more information.
 
 - **Pull Requests**: If you’d like to contribute code, feel free to submit a pull request. Just make sure to read the guidelines below before you start.
@@ -31,7 +31,7 @@ I welcome the following types of contributions:
 
 ## Translations
 
-If you’d like to help translate AB Download Manager into another language, or improve existing translations, you can do
+If you’d like to help translate Cool download manager into another language, or improve existing translations, you can do
 so on Crowdin. Here’s how:
 
 - Visit the project in [Crowdin](https://crowdin.com/project/ab-download-manager)

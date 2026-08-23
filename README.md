@@ -1,24 +1,24 @@
 <div align="center">
   <a href="https://abdownloadmanager.com" target="_blank">
-    <img width="180" src="assets/logo/app_logo_with_background.svg" alt="AB Download Manager Logo">
+    <img width="180" src="assets/logo/app_logo_with_background.svg" alt="Cool download manager Logo">
   </a>
 </div>
-<h1 align="center">AB Download Manager</h1>
+<h1 align="center">Cool download manager</h1>
 <p align="center">
     <a href="https://github.com/amir1376/ab-download-manager/releases/latest"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/amir1376/ab-download-manager?color=greenlight&label=latest%20release"></a>
-    <a href="https://abdownloadmanager.com"><img alt="AB Download Manager Website" src="https://img.shields.io/badge/project-website-purple?&labelColor=gray"></a>
+    <a href="https://abdownloadmanager.com"><img alt="Cool download manager Website" src="https://img.shields.io/badge/project-website-purple?&labelColor=gray"></a>
     <a href="https://t.me/abdownloadmanager"><img alt="Telegram Channel" src="https://img.shields.io/badge/Telegram-Channel-blue?logo=telegram&labelColor=gray"></a>
     <a href="https://t.me/abdownloadmanager_discussion"><img alt="Telegram Group" src="https://img.shields.io/badge/Telegram-Group-blue?logo=telegram&labelColor=gray"></a>
     <a href="https://crowdin.com/project/ab-download-manager"><img alt="Crowdin" src="https://badges.crowdin.net/ab-download-manager/localized.svg"></a>
 </p>
 
 <a href="https://abdownloadmanager.com" target="_blank">
-    <img alt="AB Download Manager Banner" src="assets/banners/app_banner.png"/>
+    <img alt="Cool download manager Banner" src="assets/banners/app_banner.png"/>
 </a>
 
 ## Introduction
 
-[AB Download Manager](https://abdownloadmanager.com) is a desktop app that helps you manage and organize your downloads more efficiently than ever before.
+[Cool download manager](https://abdownloadmanager.com) is a desktop app that helps you manage and organize your downloads more efficiently than ever before.
 
 ## Features
 
@@ -118,13 +118,13 @@ You can download the browser extension to integrate the app with your browser.
 
 ## Repositories And Source Code
 
-There are multiple repositories related to the **AB Download Manager** project:
+There are multiple repositories related to the **Cool download manager** project:
 
 | Repository                                                                                 | Description                                                                   |
 |--------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
 | [Main Application](https://github.com/amir1376/ab-download-manager) (You are here)         | Contains the  **Application** that runs on your  **device**                   |
 | [Browser Integration](https://github.com/amir1376/ab-download-manager-browser-integration) | Contains the **Browser Extension** to be installed on your  **browser**       |
-| [Website](https://github.com/amir1376/ab-download-manager-website)                         | Contains the **AB Download Manager** [website](https://abdownloadmanager.com) |
+| [Website](https://github.com/amir1376/ab-download-manager-website)                         | Contains the **Cool download manager** [website](https://abdownloadmanager.com) |
 
 I've spent a lot of time to create this project.
 
@@ -164,7 +164,7 @@ follow these steps:
 
 <a href="https://crowdin.com/project/ab-download-manager"><img alt="Crowdin" src="https://badges.crowdin.net/ab-download-manager/localized.svg"></a>
 
-If you’d like to help translate AB Download Manager into another language, or improve existing translations, you can do
+If you’d like to help translate Cool download manager into another language, or improve existing translations, you can do
 so on Crowdin. Here’s how:
 
 - Visit the project in [Crowdin](https://crowdin.com/project/ab-download-manager)
