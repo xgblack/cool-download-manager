@@ -16,6 +16,8 @@ import ir.amirab.util.compose.asStringSource
 import ir.amirab.util.desktop.poweraction.PowerActionConfig
 import ir.amirab.util.flow.mapTwoWayStateFlow
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import org.koin.core.component.get
 import kotlin.getValue
@@ -26,6 +28,7 @@ class DesktopSingleDownloadComponent(
     downloadErrorDialogManager: DownloadErrorDialogManager,
     onDismiss: () -> Unit,
     downloadId: Long,
+    focusOnOpen: Boolean,
     extraDownloadSettingsStorage: ExtraDownloadSettingsStorage<DesktopExtraDownloadItemSettings>,
     downloadSystem: DownloadSystem,
     appSettings: BaseAppSettingsStorage,
@@ -45,6 +48,9 @@ class DesktopSingleDownloadComponent(
     applicationScope = applicationScope,
     fileIconProvider = fileIconProvider,
 ) {
+    private val _windowFocusRequestCount = MutableStateFlow(if (focusOnOpen) 1L else 0L)
+    val windowFocusRequestCount = _windowFocusRequestCount.asStateFlow()
+
     private val singleDownloadPageStateToPersist by lazy {
         get<PageStatesStorage>().singleDownloadPageState
     }
@@ -59,12 +65,8 @@ class DesktopSingleDownloadComponent(
         }
     }
 
-    sealed interface Effects : BaseSingleDownloadComponent.Effects.Platform {
-        data object BringToFront : Effects
-    }
-
     fun bringToFront() {
-        sendEffect(Effects.BringToFront)
+        _windowFocusRequestCount.update { it + 1 }
     }
 
     val onCompletion by lazy {
@@ -112,8 +114,7 @@ class DesktopSingleDownloadComponent(
     }
 
     data class Config(
-        override val id: Long
+        override val id: Long,
+        val focusOnOpen: Boolean,
     ) : BaseSingleDownloadComponent.Config
 }
-
-

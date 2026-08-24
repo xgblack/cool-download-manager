@@ -4,6 +4,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
@@ -132,3 +134,51 @@ val ABDMIcons.AppIconDark: ImageVector
 // Keep the original resource name available to callers outside this module.
 val ABDMIcons.AppIcon: ImageVector
     get() = AppIconLight
+
+private var _AppTrayIcon: ImageVector? = null
+
+/**
+ * macOS status items use a monochrome template image. Keep this mark transparent so the system
+ * can tint the folder and download arrow without turning the app icon background into a solid block.
+ */
+val ABDMIcons.AppTrayIcon: ImageVector
+    get() = _AppTrayIcon ?: ImageVector.Builder(
+        name = "AppTrayIcon",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.8f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round,
+        ) {
+            moveTo(3.75f, 17.25f)
+            verticalLineTo(7.75f)
+            curveTo(3.75f, 6.37f, 4.87f, 5.25f, 6.25f, 5.25f)
+            horizontalLineTo(9.32f)
+            curveTo(10.09f, 5.25f, 10.83f, 5.6f, 11.33f, 6.2f)
+            lineTo(12.08f, 7.1f)
+            horizontalLineTo(17.75f)
+            curveTo(19.13f, 7.1f, 20.25f, 8.22f, 20.25f, 9.6f)
+            verticalLineTo(17.25f)
+            curveTo(20.25f, 18.63f, 19.13f, 19.75f, 17.75f, 19.75f)
+            horizontalLineTo(6.25f)
+            curveTo(4.87f, 19.75f, 3.75f, 18.63f, 3.75f, 17.25f)
+            close()
+        }
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.8f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round,
+        ) {
+            moveTo(12f, 9.4f)
+            verticalLineTo(15f)
+            moveTo(9.6f, 12.6f)
+            lineTo(12f, 15f)
+            lineTo(14.4f, 12.6f)
+        }
+    }.build().also { _AppTrayIcon = it }

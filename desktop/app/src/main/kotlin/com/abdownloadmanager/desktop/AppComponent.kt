@@ -427,6 +427,7 @@ class AppComponent(
                     closeDownloadDialog(listOf(cfg.id))
                 },
                 downloadId = cfg.id,
+                focusOnOpen = cfg.focusOnOpen,
                 downloadSystem = downloadSystem,
                 appSettings = appSettings,
                 appRepository = appRepository,
@@ -631,12 +632,18 @@ class AppComponent(
                 type = NotificationType.Success,
             )
             if (appSettings.showDownloadCompletionDialog.value) {
-                openDownloadDialog(it.downloadItem.id)
+                openDownloadDialog(
+                    id = it.downloadItem.id,
+                    focusOnOpen = appSettings.focusDownloadCompletionDialogOnFinish.value,
+                )
             }
         }
         if (it is DownloadManagerEvents.OnJobStarting) {
             if (appSettings.showDownloadProgressDialog.value) {
-                openDownloadDialog(it.downloadItem.id)
+                openDownloadDialog(
+                    id = it.downloadItem.id,
+                    focusOnOpen = appSettings.focusDownloadProgressDialogOnStart.value,
+                )
             }
         }
     }
@@ -839,23 +846,32 @@ class AppComponent(
     }
 
     override fun openDownloadDialog(id: Long) {
-        scope.launch {
-            val component = openedDownloadDialogs.value.find {
-                it.downloadId == id
-            }
-            if (component != null) {
-                component.bringToFront()
-            } else {
-                downloadDialogControl.navigate {
-                    val newItems = (it.items.toSet() + DesktopSingleDownloadComponent.Config(id)).toList()
-                    val copy = it.copy(
-                        items = newItems,
-                        selectedIndex = newItems.lastIndex
-                    )
-                    copy
-                }
-            }
+        openDownloadDialog(id, focusOnOpen = true)
+    }
 
+    private fun openDownloadDialog(id: Long, focusOnOpen: Boolean) {
+        scope.launch {
+            downloadDialogControl.navigate(
+                transformer = { pages ->
+                    if (pages.items.any { it.id == id }) {
+                        pages
+                    } else {
+                        val newItems = pages.items + DesktopSingleDownloadComponent.Config(id, focusOnOpen)
+                        pages.copy(
+                            items = newItems,
+                            selectedIndex = newItems.lastIndex,
+                        )
+                    }
+                },
+                onComplete = { _, oldPages ->
+                    if (focusOnOpen && oldPages.items.any { it.id == id }) {
+                        _openedDownloadDialogs.value.items
+                            .mapNotNull { it.instance }
+                            .firstOrNull { it.downloadId == id }
+                            ?.bringToFront()
+                    }
+                },
+            )
         }
     }
 

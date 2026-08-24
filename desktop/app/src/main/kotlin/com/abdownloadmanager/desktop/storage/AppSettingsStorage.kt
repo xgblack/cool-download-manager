@@ -39,6 +39,8 @@ data class AppSettingsModel(
     override val useAverageSpeed: Boolean = true,
     override val showDownloadProgressDialog: Boolean = true,
     override val showDownloadCompletionDialog: Boolean = true,
+    val focusDownloadProgressDialogOnStart: Boolean = false,
+    val focusDownloadCompletionDialogOnFinish: Boolean = false,
     override val speedLimit: Long = 0,
     override val autoStartOnBoot: Boolean = true,
     override val notificationSound: Boolean = true,
@@ -88,6 +90,8 @@ data class AppSettingsModel(
             val useAverageSpeed = booleanKeyOf("useAverageSpeed")
             val showDownloadProgressDialog = booleanKeyOf("showDownloadProgressDialog")
             val showDownloadCompletionDialog = booleanKeyOf("showDownloadCompletionDialog")
+            val focusDownloadProgressDialogOnStart = booleanKeyOf("focusDownloadProgressDialogOnStart")
+            val focusDownloadCompletionDialogOnFinish = booleanKeyOf("focusDownloadCompletionDialogOnFinish")
             val speedLimit = longKeyOf("speedLimit")
             val autoStartOnBoot = booleanKeyOf("autoStartOnBoot")
             val notificationSound = booleanKeyOf("notificationSound")
@@ -138,6 +142,10 @@ data class AppSettingsModel(
                     ?: default.showDownloadProgressDialog,
                 showDownloadCompletionDialog = source.get(Keys.showDownloadCompletionDialog)
                     ?: default.showDownloadCompletionDialog,
+                focusDownloadProgressDialogOnStart = source.get(Keys.focusDownloadProgressDialogOnStart)
+                    ?: default.focusDownloadProgressDialogOnStart,
+                focusDownloadCompletionDialogOnFinish = source.get(Keys.focusDownloadCompletionDialogOnFinish)
+                    ?: default.focusDownloadCompletionDialogOnFinish,
                 speedLimit = source.get(Keys.speedLimit) ?: default.speedLimit,
                 autoStartOnBoot = source.get(Keys.autoStartOnBoot) ?: default.autoStartOnBoot,
                 notificationSound = source.get(Keys.notificationSound) ?: default.notificationSound,
@@ -187,6 +195,8 @@ data class AppSettingsModel(
                 put(Keys.useAverageSpeed, focus.useAverageSpeed)
                 put(Keys.showDownloadProgressDialog, focus.showDownloadProgressDialog)
                 put(Keys.showDownloadCompletionDialog, focus.showDownloadCompletionDialog)
+                put(Keys.focusDownloadProgressDialogOnStart, focus.focusDownloadProgressDialogOnStart)
+                put(Keys.focusDownloadCompletionDialogOnFinish, focus.focusDownloadCompletionDialogOnFinish)
                 put(Keys.speedLimit, focus.speedLimit)
                 put(Keys.autoStartOnBoot, focus.autoStartOnBoot)
                 put(Keys.notificationSound, focus.notificationSound)
@@ -266,6 +276,8 @@ class AppSettingsStorage(
     override val maxDownloadRetryCount = from(AppSettingsModel.maxDownloadRetryCount)
     override val showDownloadProgressDialog = from(AppSettingsModel.showDownloadProgressDialog)
     override val showDownloadCompletionDialog = from(AppSettingsModel.showDownloadCompletionDialog)
+    val focusDownloadProgressDialogOnStart = from(AppSettingsModel.focusDownloadProgressDialogOnStart)
+    val focusDownloadCompletionDialogOnFinish = from(AppSettingsModel.focusDownloadCompletionDialogOnFinish)
     override val speedLimit = from(AppSettingsModel.speedLimit)
     override val autoStartOnBoot = from(AppSettingsModel.autoStartOnBoot)
     override val notificationSound = from(AppSettingsModel.notificationSound)

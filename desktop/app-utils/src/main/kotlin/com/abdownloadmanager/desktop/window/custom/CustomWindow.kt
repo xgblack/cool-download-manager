@@ -340,6 +340,7 @@ fun CustomWindow(
         WindowController()
     },
     onKeyEvent: (KeyEvent) -> Boolean = { false },
+    focusable: Boolean = true,
     alwaysOnTop: Boolean = false,
     preventMinimize: Boolean = onRequestMinimize == null,
     content: @Composable FrameWindowScope.() -> Unit,
@@ -369,6 +370,7 @@ fun CustomWindow(
         resizable = resizable,
         onCloseRequest = onCloseRequest,
         onKeyEvent = onKeyEvent,
+        focusable = focusable,
         alwaysOnTop = alwaysOnTop,
     ) {
         val isLight = myColors.isLight

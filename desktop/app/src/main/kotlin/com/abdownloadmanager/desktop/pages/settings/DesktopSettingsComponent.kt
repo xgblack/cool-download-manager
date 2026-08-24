@@ -114,9 +114,17 @@ class DesktopSettingsComponent(
                         )
                     ),
                     ConfigurableGroup(
+                        mainConfigurable = CommonSettings.autoShowDownloadProgressWindow(appSettings),
+                        nestedVisible = appSettings.showDownloadProgressDialog,
                         nestedConfigurable = listOf(
-                            CommonSettings.autoShowDownloadProgressWindow(appSettings),
-                            CommonSettings.showDownloadFinishWindow(appSettings),
+                            DesktopSettings.focusDownloadProgressDialogOnStart(appSettings),
+                        )
+                    ),
+                    ConfigurableGroup(
+                        mainConfigurable = CommonSettings.showDownloadFinishWindow(appSettings),
+                        nestedVisible = appSettings.showDownloadCompletionDialog,
+                        nestedConfigurable = listOf(
+                            DesktopSettings.focusDownloadCompletionDialogOnFinish(appSettings),
                         )
                     ),
                     ConfigurableGroup(

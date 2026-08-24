@@ -65,6 +65,36 @@ object DesktopSettings {
         )
     }
 
+    fun focusDownloadProgressDialogOnStart(appSettings: AppSettingsStorage): BooleanConfigurable {
+        return BooleanConfigurable(
+            title = Res.string.settings_focus_download_progress_dialog_on_start.asStringSource(),
+            description = Res.string.settings_focus_download_progress_dialog_on_start_description.asStringSource(),
+            backedBy = appSettings.focusDownloadProgressDialogOnStart,
+            describe = {
+                if (it) {
+                    Res.string.enabled.asStringSource()
+                } else {
+                    Res.string.disabled.asStringSource()
+                }
+            },
+        )
+    }
+
+    fun focusDownloadCompletionDialogOnFinish(appSettings: AppSettingsStorage): BooleanConfigurable {
+        return BooleanConfigurable(
+            title = Res.string.settings_focus_download_completion_dialog_on_finish.asStringSource(),
+            description = Res.string.settings_focus_download_completion_dialog_on_finish_description.asStringSource(),
+            backedBy = appSettings.focusDownloadCompletionDialogOnFinish,
+            describe = {
+                if (it) {
+                    Res.string.enabled.asStringSource()
+                } else {
+                    Res.string.disabled.asStringSource()
+                }
+            },
+        )
+    }
+
     fun fontConfig(
         fontManager: FontManager,
         scope: CoroutineScope,

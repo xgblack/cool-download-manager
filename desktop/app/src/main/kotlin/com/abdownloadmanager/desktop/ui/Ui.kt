@@ -5,6 +5,8 @@ import androidx.compose.ui.window.application
 import com.abdownloadmanager.desktop.AppArguments
 import com.abdownloadmanager.desktop.AppComponent
 import com.abdownloadmanager.desktop.AppEffects
+import com.abdownloadmanager.resources.icons.ABDMIcons
+import com.abdownloadmanager.resources.icons.AppTrayIcon
 import com.abdownloadmanager.desktop.actions.gotoSettingsAction
 import com.abdownloadmanager.desktop.actions.newDownloadFromClipboardAction
 import com.abdownloadmanager.desktop.actions.requestExitAction
@@ -217,6 +219,7 @@ private fun SystemTray(
         }
         Tray(
             icon = MyIcons.appIcon,
+            macOSMenuBarIcon = ABDMIcons.AppTrayIcon,
             tooltip = AppInfo.displayName,
             primaryAction = { showDownloadList.onClick() },
             menu = menu,

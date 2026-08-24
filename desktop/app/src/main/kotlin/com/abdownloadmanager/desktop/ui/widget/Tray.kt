@@ -3,6 +3,7 @@ package com.abdownloadmanager.desktop.ui.widget
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.vector.ImageVector
 import dev.nucleusframework.composenativetray.menu.api.ComposableTrayMenuScope
 import dev.nucleusframework.composenativetray.tray.api.Tray
 import ir.amirab.util.compose.IconSource
@@ -13,6 +14,7 @@ import ir.amirab.util.platform.asDesktop
 @Composable
 fun Tray(
     icon: IconSource,
+    macOSMenuBarIcon: ImageVector? = null,
     tooltip: String,
     primaryAction: () -> Unit,
     menu: List<MenuItem>
@@ -26,29 +28,37 @@ fun Tray(
         Platform.Desktop.Windows -> false
     }
     if (shouldBeMonochrome) {
-        // for tray icon the library automatically converts the ImageVector to monochrome
-        // we want this behavior only for macOS
-        when (icon) {
-            is IconSource.VectorIconSource -> Tray(
-                icon = icon.value,
+        if (macOSMenuBarIcon != null) {
+            Tray(
+                icon = macOSMenuBarIcon,
                 tooltip = tooltip,
                 primaryAction = primaryAction,
                 menuContent = menuContent,
             )
+        } else {
+            // The library converts ImageVector instances into macOS template images.
+            when (icon) {
+                is IconSource.VectorIconSource -> Tray(
+                    icon = icon.value,
+                    tooltip = tooltip,
+                    primaryAction = primaryAction,
+                    menuContent = menuContent,
+                )
 
-            is IconSource.ThemeAwareVectorIconSource -> Tray(
-                icon = icon.rememberVector(),
-                tooltip = tooltip,
-                primaryAction = primaryAction,
-                menuContent = menuContent,
-            )
+                is IconSource.ThemeAwareVectorIconSource -> Tray(
+                    icon = icon.rememberVector(),
+                    tooltip = tooltip,
+                    primaryAction = primaryAction,
+                    menuContent = menuContent,
+                )
 
-            else -> Tray(
-                icon = icon.rememberPainter(),
-                tooltip = tooltip,
-                primaryAction = primaryAction,
-                menuContent = menuContent,
-            )
+                else -> Tray(
+                    icon = icon.rememberPainter(),
+                    tooltip = tooltip,
+                    primaryAction = primaryAction,
+                    menuContent = menuContent,
+                )
+            }
         }
     } else {
         Tray(

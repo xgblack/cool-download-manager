@@ -5,16 +5,13 @@ import com.abdownloadmanager.desktop.window.custom.CustomWindow
 import com.abdownloadmanager.desktop.window.custom.WindowIcon
 import com.abdownloadmanager.desktop.window.custom.WindowTitle
 import com.abdownloadmanager.shared.util.ui.icon.MyIcons
-import com.abdownloadmanager.shared.util.mvi.HandleEffects
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.FrameWindowScope
 import androidx.compose.ui.window.WindowPosition
-import androidx.compose.ui.window.WindowState
 import androidx.compose.ui.window.rememberWindowState
-import com.abdownloadmanager.shared.singledownloadpage.BaseSingleDownloadComponent
 import com.abdownloadmanager.shared.util.ui.theme.LocalUiScale
 import ir.amirab.downloader.downloaditem.DownloadJobStatus
 import ir.amirab.downloader.monitor.CompletedDownloadItemState
@@ -23,9 +20,13 @@ import ir.amirab.downloader.monitor.ProcessingDownloadItemState
 import ir.amirab.downloader.monitor.statusOrFinished
 import ir.amirab.downloader.utils.ExceptionUtils
 import ir.amirab.util.desktop.screen.applyUiScale
+import ir.amirab.util.desktop.PlatformAppActivator
 import java.awt.Dimension
+import java.awt.EventQueue
 import java.awt.Taskbar
 import java.awt.Window
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 
 @Composable
 private fun getDownloadTitle(itemState: IDownloadItemState): String {
@@ -60,152 +61,128 @@ fun ShowDownloadDialogs(component: DesktopDownloadDialogManager) {
 @Composable
 private fun ShowDownloadDialog(singleDownloadComponent: DesktopSingleDownloadComponent) {
     val itemState by singleDownloadComponent.itemStateFlow.collectAsState()
-    itemState?.let {
-        when (it) {
-            is CompletedDownloadItemState -> {
-                CompletedWindow(
-                    singleDownloadComponent,
-                    it,
-                )
-            }
-
-            is ProcessingDownloadItemState -> {
-                ProgressWindow(
-                    singleDownloadComponent = singleDownloadComponent,
-                    itemState = it,
-                )
-            }
-        }
-    }
+    itemState?.let { DownloadWindow(singleDownloadComponent, it) }
 }
 
-
 @Composable
-private fun FrameWindowScope.CommonContent(
+private fun DownloadWindow(
     singleDownloadComponent: DesktopSingleDownloadComponent,
-    state: WindowState,
     itemState: IDownloadItemState,
 ) {
-    HandleEffects(singleDownloadComponent) {
-        when (it) {
-            is BaseSingleDownloadComponent.Effects.Platform -> {
-                it as DesktopSingleDownloadComponent.Effects
-                when (it) {
-                    DesktopSingleDownloadComponent.Effects.BringToFront -> {
-                        state.isMinimized = false
-                        window.toFront()
-                    }
-                }
-            }
-        }
-    }
-    WindowTitle(getDownloadTitle(itemState))
-    WindowIcon(MyIcons.appIcon)
-    UpdateTaskBar(window, itemState)
-}
-
-@Composable
-private fun CompletedWindow(
-    singleDownloadComponent: DesktopSingleDownloadComponent,
-    itemState: CompletedDownloadItemState,
-) {
-    val onRequestClose = {
-        singleDownloadComponent.close()
-    }
-    val defaultHeight = 160f
-    val defaultWidth = 450f
     val uiScale = LocalUiScale.current
-    val state = rememberWindowState(
-        size = DpSize(
-            height = defaultHeight.dp,
-            width = defaultWidth.dp
-        ).applyUiScale(uiScale),
-        position = WindowPosition(Alignment.Center)
-    )
-    CustomWindow(
-        state = state,
-        onRequestToggleMaximize = null,
-        resizable = false,
-        alwaysOnTop = true,
-        onCloseRequest = onRequestClose,
-    ) {
-        CommonContent(
-            singleDownloadComponent = singleDownloadComponent,
-            state = state,
-            itemState = itemState,
-        )
-        LaunchedEffect(Unit) {
-            window.minimumSize = Dimension(defaultWidth.toInt(), defaultHeight.toInt())
-        }
-        var h = defaultHeight
-        var w = defaultWidth
-        LaunchedEffect(w, h) {
-            state.size = DpSize(
-                width = w.dp,
-                height = h.dp
-            ).applyUiScale(uiScale)
-        }
-        CompletedDownloadPage(
-            singleDownloadComponent,
-            itemState,
-        )
-    }
-}
-
-@Composable
-private fun ProgressWindow(
-    singleDownloadComponent: DesktopSingleDownloadComponent,
-    itemState: ProcessingDownloadItemState,
-) {
-    val onRequestClose = {
-        singleDownloadComponent.close()
-    }
-    val uiScale = LocalUiScale.current
-    val defaultHeight = 290f.applyUiScale(uiScale)
-    val defaultWidth = 450f.applyUiScale(uiScale)
-
     val showPartInfo by singleDownloadComponent.showPartInfo.collectAsState()
     val singleDownloadPageSizing = remember(showPartInfo) { SingleProgressDownloadPageSizing() }
-    var h = defaultHeight
-    var w = defaultWidth
-    if (showPartInfo) {
-        h += singleDownloadPageSizing.partInfoHeight.value
-            .applyUiScale(uiScale)
+    val baseSize = when (itemState) {
+        is CompletedDownloadItemState -> DpSize(width = 450.dp, height = 160.dp)
+        is ProcessingDownloadItemState -> DpSize(width = 450.dp, height = 290.dp)
+    }.applyUiScale(uiScale)
+    val targetSize = when (itemState) {
+        is CompletedDownloadItemState -> baseSize
+        is ProcessingDownloadItemState -> {
+            val partInfoHeight = if (showPartInfo) {
+                singleDownloadPageSizing.partInfoHeight.value.applyUiScale(uiScale).dp
+            } else {
+                0.dp
+            }
+            baseSize.copy(height = baseSize.height + partInfoHeight)
+        }
     }
     val state = rememberWindowState(
-        height = h.dp,
-        width = w.dp,
+        size = targetSize,
         position = WindowPosition(Alignment.Center)
     )
+    val windowFocusRequestCount by singleDownloadComponent.windowFocusRequestCount.collectAsState()
+    var focusable by remember { mutableStateOf(windowFocusRequestCount > 0) }
     CustomWindow(
         state = state,
         onRequestToggleMaximize = null,
         resizable = false,
-        onCloseRequest = onRequestClose,
+        focusable = focusable,
+        onCloseRequest = singleDownloadComponent::close,
     ) {
-        CommonContent(
-            singleDownloadComponent = singleDownloadComponent,
-            state = state,
-            itemState = itemState,
+        HandleWindowFocusRequests(
+            requestCount = windowFocusRequestCount,
+            onRestoreFocusable = { focusable = true },
+            onRequestFocus = {
+                state.isMinimized = false
+                requestWindowFocus(window)
+            },
         )
-        LaunchedEffect(Unit) {
-            window.minimumSize = Dimension(defaultWidth.toInt(), defaultHeight.toInt())
-        }
-        LaunchedEffect(w, h) {
-            state.size = DpSize(
-                width = w.dp,
-                height = h.dp
+        WindowTitle(getDownloadTitle(itemState))
+        WindowIcon(MyIcons.appIcon)
+        UpdateTaskBar(window, itemState)
+        LaunchedEffect(baseSize, targetSize) {
+            window.minimumSize = Dimension(
+                baseSize.width.value.toInt(),
+                baseSize.height.value.toInt(),
             )
+            state.size = targetSize
         }
-        CompositionLocalProvider(
-            LocalSingleDownloadPageSizing provides singleDownloadPageSizing
-        ) {
-            ProgressDownloadPage(
+        when (itemState) {
+            is CompletedDownloadItemState -> CompletedDownloadPage(
                 singleDownloadComponent,
                 itemState,
             )
+
+            is ProcessingDownloadItemState -> CompositionLocalProvider(
+                LocalSingleDownloadPageSizing provides singleDownloadPageSizing
+            ) {
+                ProgressDownloadPage(
+                    singleDownloadComponent,
+                    itemState,
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun FrameWindowScope.HandleWindowFocusRequests(
+    requestCount: Long,
+    onRestoreFocusable: () -> Unit,
+    onRequestFocus: () -> Unit,
+) {
+    var windowShown by remember { mutableStateOf(false) }
+    var handledRequestCount by remember { mutableLongStateOf(0L) }
+    DisposableEffect(window) {
+        fun handleWindowShown() {
+            EventQueue.invokeLater {
+                if (!window.isShowing) return@invokeLater
+                window.focusableWindowState = true
+                onRestoreFocusable()
+                windowShown = true
+            }
+        }
+
+        val listener = object : WindowAdapter() {
+            override fun windowOpened(event: WindowEvent) {
+                handleWindowShown()
+            }
+        }
+        window.addWindowListener(listener)
+        if (window.isShowing) {
+            handleWindowShown()
+        }
+        onDispose {
+            window.removeWindowListener(listener)
+        }
+    }
+
+    LaunchedEffect(requestCount, windowShown) {
+        if (!windowShown || requestCount <= handledRequestCount) return@LaunchedEffect
+        EventQueue.invokeLater {
+            if (!window.isShowing || requestCount <= handledRequestCount) return@invokeLater
+            onRequestFocus()
+            handledRequestCount = requestCount
+        }
+    }
+}
+
+private fun requestWindowFocus(window: Window) {
+    window.focusableWindowState = true
+    PlatformAppActivator.active()
+    window.toFront()
+    window.requestFocus()
 }
 
 @Composable
