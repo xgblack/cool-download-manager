@@ -1,0 +1,820 @@
+import Foundation
+
+public actor DownloadService {
+    private let store: DownloadStore
+    private let downloader: HTTPDownloader
+    private let hlsDownloader: HLSDownloader
+    private let defaultFolder: URL
+    private let schedulerConfiguration: DownloadSchedulerConfiguration
+    private let retryPolicy: DownloadRetryPolicy
+    private var records: [DownloadID: DownloadRecord] = [:]
+    private var tasks: [DownloadID: Task<Void, Never>] = [:]
+    private var activeIDs: Set<DownloadID> = []
+    private var queuedIDs: [DownloadID] = []
+    private var subscribers: [UUID: AsyncStream<DownloadEvent>.Continuation] = [:]
+    private var shuttingDown = false
+
+    public init(
+        store: DownloadStore,
+        downloader: HTTPDownloader = HTTPDownloader(),
+        hlsDownloader: HLSDownloader? = nil,
+        defaultFolder: URL,
+        schedulerConfiguration: DownloadSchedulerConfiguration = .init(),
+        retryPolicy: DownloadRetryPolicy = .init()
+    ) {
+        self.store = store
+        self.downloader = downloader
+        self.hlsDownloader = hlsDownloader ?? HLSDownloader()
+        self.defaultFolder = defaultFolder.standardizedFileURL
+        self.schedulerConfiguration = schedulerConfiguration
+        self.retryPolicy = retryPolicy
+    }
+
+    public func boot() async throws {
+        shuttingDown = false
+        var loaded = Dictionary(
+            uniqueKeysWithValues: try await store.load().map { ($0.id, $0) }
+        )
+        // A process cannot safely continue a live task after a restart. Keep
+        // its part file and expose it as resumable instead of leaving a stale
+        // "downloading" state that has no associated task.
+        for id in loaded.keys {
+            guard var record = loaded[id],
+                  record.status == .downloading || record.status == .preparing || record.status == .retrying
+            else { continue }
+            record.status = .paused
+            record.updatedAt = Date()
+            record.revision += 1
+            loaded[id] = record
+            try await store.save(record)
+        }
+        records = loaded
+    }
+
+    /// Stop scheduling and persist resumable states before the process exits.
+    /// The store lock is released when the service and store are deallocated.
+    public func shutdown() async {
+        guard !shuttingDown else { return }
+        shuttingDown = true
+
+        // Queued work has no task that can persist its state after cancellation.
+        // Mark it paused first, then cancel active tasks so their cancellation
+        // handlers preserve the current part file and progress.
+        let queued = Set(queuedIDs)
+        queuedIDs.removeAll()
+        for id in queued {
+            guard var record = records[id], record.status == .preparing else { continue }
+            record.status = .paused
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            do {
+                try await store.save(record)
+            } catch {
+                fputs("CoolDownloadCore: failed to persist queued state for \(id): \(error)\n", stderr)
+            }
+            emit(.updated(record))
+        }
+
+        let taskIDs = Array(tasks.keys)
+        for id in taskIDs {
+            if let record = records[id], record.status == .retrying {
+                var paused = record
+                paused.status = .paused
+                paused.error = nil
+                paused.updatedAt = Date()
+                paused.revision += 1
+                records[id] = paused
+                do {
+                    try await store.save(paused)
+                } catch {
+                    fputs("CoolDownloadCore: failed to persist retry state for \(id): \(error)\n", stderr)
+                }
+                emit(.updated(paused))
+            }
+        }
+
+        let runningTasks = Array(tasks.values)
+        runningTasks.forEach { $0.cancel() }
+        for task in runningTasks {
+            await task.value
+        }
+        tasks.removeAll()
+        activeIDs.removeAll()
+        subscribers.values.forEach { $0.finish() }
+        subscribers.removeAll()
+    }
+
+    public func events() -> AsyncStream<DownloadEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            subscribers[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeSubscriber(id) }
+            }
+        }
+    }
+
+    public func snapshot() -> DownloadSnapshot {
+        DownloadSnapshot(downloads: records.values.sorted { $0.id < $1.id })
+    }
+
+    public func add(_ request: AddDownloadRequest) async throws -> DownloadID {
+        guard let url = URL(string: request.source.link),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            throw DownloadCoreError.invalidURL(request.source.link)
+        }
+
+        let folderURL = URL(fileURLWithPath: request.folder ?? defaultFolder.path, isDirectory: true)
+            .standardizedFileURL
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        guard FileManager.default.isWritableFile(atPath: folderURL.path) else {
+            throw DownloadCoreError.permissionDenied(folderURL.path)
+        }
+
+        let candidateID = await store.nextID()
+        let candidateName = request.name
+            ?? request.source.suggestedName
+            ?? url.lastPathComponent.nilIfEmpty
+            ?? "download-\(candidateID)"
+        let name = try validatedName(candidateName)
+        let destination = folderURL.appendingPathComponent(name)
+        if records.values.contains(where: { $0.destinationURL.standardizedFileURL == destination }) {
+            throw DownloadCoreError.duplicateDestination(destination.path)
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            throw DownloadCoreError.duplicateDestination(destination.path)
+        }
+
+        let id = await store.nextID()
+        let now = Date()
+        let record = DownloadRecord(
+            id: id,
+            source: request.source,
+            folder: folderURL.path,
+            name: name,
+            queueID: request.queueID,
+            categoryID: request.categoryID,
+            createdAt: now,
+            updatedAt: now
+        )
+        records[id] = record
+        try await store.save(record)
+        emit(.created(record))
+
+        if request.start {
+            try await start(id: id)
+        }
+        return id
+    }
+
+    public func start(id: DownloadID) async throws {
+        guard !shuttingDown else {
+            throw DownloadCoreError.cancelled
+        }
+        guard var record = records[id] else {
+            throw DownloadCoreError.notFound(id)
+        }
+        guard record.status != .completed, tasks[id] == nil else {
+            if record.status == .completed {
+                throw DownloadCoreError.invalidState(id, record.status)
+            }
+            return
+        }
+
+        record.status = .preparing
+        record.error = nil
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        try await store.save(record)
+        emit(.updated(record))
+
+        if activeIDs.count < schedulerConfiguration.maxConcurrentDownloads {
+            launch(id: id)
+        } else if !queuedIDs.contains(id) {
+            queuedIDs.append(id)
+        }
+    }
+
+    public func resume(ids: [DownloadID]) async throws {
+        for id in ids {
+            try await start(id: id)
+        }
+    }
+
+    public func startQueue(id queueID: DownloadID) async throws {
+        let ids = records.values
+            .filter { $0.queueID == queueID && $0.status != .completed }
+            .sorted { $0.id < $1.id }
+            .map(\.id)
+        for id in ids {
+            try await start(id: id)
+        }
+    }
+
+    public func pause(ids: [DownloadID]) async throws {
+        for id in ids {
+            guard var record = records[id] else {
+                throw DownloadCoreError.notFound(id)
+            }
+            guard record.status != .completed else {
+                throw DownloadCoreError.invalidState(id, record.status)
+            }
+            queuedIDs.removeAll { $0 == id }
+            record.status = .paused
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+            if let task = tasks[id] {
+                task.cancel()
+                await task.value
+            }
+        }
+    }
+
+    public func retry(ids: [DownloadID]) async throws {
+        for id in ids {
+            guard var record = records[id] else {
+                throw DownloadCoreError.notFound(id)
+            }
+            if let task = tasks[id] {
+                task.cancel()
+                await task.value
+            }
+            record.status = .added
+            record.error = nil
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+            try await start(id: id)
+        }
+    }
+
+    public func remove(ids: [DownloadID], removeFiles: Bool) async throws {
+        for id in ids {
+            guard let record = records[id] else {
+                throw DownloadCoreError.notFound(id)
+            }
+            if let task = tasks[id] {
+                task.cancel()
+                await task.value
+            }
+            queuedIDs.removeAll { $0 == id }
+            tasks[id] = nil
+            activeIDs.remove(id)
+            if removeFiles {
+                if FileManager.default.fileExists(atPath: record.destinationURL.path) {
+                    try FileManager.default.removeItem(at: record.destinationURL)
+                }
+                if FileManager.default.fileExists(atPath: record.incompleteURL.path) {
+                    try FileManager.default.removeItem(at: record.incompleteURL)
+                }
+            }
+            records[id] = nil
+            try await store.remove(id: id)
+            emit(.removed(id: id))
+        }
+    }
+
+    private func launch(id: DownloadID) {
+        guard tasks[id] == nil, records[id] != nil else { return }
+        activeIDs.insert(id)
+        tasks[id] = Task { [weak self] in
+            await self?.runAndRelease(id: id)
+        }
+    }
+
+    private func runAndRelease(id: DownloadID) async {
+        await run(id: id)
+        taskDidFinish(id: id)
+    }
+
+    private func taskDidFinish(id: DownloadID) {
+        tasks[id] = nil
+        activeIDs.remove(id)
+        if !shuttingDown {
+            launchQueuedDownloads()
+        }
+    }
+
+    private func launchQueuedDownloads() {
+        while activeIDs.count < schedulerConfiguration.maxConcurrentDownloads,
+              !queuedIDs.isEmpty {
+            let id = queuedIDs.removeFirst()
+            guard let record = records[id], record.status == .preparing else {
+                continue
+            }
+            launch(id: id)
+        }
+    }
+
+    private func run(id: DownloadID) async {
+        guard var record = records[id] else {
+            return
+        }
+
+        do {
+            record.status = .downloading
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+
+            let writer = try PartFileWriter(record: record)
+            let diskLength: Int64
+            if record.source.kind == .http, !record.parts.isEmpty {
+                diskLength = try contiguousPartBytes(record.parts)
+            } else {
+                diskLength = try await writer.length()
+            }
+            if record.downloadedBytes != diskLength {
+                record.downloadedBytes = diskLength
+                record.updatedAt = Date()
+                record.revision += 1
+                records[id] = record
+                try await store.save(record)
+                emit(.updated(record))
+            }
+
+            let (totalBytes, reportedTotal, etag, lastModified) = try await downloadWithRetry(
+                id: id,
+                source: record.source,
+                writer: writer
+            )
+            try Task.checkCancellation()
+
+            let finalLength = try await writer.length()
+            if finalLength < totalBytes {
+                throw DownloadCoreError.responseMismatch(
+                    "received \(finalLength) bytes, expected \(totalBytes)"
+                )
+            }
+            try await writer.finish()
+
+            guard var completed = records[id] else {
+                return
+            }
+            completed.status = .completed
+            completed.downloadedBytes = finalLength
+            completed.totalBytes = reportedTotal ?? finalLength
+            completed.etag = etag ?? completed.etag
+            completed.lastModified = lastModified ?? completed.lastModified
+            completed.parts = completed.parts.map { part in
+                var part = part
+                part.completed = true
+                return part
+            }
+            completed.error = nil
+            completed.updatedAt = Date()
+            completed.revision += 1
+            records[id] = completed
+            try await store.save(completed)
+            emit(.updated(completed))
+        } catch is CancellationError {
+            // pause() persists the paused state before cancelling the task.
+            if let current = records[id], current.status == .downloading || current.status == .preparing {
+                var paused = current
+                paused.status = .paused
+                paused.updatedAt = Date()
+                paused.revision += 1
+                records[id] = paused
+                do {
+                    try await store.save(paused)
+                } catch {
+                    fputs("CoolDownloadCore: failed to persist paused state for \(id): \(error)\n", stderr)
+                }
+                emit(.updated(paused))
+            }
+        } catch {
+            if let current = records[id], current.status != .paused {
+                var failed = current
+                failed.status = .failed
+                failed.error = error.localizedDescription
+                failed.updatedAt = Date()
+                failed.revision += 1
+                records[id] = failed
+                do {
+                    try await store.save(failed)
+                } catch {
+                    fputs("CoolDownloadCore: failed to persist failed state for \(id): \(error)\n", stderr)
+                }
+                emit(.updated(failed))
+            }
+        }
+    }
+
+    private func downloadWithRetry(
+        id: DownloadID,
+        source: DownloadSource,
+        writer: PartFileWriter
+    ) async throws -> (
+        totalBytes: Int64,
+        reportedTotal: Int64?,
+        etag: String?,
+        lastModified: String?
+    ) {
+        var attempt = 0
+        while true {
+            attempt += 1
+            do {
+                if attempt > 1 {
+                    guard var retrying = records[id] else {
+                        throw DownloadCoreError.notFound(id)
+                    }
+                    retrying.status = .downloading
+                    retrying.error = nil
+                    retrying.updatedAt = Date()
+                    retrying.revision += 1
+                    records[id] = retrying
+                    try await store.save(retrying)
+                    emit(.updated(retrying))
+                }
+
+                if source.kind == .hls {
+                    let completedSegments = Set(
+                        (records[id]?.parts ?? []).filter(\.completed).map(\.id)
+                    )
+                    let result = try await hlsDownloader.download(
+                        source: source,
+                        writer: writer,
+                        completedSegments: completedSegments,
+                        completedPartMetadata: records[id]?.parts ?? [],
+                        progress: { [weak self] bytes, segmentIndex, segmentCount, segmentBytes in
+                            await self?.persistHLSProgress(
+                                id: id,
+                                bytes: bytes,
+                                segmentIndex: segmentIndex,
+                                segmentCount: segmentCount,
+                                segmentBytes: segmentBytes
+                            )
+                        }
+                    )
+                    return (result.totalBytes, result.totalBytes, nil, nil)
+                }
+
+                let current = records[id]
+                let result: HTTPDownloadResult
+                if let current,
+                   current.source.kind == .http,
+                   schedulerConfiguration.maxConnectionsPerDownload > 1 || !current.parts.isEmpty {
+                    result = try await downloadHTTPWithRanges(
+                        id: id,
+                        source: source,
+                        writer: writer
+                    )
+                } else {
+                    result = try await downloader.download(
+                        source: source,
+                        offset: try await writer.length(),
+                        writer: writer,
+                        progress: { [weak self] bytes in
+                            await self?.persistProgress(id: id, bytes: bytes)
+                        },
+                        expectedETag: current?.etag,
+                        expectedLastModified: current?.lastModified
+                    )
+                }
+                let totalBytes: Int64
+                if let responseTotal = result.totalBytes {
+                    totalBytes = responseTotal
+                } else {
+                    totalBytes = try await writer.length()
+                }
+                if let expectedTotal = current?.totalBytes,
+                   let responseTotal = result.totalBytes,
+                   expectedTotal != responseTotal {
+                    throw DownloadCoreError.resourceChanged
+                }
+                return (totalBytes, result.totalBytes, result.etag, result.lastModified)
+            } catch {
+                guard !Task.isCancelled,
+                      attempt < retryPolicy.maxAttempts,
+                      isRetryable(error) else {
+                    throw error
+                }
+                if var record = records[id] {
+                    record.status = .retrying
+                    record.error = error.localizedDescription
+                    record.updatedAt = Date()
+                    record.revision += 1
+                    records[id] = record
+                    try await store.save(record)
+                    emit(.updated(record))
+                }
+                try await Task.sleep(for: retryPolicy.delay)
+            }
+        }
+    }
+
+    private func isRetryable(_ error: Error) -> Bool {
+        if let error = error as? DownloadCoreError {
+            guard case .httpStatus(let status) = error else { return false }
+            return status == 408 || status == 425 || status == 429 || status >= 500
+        }
+        guard let error = error as? URLError else { return false }
+        switch error.code {
+        case .timedOut, .cannotConnectToHost, .networkConnectionLost,
+             .notConnectedToInternet, .dnsLookupFailed, .cannotFindHost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func downloadHTTPWithRanges(
+        id: DownloadID,
+        source: DownloadSource,
+        writer: PartFileWriter
+    ) async throws -> HTTPDownloadResult {
+        guard var record = records[id] else {
+            throw DownloadCoreError.notFound(id)
+        }
+        let metadata = try await downloader.probe(source: source)
+        guard let totalBytes = metadata.totalBytes, totalBytes >= 0 else {
+            if record.parts.isEmpty {
+                return try await downloader.download(
+                    source: source,
+                    offset: try await writer.length(),
+                    writer: writer,
+                    progress: { [weak self] bytes in
+                        await self?.persistProgress(id: id, bytes: bytes)
+                    },
+                    expectedETag: record.etag,
+                    expectedLastModified: record.lastModified
+                )
+            }
+            throw DownloadCoreError.responseMismatch("parallel download requires a known resource length")
+        }
+        if let expectedTotal = record.totalBytes, expectedTotal != totalBytes {
+            throw DownloadCoreError.resourceChanged
+        }
+        if let expectedETag = record.etag, metadata.etag != expectedETag {
+            throw DownloadCoreError.resourceChanged
+        }
+        if record.etag == nil,
+           let expectedLastModified = record.lastModified,
+           metadata.lastModified != expectedLastModified {
+            throw DownloadCoreError.resourceChanged
+        }
+        guard metadata.supportsRanges else {
+            guard record.parts.isEmpty else {
+                throw DownloadCoreError.resumeNotSupported
+            }
+            return try await downloader.download(
+                source: source,
+                offset: try await writer.length(),
+                writer: writer,
+                progress: { [weak self] bytes in
+                    await self?.persistProgress(id: id, bytes: bytes)
+                },
+                expectedETag: record.etag,
+                expectedLastModified: record.lastModified
+            )
+        }
+
+        let parts: [DownloadPart]
+        if record.parts.isEmpty {
+            let existingLength = try await writer.length()
+            guard existingLength <= totalBytes else {
+                throw DownloadCoreError.resourceChanged
+            }
+            parts = makeHTTPParts(
+                totalBytes: totalBytes,
+                existingLength: existingLength,
+                count: schedulerConfiguration.maxConnectionsPerDownload
+            )
+        } else {
+            parts = try validateHTTPParts(record.parts, totalBytes: totalBytes)
+        }
+
+        record.totalBytes = totalBytes
+        record.etag = metadata.etag ?? record.etag
+        record.lastModified = metadata.lastModified ?? record.lastModified
+        record.parts = parts
+        record.downloadedBytes = try contiguousPartBytes(parts)
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        try await store.save(record)
+        emit(.updated(record))
+
+        let expectedETag = record.etag
+        let expectedLastModified = record.lastModified
+        var results: [HTTPDownloadResult] = []
+        try await withThrowingTaskGroup(of: HTTPDownloadResult.self) { group in
+            for part in parts where !part.completed {
+                let start = part.from + part.downloaded
+                guard let end = part.to, start <= end else { continue }
+                group.addTask { [downloader, writer] in
+                    try await downloader.downloadRange(
+                        source: source,
+                        start: start,
+                        end: end,
+                        writer: writer,
+                        expectedETag: expectedETag,
+                        expectedLastModified: expectedLastModified,
+                        progress: { bytes in
+                            await self.persistPartProgress(
+                                id: id,
+                                partID: part.id,
+                                downloaded: part.downloaded + bytes
+                            )
+                        }
+                    )
+                }
+            }
+            for try await result in group {
+                results.append(result)
+            }
+        }
+
+        guard let completed = records[id],
+              completed.parts.allSatisfy(\.completed),
+              completed.downloadedBytes == totalBytes else {
+            throw DownloadCoreError.responseMismatch("parallel ranges did not cover the complete file")
+        }
+        return HTTPDownloadResult(
+            statusCode: 206,
+            startOffset: 0,
+            totalBytes: totalBytes,
+            bytesWritten: totalBytes,
+            etag: results.compactMap(\.etag).first ?? metadata.etag,
+            lastModified: results.compactMap(\.lastModified).first ?? metadata.lastModified
+        )
+    }
+
+    private func makeHTTPParts(
+        totalBytes: Int64,
+        existingLength: Int64,
+        count: Int
+    ) -> [DownloadPart] {
+        guard totalBytes > 0 else { return [] }
+        let partCount = min(max(1, count), Int(totalBytes))
+        let chunkSize = (totalBytes + Int64(partCount) - 1) / Int64(partCount)
+        var parts: [DownloadPart] = []
+        for index in 0..<partCount {
+            let from = Int64(index) * chunkSize
+            guard from < totalBytes else { break }
+            let to = min(totalBytes - 1, from + chunkSize - 1)
+            let length = to - from + 1
+            let downloaded = max(0, min(length, existingLength - from))
+            parts.append(DownloadPart(
+                id: index,
+                from: from,
+                to: to,
+                downloaded: downloaded,
+                completed: downloaded == length
+            ))
+        }
+        return parts
+    }
+
+    private func validateHTTPParts(
+        _ parts: [DownloadPart],
+        totalBytes: Int64
+    ) throws -> [DownloadPart] {
+        let sorted = parts.sorted { $0.from < $1.from }
+        guard !sorted.isEmpty, totalBytes > 0 else {
+            throw DownloadCoreError.responseMismatch("HTTP range metadata is empty")
+        }
+        var expectedFrom: Int64 = 0
+        for part in sorted {
+            guard part.from == expectedFrom,
+                  let to = part.to,
+                  to >= part.from,
+                  part.downloaded >= 0,
+                  part.downloaded <= to - part.from + 1 else {
+                throw DownloadCoreError.responseMismatch("HTTP range metadata is not contiguous")
+            }
+            expectedFrom = to + 1
+        }
+        guard expectedFrom == totalBytes else {
+            throw DownloadCoreError.responseMismatch("HTTP range metadata does not cover the resource")
+        }
+        return sorted.map { part in
+            var normalized = part
+            normalized.completed = normalized.downloaded == normalized.to! - normalized.from + 1
+            return normalized
+        }
+    }
+
+    private func contiguousPartBytes(_ parts: [DownloadPart]) throws -> Int64 {
+        var total: Int64 = 0
+        for part in parts {
+            guard part.downloaded >= 0 else {
+                throw DownloadCoreError.responseMismatch("negative downloaded range length")
+            }
+            total += part.downloaded
+        }
+        return total
+    }
+
+    private func persistPartProgress(
+        id: DownloadID,
+        partID: Int,
+        downloaded: Int64
+    ) async {
+        guard var record = records[id], record.status == .downloading,
+              let index = record.parts.firstIndex(where: { $0.id == partID }),
+              let to = record.parts[index].to else { return }
+        let maximum = to - record.parts[index].from + 1
+        record.parts[index].downloaded = min(max(0, downloaded), maximum)
+        record.parts[index].completed = record.parts[index].downloaded == maximum
+        record.downloadedBytes = record.parts.reduce(0) { $0 + $1.downloaded }
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        do {
+            try await store.save(record)
+        } catch {
+            fputs("CoolDownloadCore: failed to persist range progress for \(id): \(error)\n", stderr)
+        }
+        emit(.updated(record))
+    }
+
+    private func persistProgress(id: DownloadID, bytes: Int64) async {
+        guard var record = records[id], record.status == .downloading else {
+            return
+        }
+        record.downloadedBytes = bytes
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        do {
+            try await store.save(record)
+        } catch {
+            fputs("CoolDownloadCore: failed to persist progress for \(id): \(error)\n", stderr)
+        }
+        emit(.updated(record))
+    }
+
+    private func persistHLSProgress(
+        id: DownloadID,
+        bytes: Int64,
+        segmentIndex: Int,
+        segmentCount: Int,
+        segmentBytes: Int64
+    ) async {
+        guard var record = records[id], record.status == .downloading else {
+            return
+        }
+        record.downloadedBytes = bytes
+        let segmentStart = max(0, bytes - segmentBytes)
+        if !record.parts.contains(where: { $0.id == segmentIndex }) {
+            record.parts.append(DownloadPart(
+                id: segmentIndex,
+                from: segmentStart,
+                to: max(segmentStart, bytes - 1),
+                downloaded: segmentBytes,
+                completed: true
+            ))
+        } else if let index = record.parts.firstIndex(where: { $0.id == segmentIndex }) {
+            record.parts[index].from = segmentStart
+            record.parts[index].to = max(segmentStart, bytes - 1)
+            record.parts[index].downloaded = segmentBytes
+            record.parts[index].completed = true
+        }
+        record.parts.sort { $0.id < $1.id }
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        do {
+            try await store.save(record)
+        } catch {
+            fputs("CoolDownloadCore: failed to persist HLS progress for \(id): \(error)\n", stderr)
+        }
+        emit(.updated(record))
+    }
+
+    private func emit(_ event: DownloadEvent) {
+        subscribers.values.forEach { $0.yield(event) }
+    }
+
+    private func removeSubscriber(_ id: UUID) {
+        subscribers[id] = nil
+    }
+
+    private func validatedName(_ name: String) throws -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != ".",
+              trimmed != "..",
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              trimmed.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F }) else {
+            throw DownloadCoreError.invalidName(name)
+        }
+        return trimmed
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}

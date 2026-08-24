@@ -1,13 +1,22 @@
-# Ignore Gradle project-specific cache directory
-.gradle
-.kotlin
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
 
-# Ignore Gradle build output directory
-build
-.idea
-local.properties
+# Xcode and local IDE state
+DerivedData/
+.idea/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
 
-# Ignore android keystores
+# Local build and packaging output
+build/
+
+# macOS metadata
+.DS_Store
+
+# Signing material
 *.jks
 
-.helloagents
+.helloagents/
