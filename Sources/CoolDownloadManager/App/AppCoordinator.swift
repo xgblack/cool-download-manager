@@ -19,6 +19,8 @@ final class AppCoordinator: NSObject, ObservableObject {
     let mainViewState = MainViewState()
     private var menuBarController: MenuBarController?
     private weak var mainWindow: NSWindow?
+    private var openMainWindowAction: (() -> Void)?
+    private var focusMainWindowWhenRegistered = false
 
     init(store: AppStore) {
         self.store = store
@@ -46,19 +48,51 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
     }
 
-    func registerMainWindow(_ window: NSWindow) {
+    func configureMainWindowOpener(_ action: @escaping () -> Void) {
+        openMainWindowAction = action
+    }
+
+    func registerMainWindow(_ window: NSWindow?) {
+        guard let window else { return }
         mainWindow = window
         window.title = "下载管理器"
         window.minSize = NSSize(width: 900, height: 560)
+        if focusMainWindowWhenRegistered {
+            focusMainWindowWhenRegistered = false
+            focusMainWindow(window)
+        }
     }
 
     func showMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        let window = mainWindow ?? NSApp.windows.first { window in
-            window.title == "下载管理器" || window.styleMask.contains(.titled)
+        guard let window = resolvedMainWindow() else {
+            // WindowGroup can release its NSWindow after the user closes it.
+            // Ask SwiftUI to create a new one, then focus it after attachment.
+            focusMainWindowWhenRegistered = true
+            openMainWindowAction?()
+            DispatchQueue.main.async { [weak self] in
+                self?.focusMainWindow()
+            }
+            return
         }
-        mainWindow = window
-        window?.makeKeyAndOrderFront(nil)
+        focusMainWindow(window)
+    }
+
+    private func resolvedMainWindow() -> NSWindow? {
+        if let mainWindow, mainWindow.windowNumber != 0 {
+            return mainWindow
+        }
+        mainWindow = nil
+        return NSApp.windows.first { window in
+            window.title == "下载管理器"
+                || (window.styleMask.contains(.titled) && window.contentView != nil)
+        }
+    }
+
+    private func focusMainWindow(_ window: NSWindow? = nil) {
+        guard let window = window ?? resolvedMainWindow() else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     func presentAddDownload(fromClipboard: Bool = false) {

@@ -37,8 +37,9 @@ public enum DownloadQueueEvent: Sendable, Equatable {
 }
 
 /// Queue scheduling values are kept in the same shape as the historical
-/// Kotlin JSON. Times use a stable HH:mm string and days use ISO weekday
-/// numbers (1 = Monday ... 7 = Sunday).
+/// Kotlin JSON. Times use a stable HH:mm string. Older Kotlin files encode
+/// days as `DayOfWeek` names while newer Swift files use ISO weekday numbers
+/// (1 = Monday ... 7 = Sunday), so the decoder accepts both forms.
 public struct QueueSchedule: Codable, Equatable, Sendable {
     public var daysOfWeek: Set<Int>
     public var startTime: String
@@ -93,8 +94,33 @@ public struct QueueSchedule: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedDays = try container.decodeIfPresent([Int].self, forKey: .daysOfWeek)
-            ?? Array(Set(1...7)).sorted()
+        let decodedDays: [Int]
+        if let numericDays = try? container.decode([Int].self, forKey: .daysOfWeek) {
+            decodedDays = numericDays
+        } else if let namedDays = try? container.decode([String].self, forKey: .daysOfWeek) {
+            decodedDays = try namedDays.map { name in
+                guard let day = Self.isoWeekday(for: name) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .daysOfWeek,
+                        in: container,
+                        debugDescription: "Unknown weekday name: \(name)"
+                    )
+                }
+                return day
+            }
+        } else if !container.contains(.daysOfWeek) {
+            decodedDays = Array(Set(1...7)).sorted()
+        } else if try container.decodeNil(forKey: .daysOfWeek) {
+            decodedDays = Array(Set(1...7)).sorted()
+        } else {
+            throw DecodingError.typeMismatch(
+                [Int].self,
+                DecodingError.Context(
+                    codingPath: container.codingPath + [CodingKeys.daysOfWeek],
+                    debugDescription: "daysOfWeek must be an array of ISO weekday numbers or Kotlin weekday names"
+                )
+            )
+        }
         self.init(
             daysOfWeek: Set(decodedDays.filter { (1...7).contains($0) }),
             startTime: try container.decodeIfPresent(String.self, forKey: .startTime) ?? "02:30",
@@ -104,6 +130,23 @@ public struct QueueSchedule: Codable, Equatable, Sendable {
         )
         if daysOfWeek.isEmpty {
             daysOfWeek = Set(1...7)
+        }
+    }
+
+    private static func isoWeekday(for value: String) -> Int? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if let number = Int(normalized), (1...7).contains(number) {
+            return number
+        }
+        switch normalized {
+        case "MONDAY": return 1
+        case "TUESDAY": return 2
+        case "WEDNESDAY": return 3
+        case "THURSDAY": return 4
+        case "FRIDAY": return 5
+        case "SATURDAY": return 6
+        case "SUNDAY": return 7
+        default: return nil
         }
     }
 

@@ -1,8 +1,10 @@
 import SwiftUI
 import AppKit
 
+@MainActor
 final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
     var terminationHandler: (() async -> Void)?
+    weak var coordinator: AppCoordinator?
     private var terminationInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -10,6 +12,11 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
         // a regular application menu remain available while the window is
         // closed and downloads continue in the background.
         NSApp.setActivationPolicy(.regular)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        coordinator?.showMainWindow()
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -29,6 +36,8 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
 struct CoolDownloadManagerApp: App {
     @NSApplicationDelegateAdaptor(CoolDownloadManagerAppDelegate.self)
     private var appDelegate
+    @Environment(\.openWindow)
+    private var openWindow
     @StateObject private var store = AppStore()
     @StateObject private var coordinator: AppCoordinator
 
@@ -39,9 +48,18 @@ struct CoolDownloadManagerApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("下载管理器") {
+        WindowGroup("下载管理器", id: "main") {
             MainView(store: store, coordinator: coordinator, viewState: coordinator.mainViewState)
+                .background {
+                    WindowAccessor { window in
+                        coordinator.registerMainWindow(window)
+                    }
+                }
                 .onAppear {
+                    appDelegate.coordinator = coordinator
+                    coordinator.configureMainWindowOpener {
+                        openWindow(id: "main")
+                    }
                     let currentStore = store
                     appDelegate.terminationHandler = { [currentStore] in
                         await currentStore.shutdown()

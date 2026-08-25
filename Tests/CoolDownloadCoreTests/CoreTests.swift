@@ -228,6 +228,36 @@ struct CoreTests {
         )
     }
 
+    @Test("queue store reads Kotlin weekday enum names")
+    func queueStoreReadsLegacyWeekdayNames() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("config/download_db/queues", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacyQueue = #"""
+        {
+          "id": 0,
+          "name": "Main",
+          "maxConcurrent": 2,
+          "queueItems": [],
+          "scheduledTimes": {
+            "daysOfWeek": ["MONDAY", "WEDNESDAY", "SUNDAY"],
+            "startTime": "02:30",
+            "endTime": "07:30",
+            "enabledStartTime": false,
+            "enabledEndTime": false
+          },
+          "stopQueueOnEmpty": false
+        }
+        """#
+        try Data(legacyQueue.utf8).write(to: directory.appendingPathComponent("0.json"))
+
+        let store = try QueueStore(dataRoot: root)
+        let loaded = try await store.load()
+        #expect(loaded.first?.id == 0)
+        #expect(loaded.first?.scheduledTimes.daysOfWeek == [1, 3, 7])
+    }
+
     @Test("queue store creates, edits and protects the main queue")
     func queueStoreCRUD() async throws {
         let root = try makeTemporaryDirectory()
