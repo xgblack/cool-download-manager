@@ -18,152 +18,46 @@ struct MainView: View {
             SidebarView(store: store, coordinator: coordinator)
                 .frame(minWidth: 170, idealWidth: viewState.sidebarWidth, maxWidth: 280)
         } detail: {
-            VStack(spacing: 0) {
-                commandBar
-                Divider()
-                downloadTable
-                Divider()
-                footer
+            NavigationStack(path: $coordinator.mainPath) {
+                rootContent
+                    .navigationDestination(for: MainDestination.self) { destination in
+                        destinationView(destination)
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .automatic) {
+                            Button {
+                                coordinator.presentSettings()
+                            } label: {
+                                Label("设置", systemImage: "gearshape")
+                                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                            }
+                            .help("打开设置")
+                        }
+                        ToolbarItem(placement: .automatic) {
+                            Button {
+                                coordinator.presentQueues()
+                            } label: {
+                                Label("队列", systemImage: "list.bullet.rectangle")
+                                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                            }
+                            .help("管理下载队列")
+                        }
+                        ToolbarItem(placement: .automatic) {
+                            Button {
+                                coordinator.presentCategories()
+                            } label: {
+                                Label("分类", systemImage: "folder")
+                                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                            }
+                            .help("管理下载分类")
+                        }
+                    }
             }
             .frame(minWidth: 700, minHeight: 480)
-            .toolbar {
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        coordinator.presentSettings()
-                    } label: {
-                        Label("设置", systemImage: "gearshape")
-                            .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                    }
-                    .help("打开设置")
-                }
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        coordinator.presentQueues()
-                    } label: {
-                        Label("队列", systemImage: "list.bullet.rectangle")
-                            .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                    }
-                    .help("管理下载队列")
-                }
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        coordinator.presentCategories()
-                    } label: {
-                        Label("分类", systemImage: "folder")
-                            .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                    }
-                    .help("管理下载分类")
-                }
-            }
         }
         .navigationSplitViewStyle(.balanced)
-        .sheet(isPresented: $coordinator.isAddDownloadPresented) {
-            AddDownloadSheet(
-                urlText: $viewState.urlText,
-                nameText: $viewState.nameText,
-                folderURL: $viewState.folderURL,
-                queueID: $viewState.queueID,
-                categoryID: $viewState.categoryID,
-                startImmediately: $viewState.startImmediately,
-                queues: store.queues,
-                categories: store.categories,
-                onChooseFolder: { viewState.isShowingFolderPicker = true },
-                onCancel: {
-                    resetAddForm()
-                    coordinator.isAddDownloadPresented = false
-                },
-                onAdd: { queueID, categoryID, startImmediately in
-                    store.addDownload(
-                        link: viewState.urlText,
-                        name: viewState.nameText,
-                        folder: viewState.folderURL,
-                        queueID: queueID,
-                        categoryID: categoryID,
-                        startImmediately: startImmediately
-                    )
-                    resetAddForm()
-                    coordinator.isAddDownloadPresented = false
-                }
-            )
-            .onAppear {
-                if !coordinator.pendingURLText.isEmpty {
-                    viewState.urlText = coordinator.pendingURLText
-                    coordinator.pendingURLText = ""
-                }
-            }
-        }
-        .sheet(isPresented: $coordinator.isQueuePresented) {
-            QueueView(store: store, onClose: { coordinator.isQueuePresented = false })
-        }
-        .sheet(isPresented: $coordinator.isBatchDownloadPresented) {
-            BatchDownloadView(
-                defaultFolder: URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true),
-                onClose: { coordinator.isBatchDownloadPresented = false },
-                onAdd: { pattern, start, end, wildcardLength, folder, startImmediately in
-                    store.downloadList.addBatch(
-                        pattern: pattern,
-                        start: start,
-                        end: end,
-                        wildcardLength: wildcardLength,
-                        folder: folder,
-                        startImmediately: startImmediately
-                    )
-                }
-            )
-        }
-        .sheet(isPresented: $coordinator.isPerHostSettingsPresented) {
-            PerHostSettingsView(store: store, onClose: { coordinator.isPerHostSettingsPresented = false })
-        }
-        .sheet(isPresented: $coordinator.isCategoryPresented) {
-            CategoryView(store: store, onClose: { coordinator.isCategoryPresented = false })
-        }
-        .sheet(isPresented: Binding(
-            get: { coordinator.detailID != nil },
-            set: { if !$0 { coordinator.closeDetail() } }
-        )) {
-            if let id = coordinator.detailID, let record = store.downloadList.record(id: id) {
-                DownloadDetailSheet(
-                    record: record,
-                    store: store.downloadList,
-                    coordinator: coordinator
-                )
-            } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "questionmark.folder")
-                        .font(.system(size: 30))
-                        .foregroundStyle(.secondary)
-                    Text("任务不存在")
-                        .font(.headline)
-                }
-                .frame(width: 420, height: 240)
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { !coordinator.checksumIDs.isEmpty },
-            set: { if !$0 { coordinator.closeChecksum() } }
-        )) {
-            let records = coordinator.checksumIDs.compactMap { store.downloadList.record(id: $0) }
-            ChecksumView(
-                records: records,
-                service: store.service,
-                onClose: { coordinator.closeChecksum() }
-            )
-        }
-        .sheet(isPresented: Binding(
-            get: {
-                shouldShowCompletionDialog
-            },
-            set: { if !$0 { store.downloadList.acknowledgeCompletion() } }
-        )) {
-            if let id = store.downloadList.completedID,
-               let record = store.downloadList.record(id: id) {
-                CompletionView(
-                    record: record,
-                    store: store.downloadList,
-                    coordinator: coordinator,
-                    onClose: { store.downloadList.acknowledgeCompletion() }
-                )
-            }
+        .sheet(item: $coordinator.mainSheet) { sheet in
+            sheetView(sheet)
         }
         .alert("操作失败", isPresented: Binding(
             get: { store.errorMessage != nil || store.downloadList.errorMessage != nil },
@@ -218,18 +112,28 @@ struct MainView: View {
             guard let id, let record = store.downloadList.record(id: id) else { return }
             if !(record.taskSettings?.showCompletionDialog ?? store.settings.showDownloadCompletionDialog) {
                 store.downloadList.acknowledgeCompletion()
-            } else if store.settings.focusDownloadCompletionDialogOnFinish {
-                coordinator.showMainWindow()
+            } else {
+                coordinator.showCompletionPanel(
+                    for: record,
+                    focus: store.settings.focusDownloadCompletionDialogOnFinish
+                )
             }
         }
         .onChange(of: store.downloadList.progressID) { id in
             guard let id else { return }
             store.downloadList.acknowledgeProgress()
             guard store.settings.showDownloadProgressDialog else { return }
-            coordinator.openDetail(for: id)
-            if store.settings.focusDownloadProgressDialogOnStart {
-                coordinator.showMainWindow()
-            }
+            guard let record = store.downloadList.record(id: id) else { return }
+            coordinator.showProgressPanel(
+                for: record,
+                focus: store.settings.focusDownloadProgressDialogOnStart
+            )
+        }
+        .onChange(of: store.downloadList.downloads) { downloads in
+            guard case .downloadDetail(let id) = coordinator.mainPath.last,
+                  !downloads.contains(where: { $0.id == id }) else { return }
+            coordinator.closeDetail()
+            coordinator.showNotice("下载记录已删除。")
         }
         .onChange(of: store.downloadList.failedID) { id in
             guard id != nil else { return }
@@ -246,6 +150,128 @@ struct MainView: View {
         }
         .preferredColorScheme(preferredColorScheme)
         .environment(\.dynamicTypeSize, dynamicTypeSize)
+    }
+
+    private var rootContent: some View {
+        VStack(spacing: 0) {
+            commandBar
+            Divider()
+            downloadTable
+            Divider()
+            footer
+        }
+    }
+
+    @ViewBuilder
+    private func destinationView(_ destination: MainDestination) -> some View {
+        switch destination {
+        case .downloadDetail(let id):
+            if let record = store.downloadList.record(id: id) {
+                DownloadDetailSheet(record: record, store: store.downloadList, coordinator: coordinator)
+                    .navigationTitle(record.name)
+            } else {
+                ContentUnavailableFallback(title: "任务不存在", message: "该下载记录已被删除或无法读取。")
+                    .navigationTitle("下载详情")
+            }
+        case .queues:
+            QueueView(store: store)
+                .navigationTitle("队列")
+        case .categories:
+            CategoryView(store: store)
+                .navigationTitle("分类")
+        case .appInfo(let page):
+            infoView(page)
+                .navigationTitle(page == .thirdParty ? "第三方库" : "翻译者")
+        }
+    }
+
+    @ViewBuilder
+    private func sheetView(_ sheet: MainSheet) -> some View {
+        switch sheet {
+        case .addDownload:
+            NavigationStack {
+                AddDownloadSheet(
+                    urlText: $viewState.urlText,
+                    nameText: $viewState.nameText,
+                    folderURL: $viewState.folderURL,
+                    queueID: $viewState.queueID,
+                    categoryID: $viewState.categoryID,
+                    startImmediately: $viewState.startImmediately,
+                    queues: store.queues,
+                    categories: store.categories,
+                    onChooseFolder: { viewState.isShowingFolderPicker = true },
+                    onCancel: {
+                        resetAddForm()
+                        coordinator.closeMainSheet()
+                    },
+                    onAdd: { queueID, categoryID, startImmediately in
+                        store.addDownload(
+                            link: viewState.urlText,
+                            name: viewState.nameText,
+                            folder: viewState.folderURL,
+                            queueID: queueID,
+                            categoryID: categoryID,
+                            startImmediately: startImmediately
+                        )
+                        resetAddForm()
+                        coordinator.closeMainSheet()
+                    }
+                )
+                .onAppear {
+                    if !coordinator.pendingURLText.isEmpty {
+                        viewState.urlText = coordinator.pendingURLText
+                        coordinator.pendingURLText = ""
+                    }
+                }
+                .onDisappear {
+                    if coordinator.mainSheet == nil {
+                        resetAddForm()
+                    }
+                }
+            }
+        case .batchDownload:
+            NavigationStack {
+                BatchDownloadView(
+                    defaultFolder: URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true),
+                    onClose: coordinator.closeMainSheet,
+                    onAdd: { pattern, start, end, wildcardLength, folder, startImmediately in
+                        store.downloadList.addBatch(
+                            pattern: pattern,
+                            start: start,
+                            end: end,
+                            wildcardLength: wildcardLength,
+                            folder: folder,
+                            startImmediately: startImmediately
+                        )
+                    }
+                )
+            }
+        case .checksum(let ids):
+            NavigationStack {
+                let records = ids.compactMap { store.downloadList.record(id: $0) }
+                ChecksumView(records: records, service: store.service, onClose: coordinator.closeMainSheet)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func infoView(_ page: MainInfoPage) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                switch page {
+                case .thirdParty:
+                    Text("第三方库").font(.title2.weight(.semibold))
+                    Text("本应用使用 Swift 标准库、SwiftUI、AppKit、CryptoKit 和 UserNotifications。")
+                        .foregroundStyle(.secondary)
+                case .translators:
+                    Text("翻译者").font(.title2.weight(.semibold))
+                    Text("感谢所有为项目提供翻译和反馈的贡献者。")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+        }
     }
 
     private var preferredColorScheme: ColorScheme? {

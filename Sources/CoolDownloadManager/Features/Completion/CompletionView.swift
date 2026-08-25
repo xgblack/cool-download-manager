@@ -9,22 +9,6 @@ struct CompletionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.title2)
-                Text("下载完成")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(18)
-            Divider()
-
             VStack(alignment: .leading, spacing: 14) {
                 Text(record.name)
                     .font(.headline)
@@ -59,13 +43,12 @@ struct CompletionView: View {
                     onClose()
                 }
                 .disabled(record.status != .completed)
-                Button("关闭", action: onClose)
-                    .keyboardShortcut(.cancelAction)
             }
             .buttonStyle(.borderless)
             .padding(12)
         }
         .frame(width: 520, height: 280)
+        .navigationTitle("下载完成")
     }
 
     private var sizeText: String {

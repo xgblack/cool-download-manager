@@ -17,19 +17,6 @@ struct ChecksumView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("文件校验和", systemImage: "checkmark.shield")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(16)
-            Divider()
-
-            HStack {
                 Picker("算法", selection: $state.algorithm) {
                     ForEach(FileChecksumAlgorithm.allCases, id: \.self) { algorithm in
                         Text(algorithm.rawValue).tag(algorithm)
@@ -75,11 +62,11 @@ struct ChecksumView: View {
                     Text(message).font(.caption).foregroundStyle(.red)
                 }
                 Spacer()
-                Button("关闭", action: onClose).keyboardShortcut(.cancelAction)
             }
             .padding(12)
         }
         .frame(width: 940, height: 540)
+        .navigationTitle("文件校验和")
     }
 
     private func row(_ record: DownloadRecord) -> some View {

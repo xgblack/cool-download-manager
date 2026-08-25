@@ -155,9 +155,6 @@ struct CoolDownloadManagerApp: App {
                 }
             }
             CommandMenu("工具") {
-                Button("浏览器集成") {
-                    coordinator.presentSettings()
-                }
                 Button("每主机设置") {
                     coordinator.presentPerHostSettings()
                 }
@@ -171,10 +168,12 @@ struct CoolDownloadManagerApp: App {
                     openExternal("https://github.com/xgblack/cool-download-manager/issues")
                 }
                 Button("第三方库") {
-                    coordinator.showNotice("Swift 标准库、SwiftUI、AppKit、CryptoKit、UserNotifications\n详见项目源码和 Package.swift。")
+                    coordinator.showMainWindow()
+                    coordinator.mainPath = [.appInfo(.thirdParty)]
                 }
                 Button("翻译者") {
-                    openExternal("https://github.com/xgblack/cool-download-manager/graphs/contributors")
+                    coordinator.showMainWindow()
+                    coordinator.mainPath = [.appInfo(.translators)]
                 }
                 Button("捐赠") {
                     openExternal("https://github.com/xgblack/cool-download-manager")
@@ -183,18 +182,18 @@ struct CoolDownloadManagerApp: App {
                     coordinator.checkForUpdates()
                 }
                 Button("关于") {
-                    coordinator.showNotice("Cool download manager\n纯 Swift macOS 重写版本")
+                    NSApp.orderFrontStandardAboutPanel(nil)
                 }
             }
         }
         Settings {
             SettingsView(
                 store: store,
+                coordinator: coordinator,
                 onOpenPerHostSettings: {
                     coordinator.presentPerHostSettings()
                 }
             )
-            .modifier(SettingsToolbarCleanup())
             .background {
                 WindowAccessor { window in
                     // SwiftUI's Settings scene supplies an English default
@@ -217,16 +216,5 @@ struct CoolDownloadManagerApp: App {
     private func openExternal(_ string: String) {
         guard let url = URL(string: string) else { return }
         NSWorkspace.shared.open(url)
-    }
-}
-
-private struct SettingsToolbarCleanup: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 14.0, *) {
-            content.toolbar(removing: .sidebarToggle)
-        } else {
-            content
-        }
     }
 }

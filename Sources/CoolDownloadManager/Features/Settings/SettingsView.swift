@@ -7,20 +7,23 @@ import CoolDownloadCore
 /// standard window chrome; this view only owns the preference content.
 struct SettingsView: View {
     @ObservedObject var store: AppStore
-    let onClose: () -> Void
+    @ObservedObject var coordinator: AppCoordinator
     let onOpenPerHostSettings: () -> Void
     @StateObject private var viewState: SettingsViewState
     @StateObject private var windowGuard = SettingsWindowGuard()
 
     init(
         store: AppStore,
-        onClose: @escaping () -> Void = {},
+        coordinator: AppCoordinator,
         onOpenPerHostSettings: @escaping () -> Void = {}
     ) {
         self.store = store
-        self.onClose = onClose
+        self.coordinator = coordinator
         self.onOpenPerHostSettings = onOpenPerHostSettings
-        _viewState = StateObject(wrappedValue: SettingsViewState(model: store.settings))
+        _viewState = StateObject(wrappedValue: SettingsViewState(
+            model: store.settings,
+            perHostItems: store.perHostSettings
+        ))
     }
 
     var body: some View {
@@ -32,30 +35,47 @@ struct SettingsView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationTitle("设置")
             .frame(minWidth: 190)
         } detail: {
-            Form {
-                sectionContent
-            }
-            .formStyle(.grouped)
-            .frame(maxWidth: 680, alignment: .leading)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                HStack(spacing: 12) {
-                    Spacer()
-                    Button("恢复默认") {
-                        viewState.model = AppSettingsModel.defaults()
+            NavigationStack(path: $viewState.path) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(viewState.section.title)
+                        .font(.title2.weight(.semibold))
+                        .padding(.horizontal, 24)
+                        .padding(.top, 22)
+                        .padding(.bottom, 4)
+                    Form {
+                        sectionContent
                     }
-                    Button(viewState.isSaving ? "保存中…" : "保存") {
-                        save()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(viewState.isSaving)
+                    .formStyle(.grouped)
+                    .frame(maxWidth: 760, alignment: .leading)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
-                .background(.bar)
+                .navigationDestination(for: SettingsRoute.self) { route in
+                    switch route {
+                    case .perHost:
+                        PerHostSettingsView(store: store, state: viewState.perHostState)
+                            .navigationTitle("每主机设置")
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if viewState.path.isEmpty {
+                    HStack(spacing: 12) {
+                        Spacer()
+                        Button("恢复默认") {
+                            viewState.model = AppSettingsModel.defaults()
+                        }
+                        Button(viewState.isSaving ? "保存中…" : "保存") {
+                            save()
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(viewState.isSaving)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(.bar)
+                }
             }
         }
         .frame(minWidth: 790, minHeight: 560)
@@ -65,7 +85,7 @@ struct SettingsView: View {
                 windowGuard.attach(window, isDirty: {
                     viewState.isDirty
                 }, discard: {
-                    viewState.markSaved(store.settings)
+                    viewState.markSaved(store.settings, perHostItems: store.perHostSettings)
                 }
                 )
             }
@@ -89,10 +109,37 @@ struct SettingsView: View {
         }
         .onChange(of: store.settings) { updated in
             guard !viewState.isDirty, !viewState.isSaving else { return }
-            viewState.markSaved(updated)
+            viewState.markSaved(updated, perHostItems: store.perHostSettings)
+        }
+        .onChange(of: store.perHostSettings) { updated in
+            guard !viewState.perHostState.isDirty else { return }
+            viewState.perHostState.replaceItems(updated)
         }
         .onAppear {
             store.refreshAutoStartStatus()
+            if !viewState.isDirty {
+                viewState.markSaved(store.settings, perHostItems: store.perHostSettings)
+            }
+            if coordinator.settingsDestination == .perHost {
+                viewState.path = [.perHost]
+            }
+        }
+        .onChange(of: coordinator.settingsDestination) { destination in
+            switch destination {
+            case .perHost:
+                viewState.section = .network
+                DispatchQueue.main.async {
+                    viewState.path = [.perHost]
+                }
+            case .section(let section):
+                viewState.section = section
+                viewState.path = []
+            }
+        }
+        .onChange(of: viewState.section) { _ in
+            guard !viewState.path.isEmpty else { return }
+            viewState.path = []
+            coordinator.settingsDestination = .section(viewState.section)
         }
     }
 
@@ -260,7 +307,11 @@ struct SettingsView: View {
             }
 
             Section("每主机设置") {
-                Button("管理每主机连接和限速…", systemImage: "server.rack", action: onOpenPerHostSettings)
+                Button("管理每主机连接和限速…", systemImage: "server.rack") {
+                    coordinator.settingsDestination = .perHost
+                    viewState.path = [.perHost]
+                    onOpenPerHostSettings()
+                }
             }
         }
     }
@@ -284,8 +335,7 @@ struct SettingsView: View {
         Task { @MainActor in
             let success = await store.saveSettings(viewState.model)
             if success {
-                viewState.markSaved(store.settings)
-                onClose()
+                viewState.markSaved(store.settings, perHostItems: store.perHostSettings)
             } else {
                 viewState.errorMessage = store.errorMessage ?? "设置保存失败"
             }
@@ -395,22 +445,26 @@ enum SettingsSection: String, CaseIterable, Hashable {
 final class SettingsViewState: ObservableObject {
     @Published var model: AppSettingsModel
     @Published var section: SettingsSection = .general
+    @Published var path: [SettingsRoute] = []
     @Published var columnVisibility: NavigationSplitViewVisibility = .all
     @Published var isFolderPickerPresented = false
     @Published var isSaving = false
     @Published var errorMessage: String?
+    let perHostState: PerHostSettingsViewState
     private var savedModel: AppSettingsModel
 
-    init(model: AppSettingsModel) {
+    init(model: AppSettingsModel, perHostItems: [PerHostSettingsItem]) {
         self.model = model
         self.savedModel = model
+        self.perHostState = PerHostSettingsViewState(items: perHostItems)
     }
 
-    var isDirty: Bool { model != savedModel }
+    var isDirty: Bool { model != savedModel || perHostState.isDirty }
 
-    func markSaved(_ model: AppSettingsModel) {
+    func markSaved(_ model: AppSettingsModel, perHostItems: [PerHostSettingsItem]) {
         self.model = model
         savedModel = model
+        perHostState.replaceItems(perHostItems)
     }
 }
 

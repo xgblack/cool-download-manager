@@ -2,21 +2,53 @@ import AppKit
 import SwiftUI
 import CoolDownloadCore
 
+enum MainDestination: Hashable {
+    case downloadDetail(DownloadID)
+    case queues
+    case categories
+    case appInfo(MainInfoPage)
+}
+
+enum MainInfoPage: String, Hashable {
+    case thirdParty
+    case translators
+}
+
+enum MainSheet: Identifiable, Equatable {
+    case addDownload
+    case batchDownload
+    case checksum([DownloadID])
+
+    var id: String {
+        switch self {
+        case .addDownload: return "add-download"
+        case .batchDownload: return "batch-download"
+        case .checksum(let ids): return "checksum-\(ids.map(String.init).joined(separator: ","))"
+        }
+    }
+}
+
+enum SettingsDestination: Equatable {
+    case section(SettingsSection)
+    case perHost
+}
+
+enum SettingsRoute: Hashable {
+    case perHost
+}
+
 @MainActor
 final class AppCoordinator: NSObject, ObservableObject {
-    @Published var isAddDownloadPresented = false
-    @Published var isQueuePresented = false
-    @Published var isBatchDownloadPresented = false
-    @Published var isPerHostSettingsPresented = false
-    @Published var isCategoryPresented = false
-    @Published var detailID: DownloadID?
-    @Published var checksumIDs: [DownloadID] = []
+    @Published var mainPath: [MainDestination] = []
+    @Published var mainSheet: MainSheet?
+    @Published var settingsDestination: SettingsDestination = .section(.general)
     @Published var pendingURLText = ""
     @Published var noticeMessage: String?
 
     let store: AppStore
     let mainViewState = MainViewState()
     private var menuBarController: MenuBarController?
+    private let utilityPanels = UtilityPanelController()
     private weak var mainWindow: NSWindow?
     private var openMainWindowAction: (() -> Void)?
     private var focusMainWindowWhenRegistered = false
@@ -109,50 +141,68 @@ final class AppCoordinator: NSObject, ObservableObject {
         if fromClipboard {
             pendingURLText = NSPasteboard.general.string(forType: .string) ?? ""
         }
-        isAddDownloadPresented = true
+        mainSheet = .addDownload
     }
 
     func presentSettings() {
         // SwiftUI's Settings scene installs the standard macOS action.
+        settingsDestination = .section(.general)
         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     func presentQueues() {
         showMainWindow()
-        isQueuePresented = true
+        mainPath = [.queues]
     }
 
     func presentBatchDownload() {
         showMainWindow()
-        isBatchDownloadPresented = true
+        mainSheet = .batchDownload
     }
 
     func presentPerHostSettings() {
-        showMainWindow()
-        isPerHostSettingsPresented = true
+        settingsDestination = .perHost
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     func presentCategories() {
         showMainWindow()
-        isCategoryPresented = true
+        mainPath = [.categories]
     }
 
     func openDetail(for id: DownloadID) {
-        detailID = id
+        showMainWindow()
+        mainPath = [.downloadDetail(id)]
     }
 
     func closeDetail() {
-        detailID = nil
+        if case .downloadDetail = mainPath.last {
+            mainPath.removeLast()
+        }
     }
 
     func presentChecksum(for ids: [DownloadID]) {
         guard !ids.isEmpty else { return }
         showMainWindow()
-        checksumIDs = ids
+        mainSheet = .checksum(ids)
     }
 
     func closeChecksum() {
-        checksumIDs = []
+        if case .checksum = mainSheet {
+            mainSheet = nil
+        }
+    }
+
+    func closeMainSheet() {
+        mainSheet = nil
+    }
+
+    func showProgressPanel(for record: DownloadRecord, focus: Bool) {
+        utilityPanels.showProgress(record: record, store: store.downloadList, coordinator: self, focus: focus)
+    }
+
+    func showCompletionPanel(for record: DownloadRecord, focus: Bool) {
+        utilityPanels.showCompletion(record: record, store: store.downloadList, coordinator: self, focus: focus)
     }
 
     func showNotice(_ message: String) {
@@ -196,5 +246,97 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func revealFile(_ record: DownloadRecord) {
         NSWorkspace.shared.activateFileViewerSelecting([record.destinationURL])
+    }
+}
+
+@MainActor
+private final class UtilityPanelController: NSObject, NSWindowDelegate {
+    private var progressPanel: NSPanel?
+    private var completionPanel: NSPanel?
+    private var completionClose: (() -> Void)?
+
+    func showProgress(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
+        let content = DownloadProgressView(
+            record: record,
+            store: store,
+            coordinator: coordinator,
+            onClose: { [weak self] in self?.progressPanel?.orderOut(nil) }
+        )
+        let panel = panel(
+            existing: progressPanel,
+            title: "下载进度",
+            size: NSSize(width: 430, height: 190),
+            content: content
+        )
+        progressPanel = panel
+        present(panel, focus: focus)
+    }
+
+    func showCompletion(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
+        let content = CompletionView(
+            record: record,
+            store: store,
+            coordinator: coordinator,
+            onClose: { [weak self, weak store] in
+                store?.acknowledgeCompletion()
+                self?.completionPanel?.orderOut(nil)
+            }
+        )
+        completionClose = { [weak self, weak store] in
+            store?.acknowledgeCompletion()
+            self?.completionPanel?.orderOut(nil)
+        }
+        let panel = panel(
+            existing: completionPanel,
+            title: "下载完成",
+            size: NSSize(width: 520, height: 280),
+            content: content
+        )
+        completionPanel = panel
+        present(panel, focus: focus)
+    }
+
+    private func panel<Content: View>(
+        existing: NSPanel?,
+        title: String,
+        size: NSSize,
+        content: Content
+    ) -> NSPanel {
+        let panel = existing ?? NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = title
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+        panel.setContentSize(size)
+        panel.contentViewController = NSHostingController(rootView: AnyView(content))
+        return panel
+    }
+
+    private func present(_ panel: NSPanel, focus: Bool) {
+        if panel.isVisible {
+            panel.orderFrontRegardless()
+        } else {
+            panel.center()
+            panel.orderFrontRegardless()
+        }
+        guard focus else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === completionPanel {
+            completionClose?()
+            completionClose = nil
+        }
+        sender.orderOut(nil)
+        return false
     }
 }

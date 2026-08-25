@@ -6,38 +6,19 @@ import CoolDownloadCore
 /// persistence and task assignment in AppStore/Core actors.
 struct CategoryView: View {
     @ObservedObject var store: AppStore
-    let onClose: () -> Void
     @ObservedObject private var state: CategoryViewState
+    @Environment(\.dismiss) private var dismiss
 
-    init(store: AppStore, onClose: @escaping () -> Void) {
+    init(store: AppStore) {
         self.store = store
-        self.onClose = onClose
         _state = ObservedObject(wrappedValue: CategoryViewState(items: store.categories))
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("分类", systemImage: "folder")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                if state.isDirty {
-                    Text("未保存")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(16)
-            Divider()
-
             HStack(spacing: 0) {
                 categoryList
-                    .frame(width: 220)
+                    .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
                 Divider()
                 editor
             }
@@ -50,8 +31,6 @@ struct CategoryView: View {
                         .lineLimit(2)
                 }
                 Spacer()
-                Button("取消", action: onClose)
-                    .keyboardShortcut(.cancelAction)
                 Button("保存") {
                     save()
                 }
@@ -60,9 +39,11 @@ struct CategoryView: View {
             }
             .padding(12)
         }
-        .frame(width: 820, height: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            state.replaceItems(store.categories)
+            if !state.isDirty {
+                state.replaceItems(store.categories)
+            }
         }
         .onChange(of: store.categories) { categories in
             if !state.isDirty {
@@ -90,11 +71,54 @@ struct CategoryView: View {
         } message: {
             Text(store.errorMessage ?? state.errorMessage ?? "未知错误")
         }
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    requestDismiss()
+                } label: {
+                    Label("返回", systemImage: "chevron.left")
+                }
+                .help("返回下载列表")
+            }
+        }
+        .confirmationDialog(
+            "放弃未保存的分类？",
+            isPresented: $state.isShowingDiscardConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("放弃更改", role: .destructive) { dismiss() }
+            Button("继续编辑", role: .cancel) {}
+        } message: {
+            Text("返回后，尚未保存的分类更改将丢失。")
+        }
+        .confirmationDialog(
+            "切换分类并放弃更改？",
+            isPresented: $state.isShowingSelectionConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("放弃更改") {
+                state.selectPendingCategory()
+            }
+            Button("继续编辑", role: .cancel) {
+                state.pendingSelectionID = nil
+            }
+        } message: {
+            Text("切换分类后，当前尚未保存的更改将丢失。")
+        }
+    }
+
+    private func requestDismiss() {
+        if state.isDirty {
+            state.isShowingDiscardConfirmation = true
+        } else {
+            dismiss()
+        }
     }
 
     private var categoryList: some View {
         VStack(spacing: 0) {
-            List(selection: $state.selectedID) {
+            List(selection: categorySelection) {
                 ForEach(state.items, id: \.id) { category in
                     HStack(spacing: 8) {
                         Image(systemName: category.icon.isEmpty ? "folder" : category.icon)
@@ -143,6 +167,22 @@ struct CategoryView: View {
             .buttonStyle(.borderless)
             .padding(10)
         }
+    }
+
+    private var categorySelection: Binding<DownloadID?> {
+        Binding(
+            get: { state.selectedID },
+            set: { newID in
+                guard newID != state.selectedID else { return }
+                if state.isDirty {
+                    state.pendingSelectionID = newID
+                    state.isShowingSelectionConfirmation = true
+                } else {
+                    state.selectedID = newID
+                    state.loadDraft()
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -227,6 +267,9 @@ private final class CategoryViewState: ObservableObject {
     @Published var isFolderPickerPresented = false
     @Published var errorMessage: String?
     @Published var pendingNew = false
+    @Published var isShowingDiscardConfirmation = false
+    @Published var isShowingSelectionConfirmation = false
+    @Published var pendingSelectionID: DownloadID?
     private var savedDraft: DownloadCategory?
 
     init(items: [DownloadCategory]) {
@@ -271,6 +314,14 @@ private final class CategoryViewState: ObservableObject {
         fileTypes = currentItem.acceptedFileTypes.joined(separator: " ")
         urlPatterns = currentItem.acceptedURLPatterns.joined(separator: " ")
         savedDraft = currentItem
+    }
+
+    func selectPendingCategory() {
+        guard let pendingSelectionID else { return }
+        selectedID = pendingSelectionID
+        self.pendingSelectionID = nil
+        isShowingSelectionConfirmation = false
+        loadDraft()
     }
 
     func commitDraft() -> DownloadCategory? {

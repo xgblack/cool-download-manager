@@ -38,19 +38,6 @@ struct BatchDownloadView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("批量下载", systemImage: "square.stack.3d.down.right")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(16)
-            Divider()
-
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     SettingsSectionView(title: "下载地址", description: "使用 * 代表连续编号，例如 photo-*.jpg。") {
@@ -140,6 +127,7 @@ struct BatchDownloadView: View {
             .padding(12)
         }
         .frame(width: 720, height: 620)
+        .navigationTitle("批量下载")
         .fileImporter(
             isPresented: $state.isFolderPickerPresented,
             allowedContentTypes: [.folder],

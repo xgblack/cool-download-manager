@@ -3,36 +3,18 @@ import CoolDownloadCore
 
 struct PerHostSettingsView: View {
     @ObservedObject var store: AppStore
-    let onClose: () -> Void
-    @ObservedObject private var state: PerHostSettingsViewState
+    @ObservedObject var state: PerHostSettingsViewState
 
-    init(store: AppStore, onClose: @escaping () -> Void) {
+    init(store: AppStore, state: PerHostSettingsViewState) {
         self.store = store
-        self.onClose = onClose
-        _state = ObservedObject(wrappedValue: PerHostSettingsViewState(items: store.perHostSettings))
+        self.state = state
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("每主机设置", systemImage: "server.rack")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                if state.isDirty {
-                    Text("未保存").font(.caption).foregroundStyle(.orange)
-                }
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(16)
-            Divider()
-
             HStack(spacing: 0) {
                 hostList
-                    .frame(width: 230)
+                    .frame(minWidth: 230, idealWidth: 250, maxWidth: 290)
                 Divider()
                 editor
             }
@@ -42,21 +24,21 @@ struct PerHostSettingsView: View {
                     Text(error).font(.caption).foregroundStyle(.red)
                 }
                 Spacer()
-                Button("取消", action: onClose).keyboardShortcut(.cancelAction)
                 Button("保存") {
                     state.commitDraft()
                     store.savePerHostSettings(state.items)
                     state.markSaved()
-                    onClose()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!state.isDirty)
             }
             .padding(12)
         }
-        .frame(width: 760, height: 520)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            state.replaceItems(store.perHostSettings)
+            if !state.isDirty {
+                state.replaceItems(store.perHostSettings)
+            }
         }
         .onChange(of: store.perHostSettings) { items in
             if !state.isDirty { state.replaceItems(items) }
@@ -153,7 +135,7 @@ struct PerHostSettingsView: View {
 }
 
 @MainActor
-private final class PerHostSettingsViewState: ObservableObject {
+final class PerHostSettingsViewState: ObservableObject {
     @Published var items: [PerHostSettingsItem]
     @Published var selectedHost: String?
     @Published var host = ""

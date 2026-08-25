@@ -17,17 +17,6 @@ struct AddDownloadSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("新建下载", systemImage: "arrow.down.circle")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button(action: onCancel) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-
             VStack(alignment: .leading, spacing: 6) {
                 Text("下载地址")
                     .font(.headline)
@@ -92,5 +81,6 @@ struct AddDownloadSheet: View {
         }
         .padding(20)
         .frame(width: 620)
+        .navigationTitle("新建下载")
     }
 }

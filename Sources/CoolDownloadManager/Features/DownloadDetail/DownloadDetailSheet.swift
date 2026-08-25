@@ -26,21 +26,6 @@ struct DownloadDetailSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label(record.name, systemImage: iconName)
-                    .font(.headline)
-                    .lineLimit(1)
-                Spacer()
-                Button {
-                    coordinator.closeDetail()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(16)
-
             Picker("详情", selection: $viewState.tab) {
                 ForEach(DetailTab.allCases, id: \.self) { tab in
                     Text(tab.rawValue).tag(tab)
@@ -70,7 +55,7 @@ struct DownloadDetailSheet: View {
             Divider()
             actionBar
         }
-        .frame(width: 680, height: 560)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var infoPage: some View {
@@ -254,8 +239,6 @@ struct DownloadDetailSheet: View {
                     store.startSelected()
                 }
             }
-            Button("关闭", action: coordinator.closeDetail)
-                .keyboardShortcut(.cancelAction)
         }
         .padding(12)
     }

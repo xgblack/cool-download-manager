@@ -3,33 +3,19 @@ import CoolDownloadCore
 
 struct QueueView: View {
     @ObservedObject var store: AppStore
-    let onClose: () -> Void
     @ObservedObject private var state: QueueViewState
+    @Environment(\.dismiss) private var dismiss
 
-    init(store: AppStore, onClose: @escaping () -> Void) {
+    init(store: AppStore) {
         self.store = store
-        self.onClose = onClose
         _state = ObservedObject(wrappedValue: QueueViewState())
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("队列", systemImage: "list.bullet.rectangle")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            .padding(16)
-            Divider()
-
             HStack(spacing: 0) {
                 queueList
-                    .frame(width: 210)
+                    .frame(minWidth: 210, idealWidth: 230, maxWidth: 260)
                 Divider()
                 queueDetails
             }
@@ -52,16 +38,16 @@ struct QueueView: View {
                     Label("启动队列", systemImage: "play.fill")
                 }
                 .disabled(state.selectedQueueID == nil)
-                Button("关闭", action: onClose)
-                    .keyboardShortcut(.cancelAction)
             }
             .buttonStyle(.borderless)
             .padding(12)
         }
-        .frame(width: 820, height: 590)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
-            state.selectFirstIfNeeded(store.queueModels)
-            state.refreshDraft(from: selectedModel)
+            if !state.isEditing {
+                state.selectFirstIfNeeded(store.queueModels)
+                state.refreshDraft(from: selectedModel)
+            }
         }
         .onChange(of: store.queueModels) { models in
             state.selectFirstIfNeeded(models)
@@ -80,14 +66,44 @@ struct QueueView: View {
         } message: {
             Text(store.errorMessage ?? "未知错误")
         }
-        .sheet(isPresented: $state.isCreatingQueue) {
-            NewQueueSheet(
-                onCancel: { state.isCreatingQueue = false },
-                onCreate: { name in
-                    store.createQueue(name: name)
-                    state.isCreatingQueue = false
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    requestDismiss()
+                } label: {
+                    Label("返回", systemImage: "chevron.left")
                 }
-            )
+                .help("返回下载列表")
+            }
+        }
+        .confirmationDialog(
+            "放弃未保存的队列？",
+            isPresented: $state.isShowingDiscardConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("放弃更改", role: .destructive) { dismiss() }
+            Button("继续编辑", role: .cancel) {}
+        } message: {
+            Text("返回后，尚未保存的队列更改将丢失。")
+        }
+        .confirmationDialog(
+            "切换队列并放弃更改？",
+            isPresented: $state.isShowingSelectionConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("放弃更改") { state.selectPendingQueue(from: store.queueModels) }
+            Button("继续编辑", role: .cancel) { state.pendingQueueID = nil }
+        } message: {
+            Text("切换队列后，当前尚未保存的更改将丢失。")
+        }
+    }
+
+    private func requestDismiss() {
+        if state.isEditing || state.isCreatingQueue {
+            state.isShowingDiscardConfirmation = true
+        } else {
+            dismiss()
         }
     }
 
@@ -96,9 +112,25 @@ struct QueueView: View {
         return store.queueModels.first { $0.id == id }
     }
 
+    private var queueSelection: Binding<DownloadID?> {
+        Binding(
+            get: { state.selectedQueueID },
+            set: { newID in
+                guard newID != state.selectedQueueID else { return }
+                if state.isEditing {
+                    state.pendingQueueID = newID
+                    state.isShowingSelectionConfirmation = true
+                } else {
+                    state.selectedQueueID = newID
+                    state.refreshDraft(from: store.queueModels.first { $0.id == newID })
+                }
+            }
+        )
+    }
+
     private var queueList: some View {
         VStack(spacing: 0) {
-            List(selection: $state.selectedQueueID) {
+            List(selection: queueSelection) {
                 ForEach(store.queueModels) { queue in
                     HStack(spacing: 8) {
                         Image(systemName: queue.id == 0 ? "tray.full" : "folder")
@@ -124,6 +156,7 @@ struct QueueView: View {
             Divider()
             HStack {
                 Button {
+                    state.newQueueName = ""
                     state.isCreatingQueue = true
                 } label: {
                     Image(systemName: "plus")
@@ -146,7 +179,9 @@ struct QueueView: View {
 
     @ViewBuilder
     private var queueDetails: some View {
-        if let model = selectedModel {
+        if state.isCreatingQueue {
+            newQueueEditor
+        } else if let model = selectedModel {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     SettingsSectionView(title: model.name, description: model.id == 0 ? "主队列" : "队列配置和项目顺序") {
@@ -205,6 +240,37 @@ struct QueueView: View {
         } else {
             ContentUnavailableFallback(title: "没有队列", message: "新建一个队列开始管理任务。")
         }
+    }
+
+    private var newQueueEditor: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsSectionView(title: "新建队列", description: "创建后可在此页面配置并安排下载任务。") {
+                TextField("队列名称", text: $state.newQueueName)
+                    .onSubmit { createQueue() }
+                HStack {
+                    Spacer()
+                    Button("取消") {
+                        state.isCreatingQueue = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    Button("添加") {
+                        createQueue()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(state.newQueueName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            Spacer()
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func createQueue() {
+        let name = state.newQueueName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        store.createQueue(name: name)
+        state.isCreatingQueue = false
     }
 
     private var dayPicker: some View {
@@ -314,6 +380,10 @@ struct QueueView: View {
 private final class QueueViewState: ObservableObject {
     @Published var selectedQueueID: DownloadID?
     @Published var isCreatingQueue = false
+    @Published var newQueueName = ""
+    @Published var isShowingDiscardConfirmation = false
+    @Published var isShowingSelectionConfirmation = false
+    @Published var pendingQueueID: DownloadID?
     @Published var name = ""
     @Published var maxConcurrent = "2"
     @Published var maxConcurrentValue = 2
@@ -380,6 +450,14 @@ private final class QueueViewState: ObservableObject {
         }
     }
 
+    func selectPendingQueue(from models: [DownloadQueueModel]) {
+        guard let pendingQueueID else { return }
+        selectedQueueID = pendingQueueID
+        self.pendingQueueID = nil
+        isShowingSelectionConfirmation = false
+        refreshDraft(from: models.first { $0.id == pendingQueueID })
+    }
+
     var isDirty: Bool {
         guard let savedModel else { return false }
         let draftSchedule = QueueSchedule(
@@ -397,48 +475,7 @@ private final class QueueViewState: ObservableObject {
     }
 }
 
-private struct NewQueueSheet: View {
-    let onCancel: () -> Void
-    let onCreate: (String) -> Void
-    @ObservedObject private var state: NewQueueState
-
-    init(onCancel: @escaping () -> Void, onCreate: @escaping (String) -> Void) {
-        self.onCancel = onCancel
-        self.onCreate = onCreate
-        _state = ObservedObject(wrappedValue: NewQueueState())
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("新建队列").font(.title3.weight(.semibold))
-            TextField("队列名称", text: $state.name)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { create() }
-            HStack {
-                Spacer()
-                Button("取消", action: onCancel).keyboardShortcut(.cancelAction)
-                Button("添加", action: create)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(state.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(22)
-        .frame(width: 360)
-    }
-
-    private func create() {
-        let value = state.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        onCreate(value)
-    }
-}
-
-@MainActor
-private final class NewQueueState: ObservableObject {
-    @Published var name = ""
-}
-
-private struct ContentUnavailableFallback: View {
+struct ContentUnavailableFallback: View {
     let title: String
     let message: String
 
