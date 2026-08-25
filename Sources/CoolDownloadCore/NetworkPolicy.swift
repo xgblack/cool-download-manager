@@ -12,10 +12,9 @@ public enum HTTPProxyMode: String, Sendable, Equatable {
 
 /// Network policy used when the core creates a URLSession transport.
 ///
-/// URLSession can apply proxy and TLS policy directly. DNS server overrides
-/// are retained here for settings compatibility, but URLSession has no public
-/// per-session DNS resolver on macOS; callers must not treat `dnsServers` as
-/// active routing until a resolver-backed transport is added.
+/// URLSession can apply proxy and TLS policy directly. The system resolver is
+/// used for DNS because URLSession does not expose a per-session resolver on
+/// macOS.
 public struct HTTPNetworkConfiguration: Sendable, Equatable {
     public var proxyMode: HTTPProxyMode
     public var proxyHost: String
@@ -23,7 +22,6 @@ public struct HTTPNetworkConfiguration: Sendable, Equatable {
     public var proxyUsername: String
     public var proxyPassword: String
     public var proxyPACURL: String
-    public var dnsServers: [String]
     public var ignoreSSLCertificates: Bool
 
     public init(
@@ -33,7 +31,6 @@ public struct HTTPNetworkConfiguration: Sendable, Equatable {
         proxyUsername: String = "",
         proxyPassword: String = "",
         proxyPACURL: String = "",
-        dnsServers: [String] = [],
         ignoreSSLCertificates: Bool = false
     ) {
         self.proxyMode = proxyMode
@@ -42,9 +39,6 @@ public struct HTTPNetworkConfiguration: Sendable, Equatable {
         self.proxyUsername = proxyUsername
         self.proxyPassword = proxyPassword
         self.proxyPACURL = proxyPACURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.dnsServers = dnsServers
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
         self.ignoreSSLCertificates = ignoreSSLCertificates
     }
 

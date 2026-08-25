@@ -370,7 +370,7 @@ struct CoreTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let config = root.appendingPathComponent("config", isDirectory: true)
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
-        try Data(#"{"futureSetting":{"keep":true},"threadCount":12}"#.utf8)
+        try Data(#"{"futureSetting":{"keep":true},"threadCount":12,"defaultDarkTheme":"dark","defaultLightTheme":"light","language":"zh-CN","font":"Helvetica","useNativeMenuBar":false,"useSystemTray":false,"dnsServers":["1.1.1.1"]}"#.utf8)
             .write(to: config.appendingPathComponent("appSettings.json"))
 
         let store = try SettingsStore(dataRoot: root)
@@ -389,6 +389,13 @@ struct CoreTests {
         #expect((object["futureSetting"] as? [String: Any])?["keep"] as? Bool == true)
         #expect(object["apiPort"] as? Int == 16200)
         #expect(object["proxyPassword"] as? String == "secret-value")
+        #expect(object["defaultDarkTheme"] == nil)
+        #expect(object["defaultLightTheme"] == nil)
+        #expect(object["language"] == nil)
+        #expect(object["font"] == nil)
+        #expect(object["useNativeMenuBar"] == nil)
+        #expect(object["useSystemTray"] == nil)
+        #expect(object["dnsServers"] == nil)
 
         let reopened = try SettingsStore(dataRoot: root)
         #expect(try await reopened.load() == settings)

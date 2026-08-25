@@ -12,6 +12,24 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
         // a regular application menu remain available while the window is
         // closed and downloads continue in the background.
         NSApp.setActivationPolicy(.regular)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(settingsWindowDidBecomeKey(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func settingsWindowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.identifier?.rawValue == "com.abdownloadmanager.settings-window" else {
+            return
+        }
+        window.title = "下载管理器"
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -38,7 +56,7 @@ struct CoolDownloadManagerApp: App {
     private var appDelegate
     @Environment(\.openWindow)
     private var openWindow
-    @StateObject private var store = AppStore()
+    @StateObject private var store: AppStore
     @StateObject private var coordinator: AppCoordinator
 
     init() {
@@ -176,10 +194,21 @@ struct CoolDownloadManagerApp: App {
                     coordinator.presentPerHostSettings()
                 }
             )
+            .modifier(SettingsToolbarCleanup())
             .background {
                 WindowAccessor { window in
-                    window?.title = "下载管理器设置"
-                    window?.minSize = NSSize(width: 790, height: 560)
+                    // SwiftUI's Settings scene supplies an English default
+                    // title after the window is attached. Apply the product
+                    // title after attachment so the settings page stays in
+                    // Chinese as well.
+                    guard let window else { return }
+                    window.identifier = NSUserInterfaceItemIdentifier("com.abdownloadmanager.settings-window")
+                    window.title = "下载管理器"
+                    DispatchQueue.main.async {
+                        window.title = "下载管理器"
+                    }
+                    window.minSize = NSSize(width: 790, height: 560)
+                    window.toolbarStyle = .unified
                 }
             }
         }
@@ -188,5 +217,16 @@ struct CoolDownloadManagerApp: App {
     private func openExternal(_ string: String) {
         guard let url = URL(string: string) else { return }
         NSWorkspace.shared.open(url)
+    }
+}
+
+private struct SettingsToolbarCleanup: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.toolbar(removing: .sidebarToggle)
+        } else {
+            content
+        }
     }
 }

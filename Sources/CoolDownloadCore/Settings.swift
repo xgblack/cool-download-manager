@@ -4,16 +4,10 @@ import Foundation
 /// `.abdm/config/appSettings.json` key names.
 public struct AppSettingsModel: Codable, Equatable, Sendable {
     public var theme: String
-    public var defaultDarkTheme: String
-    public var defaultLightTheme: String
-    public var language: String?
-    public var font: String?
     public var uiScale: Double?
     public var mergeTopBarWithTitleBar: Bool
-    public var useNativeMenuBar: Bool
     public var showIconLabels: Bool
     public var useRelativeDateTime: Bool
-    public var useSystemTray: Bool
     public var threadCount: Int
     public var maxConcurrentDownloads: Int
     public var maxDownloadRetryCount: Int
@@ -53,21 +47,14 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
     public var proxyUsername: String
     public var proxyPassword: String
     public var proxyPACURL: String
-    public var dnsServers: [String]
 
     public static func defaults(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Self {
         Self(
             theme: "dark",
-            defaultDarkTheme: "dark",
-            defaultLightTheme: "light",
-            language: nil,
-            font: nil,
             uiScale: nil,
             mergeTopBarWithTitleBar: true,
-            useNativeMenuBar: false,
             showIconLabels: true,
             useRelativeDateTime: true,
-            useSystemTray: true,
             threadCount: 8,
             maxConcurrentDownloads: 3,
             maxDownloadRetryCount: 3,
@@ -103,23 +90,16 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             proxyPort: 8080,
             proxyUsername: "",
             proxyPassword: "",
-            proxyPACURL: "",
-            dnsServers: []
+            proxyPACURL: ""
         )
     }
 
     public init(
         theme: String,
-        defaultDarkTheme: String,
-        defaultLightTheme: String,
-        language: String?,
-        font: String?,
         uiScale: Double?,
         mergeTopBarWithTitleBar: Bool,
-        useNativeMenuBar: Bool,
         showIconLabels: Bool,
         useRelativeDateTime: Bool,
-        useSystemTray: Bool,
         threadCount: Int,
         maxConcurrentDownloads: Int,
         maxDownloadRetryCount: Int,
@@ -155,20 +135,13 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         proxyPort: Int,
         proxyUsername: String,
         proxyPassword: String,
-        proxyPACURL: String,
-        dnsServers: [String]
+        proxyPACURL: String
     ) {
         self.theme = theme
-        self.defaultDarkTheme = defaultDarkTheme
-        self.defaultLightTheme = defaultLightTheme
-        self.language = language
-        self.font = font
         self.uiScale = uiScale
         self.mergeTopBarWithTitleBar = mergeTopBarWithTitleBar
-        self.useNativeMenuBar = useNativeMenuBar
         self.showIconLabels = showIconLabels
         self.useRelativeDateTime = useRelativeDateTime
-        self.useSystemTray = useSystemTray
         self.threadCount = threadCount
         self.maxConcurrentDownloads = maxConcurrentDownloads
         self.maxDownloadRetryCount = maxDownloadRetryCount
@@ -205,12 +178,10 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         self.proxyUsername = proxyUsername
         self.proxyPassword = proxyPassword
         self.proxyPACURL = proxyPACURL
-        self.dnsServers = dnsServers
     }
 
     private enum CodingKeys: String, CodingKey {
-        case theme, defaultDarkTheme, defaultLightTheme, language, font, uiScale
-        case mergeTopBarWithTitleBar, useNativeMenuBar, showIconLabels, useRelativeDateTime, useSystemTray
+        case theme, uiScale, mergeTopBarWithTitleBar, showIconLabels, useRelativeDateTime
         case threadCount, maxConcurrentDownloads, maxDownloadRetryCount, dynamicPartCreation
         case useServerLastModifiedTime, appendExtensionToIncompleteDownloads, useSparseFileAllocation
         case useAverageSpeed, showDownloadProgressDialog, showDownloadCompletionDialog
@@ -219,7 +190,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         case successNotificationSound, defaultDownloadFolder, apiEnabled, apiPort, apiAuthEnabled, apiAuthKey
         case trackDeletedFilesOnDisk, deletePartialFileOnDownloadCancellation, sizeUnit, speedUnit
         case ignoreSSLCertificates, useCategoryByDefault, userAgent
-        case proxyMode, proxyHost, proxyPort, proxyUsername, proxyPassword, proxyPACURL, dnsServers
+        case proxyMode, proxyHost, proxyPort, proxyUsername, proxyPassword, proxyPACURL
     }
 
     public init(from decoder: Decoder) throws {
@@ -227,16 +198,10 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         let d = Self.defaults()
         self.init(
             theme: try c.decodeIfPresent(String.self, forKey: .theme) ?? d.theme,
-            defaultDarkTheme: try c.decodeIfPresent(String.self, forKey: .defaultDarkTheme) ?? d.defaultDarkTheme,
-            defaultLightTheme: try c.decodeIfPresent(String.self, forKey: .defaultLightTheme) ?? d.defaultLightTheme,
-            language: try c.decodeIfPresent(String.self, forKey: .language),
-            font: try c.decodeIfPresent(String.self, forKey: .font),
             uiScale: try c.decodeIfPresent(Double.self, forKey: .uiScale),
             mergeTopBarWithTitleBar: try c.decodeIfPresent(Bool.self, forKey: .mergeTopBarWithTitleBar) ?? d.mergeTopBarWithTitleBar,
-            useNativeMenuBar: try c.decodeIfPresent(Bool.self, forKey: .useNativeMenuBar) ?? d.useNativeMenuBar,
             showIconLabels: try c.decodeIfPresent(Bool.self, forKey: .showIconLabels) ?? d.showIconLabels,
             useRelativeDateTime: try c.decodeIfPresent(Bool.self, forKey: .useRelativeDateTime) ?? d.useRelativeDateTime,
-            useSystemTray: try c.decodeIfPresent(Bool.self, forKey: .useSystemTray) ?? d.useSystemTray,
             threadCount: try c.decodeIfPresent(Int.self, forKey: .threadCount) ?? d.threadCount,
             maxConcurrentDownloads: try c.decodeIfPresent(Int.self, forKey: .maxConcurrentDownloads) ?? d.maxConcurrentDownloads,
             maxDownloadRetryCount: try c.decodeIfPresent(Int.self, forKey: .maxDownloadRetryCount) ?? d.maxDownloadRetryCount,
@@ -272,8 +237,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             proxyPort: try c.decodeIfPresent(Int.self, forKey: .proxyPort) ?? d.proxyPort,
             proxyUsername: try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? d.proxyUsername,
             proxyPassword: try c.decodeIfPresent(String.self, forKey: .proxyPassword) ?? d.proxyPassword,
-            proxyPACURL: try c.decodeIfPresent(String.self, forKey: .proxyPACURL) ?? d.proxyPACURL,
-            dnsServers: try c.decodeIfPresent([String].self, forKey: .dnsServers) ?? d.dnsServers
+            proxyPACURL: try c.decodeIfPresent(String.self, forKey: .proxyPACURL) ?? d.proxyPACURL
         )
     }
 }
@@ -409,20 +373,20 @@ public actor SettingsStore {
 
     private func updateRaw(with settings: AppSettingsModel) {
         func set(_ key: String, _ value: JSONValue) { rawObject[key] = value }
-        func setOptional(_ key: String, _ value: String?) {
-            if let value { rawObject[key] = .string(value) } else { rawObject.removeValue(forKey: key) }
-        }
+        [
+            "defaultDarkTheme",
+            "defaultLightTheme",
+            "language",
+            "font",
+            "useNativeMenuBar",
+            "useSystemTray",
+            "dnsServers"
+        ].forEach { rawObject.removeValue(forKey: $0) }
         set("theme", .string(settings.theme))
-        set("defaultDarkTheme", .string(settings.defaultDarkTheme))
-        set("defaultLightTheme", .string(settings.defaultLightTheme))
-        setOptional("language", settings.language)
-        setOptional("font", settings.font)
         if let scale = settings.uiScale { set("uiScale", .number(String(scale))) } else { rawObject.removeValue(forKey: "uiScale") }
         set("mergeTopBarWithTitleBar", .bool(settings.mergeTopBarWithTitleBar))
-        set("useNativeMenuBar", .bool(settings.useNativeMenuBar))
         set("showIconLabels", .bool(settings.showIconLabels))
         set("useRelativeDateTime", .bool(settings.useRelativeDateTime))
-        set("useSystemTray", .bool(settings.useSystemTray))
         set("threadCount", .number(String(settings.threadCount)))
         set("maxConcurrentDownloads", .number(String(settings.maxConcurrentDownloads)))
         set("maxDownloadRetryCount", .number(String(settings.maxDownloadRetryCount)))
@@ -459,6 +423,5 @@ public actor SettingsStore {
         set("proxyUsername", .string(settings.proxyUsername))
         set("proxyPassword", .string(settings.proxyPassword))
         set("proxyPACURL", .string(settings.proxyPACURL))
-        set("dnsServers", .array(settings.dnsServers.map(JSONValue.string)))
     }
 }

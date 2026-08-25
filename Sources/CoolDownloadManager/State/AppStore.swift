@@ -38,7 +38,8 @@ final class AppStore: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dataRoot = home.appendingPathComponent(".abdm", isDirectory: true)
         let defaultSettings = AppSettingsModel.defaults(home: home)
-        let defaultFolder = URL(fileURLWithPath: defaultSettings.defaultDownloadFolder, isDirectory: true)
+        let initialSettings = Self.loadInitialSettings(dataRoot: dataRoot, fallback: defaultSettings)
+        let defaultFolder = URL(fileURLWithPath: initialSettings.defaultDownloadFolder, isDirectory: true)
         var loadedSettingsStore: SettingsStore?
         do {
             loadedSettingsStore = try SettingsStore(dataRoot: dataRoot)
@@ -46,7 +47,7 @@ final class AppStore: ObservableObject {
             loadedSettingsStore = nil
         }
         self.settingsStore = loadedSettingsStore
-        self.settings = defaultSettings
+        self.settings = initialSettings
         self.perHostSettingsStore = try? PerHostSettingsStore(dataRoot: dataRoot)
 
         do {
@@ -61,13 +62,13 @@ final class AppStore: ObservableObject {
                 schedulerConfiguration: DownloadSchedulerConfiguration(
                     maxConcurrentDownloads: maxConcurrent,
                     maxConnectionsPerDownload: rangeConnections,
-                    dynamicPartCreation: defaultSettings.dynamicPartCreation,
-                    appendExtensionToIncompleteDownloads: defaultSettings.appendExtensionToIncompleteDownloads,
-                    useSparseFileAllocation: defaultSettings.useSparseFileAllocation,
-                    deletePartialFileOnDownloadCancellation: defaultSettings.deletePartialFileOnDownloadCancellation,
-                    speedLimit: defaultSettings.speedLimit,
-                    userAgent: defaultSettings.userAgent,
-                    useServerLastModifiedTime: defaultSettings.useServerLastModifiedTime
+                    dynamicPartCreation: initialSettings.dynamicPartCreation,
+                    appendExtensionToIncompleteDownloads: initialSettings.appendExtensionToIncompleteDownloads,
+                    useSparseFileAllocation: initialSettings.useSparseFileAllocation,
+                    deletePartialFileOnDownloadCancellation: initialSettings.deletePartialFileOnDownloadCancellation,
+                    speedLimit: initialSettings.speedLimit,
+                    userAgent: initialSettings.userAgent,
+                    useServerLastModifiedTime: initialSettings.useServerLastModifiedTime
                 )
             )
         } catch {
@@ -95,6 +96,20 @@ final class AppStore: ObservableObject {
         missingFileTask?.cancel()
         integrationServer?.stop()
         privateSocketServer?.stop()
+    }
+
+    private static func loadInitialSettings(
+        dataRoot: URL,
+        fallback: AppSettingsModel
+    ) -> AppSettingsModel {
+        let settingsURL = dataRoot
+            .appendingPathComponent("config", isDirectory: true)
+            .appendingPathComponent("appSettings.json")
+        guard let data = try? Data(contentsOf: settingsURL),
+              let settings = try? JSONDecoder().decode(AppSettingsModel.self, from: data) else {
+            return fallback
+        }
+        return settings
     }
 
     func boot() async {
@@ -818,7 +833,6 @@ final class AppStore: ObservableObject {
             proxyUsername: settings.proxyUsername,
             proxyPassword: settings.proxyPassword,
             proxyPACURL: settings.proxyPACURL,
-            dnsServers: settings.dnsServers,
             ignoreSSLCertificates: settings.ignoreSSLCertificates
         )
     }

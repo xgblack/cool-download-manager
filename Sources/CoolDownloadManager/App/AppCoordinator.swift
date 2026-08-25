@@ -39,12 +39,7 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 
     func updateMenuBar() {
-        if store.settings.useSystemTray {
-            attachMenuBar()
-        } else {
-            menuBarController?.remove()
-            menuBarController = nil
-        }
+        attachMenuBar()
     }
 
     func applyWindowSettings() {

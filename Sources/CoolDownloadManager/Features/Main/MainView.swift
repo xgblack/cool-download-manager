@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import CoolDownloadCore
 
 struct MainView: View {
@@ -212,9 +211,6 @@ struct MainView: View {
                 viewState.folderURL = URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true)
             }
         }
-        .onChange(of: store.settings.useSystemTray) { _ in
-            coordinator.updateMenuBar()
-        }
         .onChange(of: store.settings.mergeTopBarWithTitleBar) { _ in
             coordinator.applyWindowSettings()
         }
@@ -250,7 +246,6 @@ struct MainView: View {
         }
         .preferredColorScheme(preferredColorScheme)
         .environment(\.dynamicTypeSize, dynamicTypeSize)
-        .font(applicationFont)
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -270,15 +265,6 @@ struct MainView: View {
         case ..<1.4: return .xLarge
         default: return .xxLarge
         }
-    }
-
-    private var applicationFont: Font {
-        guard let name = store.settings.font,
-              !name.isEmpty,
-              NSFont(name: name, size: 13) != nil else {
-            return .body
-        }
-        return .custom(name, size: 13)
     }
 
     private var shouldShowCompletionDialog: Bool {
