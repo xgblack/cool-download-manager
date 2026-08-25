@@ -62,6 +62,39 @@ public actor PartFileWriter {
         try handle.synchronize()
     }
 
+    /// Ensures a range download has a complete backing file before workers
+    /// write at independent offsets. Sparse mode only changes the logical
+    /// length; dense mode writes zero-filled chunks so the filesystem can
+    /// account for the requested space up front.
+    public func prepare(length: Int64, sparse: Bool) throws {
+        guard length >= 0 else {
+            throw DownloadCoreError.responseMismatch("cannot prepare a negative file length")
+        }
+        let currentLength = try self.length()
+        if currentLength > length {
+            try handle.truncate(atOffset: UInt64(length))
+        }
+        if sparse {
+            if currentLength < length {
+                try handle.truncate(atOffset: UInt64(length))
+            }
+            try handle.seek(toOffset: 0)
+            return
+        }
+
+        // Dense allocation must not erase bytes already downloaded during a
+        // resume. Extend only the missing tail with zeroes.
+        let zeroes = Data(repeating: 0, count: 1024 * 1024)
+        var remaining = max(0, length - min(currentLength, length))
+        try handle.seek(toOffset: UInt64(min(currentLength, length)))
+        while remaining > 0 {
+            let chunk = min(remaining, Int64(zeroes.count))
+            try handle.write(contentsOf: zeroes.prefix(Int(chunk)))
+            remaining -= chunk
+        }
+        try handle.seek(toOffset: 0)
+    }
+
     public func finish() throws {
         try handle.synchronize()
         try handle.close()

@@ -8,7 +8,33 @@ final class NotificationController {
 
     private init() {}
 
-    func notifyCompletion(record: DownloadRecord, soundEnabled: Bool) {
+    func notifyCompletion(record: DownloadRecord, soundEnabled: Bool, soundName: String? = nil) {
+        notify(
+            title: "下载完成",
+            body: record.name,
+            identifier: "com.abdownloadmanager.completed.\(record.id).\(record.revision)",
+            soundEnabled: soundEnabled,
+            soundName: soundName
+        )
+    }
+
+    func notifyFailure(record: DownloadRecord, soundEnabled: Bool, soundName: String? = nil) {
+        notify(
+            title: "下载失败",
+            body: record.error.map { "\(record.name)：\($0)" } ?? record.name,
+            identifier: "com.abdownloadmanager.failed.\(record.id).\(record.revision)",
+            soundEnabled: soundEnabled,
+            soundName: soundName
+        )
+    }
+
+    private func notify(
+        title: String,
+        body: String,
+        identifier: String,
+        soundEnabled: Bool,
+        soundName: String?
+    ) {
         Task {
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
@@ -16,13 +42,16 @@ final class NotificationController {
                 _ = try? await center.requestAuthorization(options: [.alert, .sound])
             }
             let content = UNMutableNotificationContent()
-            content.title = "下载完成"
-            content.body = record.name
+            content.title = title
+            content.body = body
             if soundEnabled {
-                content.sound = .default
+                let trimmedName = soundName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                content.sound = trimmedName.isEmpty
+                    ? .default
+                    : UNNotificationSound(named: UNNotificationSoundName(rawValue: trimmedName))
             }
             let request = UNNotificationRequest(
-                identifier: "com.abdownloadmanager.completed.\(record.id).\(record.revision)",
+                identifier: identifier,
                 content: content,
                 trigger: nil
             )

@@ -1072,6 +1072,39 @@ struct CoreTests {
         #expect(try Data(contentsOf: record.incompleteURL) == Data(repeating: 0, count: 4) + Data("456789".utf8))
     }
 
+    @Test("part file preparation preserves resume bytes while extending allocation")
+    func partFilePreparationPreservesResumeBytes() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = makeRecord(id: 22, folder: root)
+        let writer = try PartFileWriter(record: record)
+        try await writer.append(Data("resume".utf8))
+        try await writer.prepare(length: 10, sparse: false)
+        #expect(try await writer.length() == 10)
+        let bytes = try Data(contentsOf: record.incompleteURL)
+        #expect(bytes.prefix(6) == Data("resume".utf8))
+        #expect(bytes.suffix(4) == Data(repeating: 0, count: 4))
+    }
+
+    @Test("deleted completed files can be reconciled without removing present files")
+    func reconcileDeletedCompletedFiles() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        var missing = makeRecord(id: 23, folder: root)
+        missing.status = .completed
+        var present = makeRecord(id: 24, folder: root)
+        present.status = .completed
+        try Data("kept".utf8).write(to: present.destinationURL)
+        try await store.save(missing)
+        try await store.save(present)
+
+        let service = DownloadService(store: store, defaultFolder: root)
+        try await service.boot()
+        #expect(try await service.removeCompletedDownloadsMissingFiles() == [23])
+        #expect(Set(await service.snapshot().downloads.map(\.id)) == [24])
+    }
+
     @Test("HTTP downloader refuses a changed validator for a partial response")
     func httpValidatorMismatch() async throws {
         let transport = MemoryTransport()

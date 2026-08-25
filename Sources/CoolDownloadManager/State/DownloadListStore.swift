@@ -60,6 +60,8 @@ final class DownloadListStore: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var completedID: DownloadID?
     @Published private(set) var progressID: DownloadID?
+    @Published private(set) var failedID: DownloadID?
+    @Published private(set) var speeds: [DownloadID: Double] = [:]
 
     let service: DownloadService?
     /// Called after a snapshot no longer contains records that were visible
@@ -67,6 +69,7 @@ final class DownloadListStore: ObservableObject {
     var onRemovedIDs: ((Set<DownloadID>) -> Void)?
     private var eventTask: Task<Void, Never>?
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
+    private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
 
     init(service: DownloadService?) {
         self.service = service
@@ -142,6 +145,21 @@ final class DownloadListStore: ObservableObject {
     func apply(_ records: [DownloadRecord], announceCompletion: Bool = true) {
         let previousStatuses = knownStatuses
         let previousIDs = Set(knownStatuses.keys)
+        let now = Date()
+        var nextProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
+        var nextSpeeds: [DownloadID: Double] = [:]
+        for record in records {
+            if let previous = previousProgress[record.id] {
+                let elapsed = now.timeIntervalSince(previous.date)
+                let delta = record.downloadedBytes - previous.bytes
+                if elapsed > 0, delta >= 0 {
+                    nextSpeeds[record.id] = Double(delta) / elapsed
+                }
+            }
+            nextProgress[record.id] = (record.downloadedBytes, now)
+        }
+        previousProgress = nextProgress
+        speeds = nextSpeeds
         downloads = records.sorted { $0.createdAt > $1.createdAt }
         knownStatuses = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0.status) })
         let removedIDs = previousIDs.subtracting(knownStatuses.keys)
@@ -160,8 +178,24 @@ final class DownloadListStore: ObservableObject {
         }) {
             progressID = started.id
         }
+        if announceCompletion, let failed = records.first(where: { record in
+            record.status == .failed && previousStatuses[record.id] != .failed
+        }) {
+            failedID = failed.id
+        }
         let availableIDs = Set(records.map(\.id))
         selectedIDs = selectedIDs.intersection(availableIDs)
+    }
+
+    func speed(for id: DownloadID, average: Bool = false) -> Double? {
+        guard let record = downloads.first(where: { $0.id == id }), record.downloadedBytes > 0 else {
+            return nil
+        }
+        if average {
+            let elapsed = max(1, Date().timeIntervalSince(record.createdAt))
+            return Double(record.downloadedBytes) / elapsed
+        }
+        return speeds[id]
     }
 
     func acknowledgeCompletion() {
@@ -170,6 +204,10 @@ final class DownloadListStore: ObservableObject {
 
     func acknowledgeProgress() {
         progressID = nil
+    }
+
+    func acknowledgeFailure() {
+        failedID = nil
     }
 
     func selectAllVisible() {

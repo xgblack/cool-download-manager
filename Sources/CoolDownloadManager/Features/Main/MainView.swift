@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import CoolDownloadCore
 
 struct MainView: View {
@@ -32,6 +33,7 @@ struct MainView: View {
                         coordinator.presentSettings()
                     } label: {
                         Label("设置", systemImage: "gearshape")
+                            .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
                     }
                     .help("打开设置")
                 }
@@ -40,6 +42,7 @@ struct MainView: View {
                         coordinator.presentQueues()
                     } label: {
                         Label("队列", systemImage: "list.bullet.rectangle")
+                            .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
                     }
                     .help("管理下载队列")
                 }
@@ -48,6 +51,7 @@ struct MainView: View {
                         coordinator.presentCategories()
                     } label: {
                         Label("分类", systemImage: "folder")
+                            .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
                     }
                     .help("管理下载分类")
                 }
@@ -88,16 +92,6 @@ struct MainView: View {
                     coordinator.pendingURLText = ""
                 }
             }
-        }
-        .sheet(isPresented: $coordinator.isSettingsPresented) {
-            SettingsView(
-                store: store,
-                onClose: { coordinator.isSettingsPresented = false },
-                onOpenPerHostSettings: {
-                    coordinator.isSettingsPresented = false
-                    coordinator.presentPerHostSettings()
-                }
-            )
         }
         .sheet(isPresented: $coordinator.isQueuePresented) {
             QueueView(store: store, onClose: { coordinator.isQueuePresented = false })
@@ -221,12 +215,11 @@ struct MainView: View {
         .onChange(of: store.settings.useSystemTray) { _ in
             coordinator.updateMenuBar()
         }
+        .onChange(of: store.settings.mergeTopBarWithTitleBar) { _ in
+            coordinator.applyWindowSettings()
+        }
         .onChange(of: store.downloadList.completedID) { id in
             guard let id, let record = store.downloadList.record(id: id) else { return }
-            NotificationController.shared.notifyCompletion(
-                record: record,
-                soundEnabled: store.settings.notificationSound
-            )
             if !(record.taskSettings?.showCompletionDialog ?? store.settings.showDownloadCompletionDialog) {
                 store.downloadList.acknowledgeCompletion()
             } else if store.settings.focusDownloadCompletionDialogOnFinish {
@@ -242,6 +235,10 @@ struct MainView: View {
                 coordinator.showMainWindow()
             }
         }
+        .onChange(of: store.downloadList.failedID) { id in
+            guard id != nil else { return }
+            store.downloadList.acknowledgeFailure()
+        }
         .fileImporter(
             isPresented: $viewState.isShowingFolderPicker,
             allowedContentTypes: [.folder],
@@ -251,6 +248,37 @@ struct MainView: View {
                 viewState.folderURL = url
             }
         }
+        .preferredColorScheme(preferredColorScheme)
+        .environment(\.dynamicTypeSize, dynamicTypeSize)
+        .font(applicationFont)
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch store.settings.theme.lowercased() {
+        case "dark": return .dark
+        case "light": return .light
+        default: return nil
+        }
+    }
+
+    private var dynamicTypeSize: DynamicTypeSize {
+        switch store.settings.uiScale ?? 1 {
+        case ..<0.85: return .xSmall
+        case ..<0.95: return .small
+        case ..<1.05: return .medium
+        case ..<1.2: return .large
+        case ..<1.4: return .xLarge
+        default: return .xxLarge
+        }
+    }
+
+    private var applicationFont: Font {
+        guard let name = store.settings.font,
+              !name.isEmpty,
+              NSFont(name: name, size: 13) != nil else {
+            return .body
+        }
+        return .custom(name, size: 13)
     }
 
     private var shouldShowCompletionDialog: Bool {
@@ -344,6 +372,13 @@ struct MainView: View {
                                 onCopyLink: { coordinator.copy(record.source.link) },
                                 onChecksum: { coordinator.presentChecksum(for: [record.id]) },
                                 categories: store.categories,
+                                speed: store.downloadList.speed(
+                                    for: record.id,
+                                    average: store.settings.useAverageSpeed
+                                ),
+                                relativeDate: store.settings.useRelativeDateTime,
+                                sizeUnit: store.settings.sizeUnit,
+                                speedUnit: store.settings.speedUnit,
                                 onMoveToCategory: { categoryID in
                                     store.downloadList.selectedIDs = [record.id]
                                     store.assignSelectedToCategory(categoryID, ids: [record.id])
@@ -482,6 +517,19 @@ struct MainView: View {
     }
 }
 
+private struct IconLabelStyleModifier: ViewModifier {
+    let showLabels: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if showLabels {
+            content.labelStyle(.titleAndIcon)
+        } else {
+            content.labelStyle(.iconOnly)
+        }
+    }
+}
+
 @MainActor
 final class MainViewState: ObservableObject {
     @Published var urlText = ""
@@ -569,6 +617,10 @@ private struct DownloadTableRow: View {
     let onCopyLink: () -> Void
     let onChecksum: () -> Void
     let categories: [DownloadCategory]
+    let speed: Double?
+    let relativeDate: Bool
+    let sizeUnit: String
+    let speedUnit: String
     let onMoveToCategory: (DownloadID?) -> Void
 
     var body: some View {
@@ -612,12 +664,24 @@ private struct DownloadTableRow: View {
             .font(.caption)
             .frame(width: 170, alignment: .leading)
 
-            Text(sizeText)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(sizeText)
+                if let speedText {
+                    Text(speedText)
+                        .foregroundStyle(.secondary)
+                }
+            }
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 130, alignment: .trailing)
 
-            Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
+            Group {
+                if relativeDate {
+                    Text(record.createdAt, style: .relative)
+                } else {
+                    Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
+                }
+            }
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 120, alignment: .trailing)
@@ -683,11 +747,18 @@ private struct DownloadTableRow: View {
 
     private var sizeText: String {
         let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
+        formatter.countStyle = sizeUnit == "DecimalBytes" ? .decimal : .binary
         if let total = record.totalBytes {
             return "\(formatter.string(fromByteCount: record.downloadedBytes)) / \(formatter.string(fromByteCount: total))"
         }
         return formatter.string(fromByteCount: record.downloadedBytes)
+    }
+
+    private var speedText: String? {
+        guard let speed, speed > 0 else { return nil }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = speedUnit == "DecimalBytes" ? .decimal : .binary
+        return "\(formatter.string(fromByteCount: Int64(speed))) / 秒"
     }
 
     private var iconName: String {

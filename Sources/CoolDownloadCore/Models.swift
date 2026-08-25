@@ -21,6 +21,10 @@ public enum DownloadStatus: String, Codable, Sendable {
 public struct DownloadSchedulerConfiguration: Sendable, Equatable {
     public let maxConcurrentDownloads: Int
     public let maxConnectionsPerDownload: Int
+    public let dynamicPartCreation: Bool
+    public let appendExtensionToIncompleteDownloads: Bool
+    public let useSparseFileAllocation: Bool
+    public let deletePartialFileOnDownloadCancellation: Bool
     /// A value of zero disables the global byte-rate limiter.
     public let speedLimit: Int64
     /// An empty value means the URLSession default User-Agent.
@@ -32,6 +36,10 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
     public init(
         maxConcurrentDownloads: Int = 3,
         maxConnectionsPerDownload: Int = 1,
+        dynamicPartCreation: Bool = true,
+        appendExtensionToIncompleteDownloads: Bool = false,
+        useSparseFileAllocation: Bool = true,
+        deletePartialFileOnDownloadCancellation: Bool = false,
         speedLimit: Int64 = 0,
         userAgent: String? = nil,
         useServerLastModifiedTime: Bool = false
@@ -39,6 +47,10 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
         // The historical setting uses 0 for unlimited concurrency.
         self.maxConcurrentDownloads = maxConcurrentDownloads <= 0 ? Int.max : max(1, maxConcurrentDownloads)
         self.maxConnectionsPerDownload = max(1, maxConnectionsPerDownload)
+        self.dynamicPartCreation = dynamicPartCreation
+        self.appendExtensionToIncompleteDownloads = appendExtensionToIncompleteDownloads
+        self.useSparseFileAllocation = useSparseFileAllocation
+        self.deletePartialFileOnDownloadCancellation = deletePartialFileOnDownloadCancellation
         self.speedLimit = max(0, speedLimit)
         let trimmedAgent = userAgent?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.userAgent = trimmedAgent?.isEmpty == false ? trimmedAgent : nil
@@ -158,6 +170,9 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var fileChecksum: String?
     /// Per-task overrides and completion behavior. Absent for legacy records.
     public var taskSettings: DownloadTaskSettings?
+    /// The deterministic temporary filename used for this task. `nil` keeps
+    /// the historical `.dl-{id}.abdm.part` path for old records.
+    public var incompleteFileName: String?
     public var revision: Int64
 
     public init(
@@ -178,6 +193,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         error: String? = nil,
         fileChecksum: String? = nil,
         taskSettings: DownloadTaskSettings? = nil,
+        incompleteFileName: String? = nil,
         revision: Int64 = 1
     ) {
         self.id = id
@@ -197,6 +213,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         self.error = error
         self.fileChecksum = fileChecksum
         self.taskSettings = taskSettings
+        self.incompleteFileName = incompleteFileName
         self.revision = revision
     }
 
@@ -206,7 +223,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
 
     public var incompleteURL: URL {
         URL(fileURLWithPath: folder, isDirectory: true)
-            .appendingPathComponent(".dl-\(id).abdm.part")
+            .appendingPathComponent(incompleteFileName ?? ".dl-\(id).abdm.part")
     }
 }
 

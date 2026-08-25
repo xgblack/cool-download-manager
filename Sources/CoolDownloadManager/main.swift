@@ -169,6 +169,20 @@ struct CoolDownloadManagerApp: App {
                 }
             }
         }
+        Settings {
+            SettingsView(
+                store: store,
+                onOpenPerHostSettings: {
+                    coordinator.presentPerHostSettings()
+                }
+            )
+            .background {
+                WindowAccessor { window in
+                    window?.title = "下载管理器设置"
+                    window?.minSize = NSSize(width: 790, height: 560)
+                }
+            }
+        }
     }
 
     private func openExternal(_ string: String) {

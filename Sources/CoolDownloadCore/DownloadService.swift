@@ -210,6 +210,26 @@ public actor DownloadService {
         DownloadSnapshot(downloads: records.values.sorted { $0.id < $1.id })
     }
 
+    /// Removes completed records whose destination was deleted outside the
+    /// manager. This mirrors the historical "track deleted files" option and
+    /// keeps the persisted queue in sync with the filesystem.
+    @discardableResult
+    public func removeCompletedDownloadsMissingFiles() async throws -> [DownloadID] {
+        let missing = records.values
+            .filter { $0.status == .completed && !FileManager.default.fileExists(atPath: $0.destinationURL.path) }
+            .map(\.id)
+        for id in missing {
+            guard let record = records[id], record.status == .completed else { continue }
+            try await store.remove(id: id)
+            records[id] = nil
+            emit(.removed(id: id))
+            if let queueID = record.queueID {
+                reconcileQueue(queueID)
+            }
+        }
+        return missing
+    }
+
     public func add(_ request: AddDownloadRequest) async throws -> DownloadID {
         guard let url = URL(string: request.source.link),
               let scheme = url.scheme?.lowercased(),
@@ -249,7 +269,10 @@ public actor DownloadService {
             categoryID: request.categoryID,
             createdAt: now,
             updatedAt: now,
-            taskSettings: try request.taskSettings?.validated()
+            taskSettings: try request.taskSettings?.validated(),
+            incompleteFileName: schedulerConfiguration.appendExtensionToIncompleteDownloads
+                ? "\(name).abdm.part"
+                : nil
         )
         records[id] = record
         try await store.save(record)
@@ -455,6 +478,8 @@ public actor DownloadService {
                 if FileManager.default.fileExists(atPath: record.destinationURL.path) {
                     try FileManager.default.removeItem(at: record.destinationURL)
                 }
+            }
+            if removeFiles || (schedulerConfiguration.deletePartialFileOnDownloadCancellation && record.status != .completed) {
                 if FileManager.default.fileExists(atPath: record.incompleteURL.path) {
                     try FileManager.default.removeItem(at: record.incompleteURL)
                 }
@@ -853,6 +878,7 @@ public actor DownloadService {
         records[id] = record
         try await store.save(record)
         emit(.updated(record))
+        try await writer.prepare(length: totalBytes, sparse: schedulerConfiguration.useSparseFileAllocation)
 
         let expectedETag = record.etag
         let expectedLastModified = record.lastModified
@@ -1058,6 +1084,7 @@ public actor DownloadService {
     }
 
     private func effectiveThreadCount(_ record: DownloadRecord) -> Int {
+        guard schedulerConfiguration.dynamicPartCreation || !record.parts.isEmpty else { return 1 }
         let hostCount = hostSettings(for: record.source.link)?.threadCount
         let configured = record.taskSettings?.threadCount
             ?? hostCount

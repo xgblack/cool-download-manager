@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import ServiceManagement
 import CoolDownloadCore
 import CoolDownloadIntegration
 
@@ -13,6 +14,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var categories: [DownloadCategory] = []
     @Published private(set) var perHostSettings: [PerHostSettingsItem] = []
     @Published private(set) var settings: AppSettingsModel
+    @Published private(set) var autoStartStatus = SMAppService.mainApp.status
 
     let service: DownloadService?
     var downloadList: DownloadListStore
@@ -26,7 +28,10 @@ final class AppStore: ObservableObject {
     private var privateSocketServer: PrivateSocketServer?
     private var queueScheduleTask: Task<Void, Never>?
     private var queueEventTask: Task<Void, Never>?
+    private var downloadEventTask: Task<Void, Never>?
+    private var missingFileTask: Task<Void, Never>?
     private var scheduledQueueStates: [DownloadID: Bool] = [:]
+    private var notificationStatuses: [DownloadID: DownloadStatus] = [:]
     private var isShuttingDown = false
 
     init() {
@@ -55,7 +60,14 @@ final class AppStore: ObservableObject {
                 defaultFolder: defaultFolder,
                 schedulerConfiguration: DownloadSchedulerConfiguration(
                     maxConcurrentDownloads: maxConcurrent,
-                    maxConnectionsPerDownload: rangeConnections
+                    maxConnectionsPerDownload: rangeConnections,
+                    dynamicPartCreation: defaultSettings.dynamicPartCreation,
+                    appendExtensionToIncompleteDownloads: defaultSettings.appendExtensionToIncompleteDownloads,
+                    useSparseFileAllocation: defaultSettings.useSparseFileAllocation,
+                    deletePartialFileOnDownloadCancellation: defaultSettings.deletePartialFileOnDownloadCancellation,
+                    speedLimit: defaultSettings.speedLimit,
+                    userAgent: defaultSettings.userAgent,
+                    useServerLastModifiedTime: defaultSettings.useServerLastModifiedTime
                 )
             )
         } catch {
@@ -79,6 +91,8 @@ final class AppStore: ObservableObject {
     deinit {
         queueScheduleTask?.cancel()
         queueEventTask?.cancel()
+        downloadEventTask?.cancel()
+        missingFileTask?.cancel()
         integrationServer?.stop()
         privateSocketServer?.stop()
     }
@@ -100,6 +114,10 @@ final class AppStore: ObservableObject {
             }
 
             await downloadList.reload()
+            let initialSnapshot = await service.snapshot()
+            notificationStatuses = Dictionary(
+                uniqueKeysWithValues: initialSnapshot.downloads.map { ($0.id, $0.status) }
+            )
             downloadList.beginObserving()
             await reloadQueues()
             await reloadCategories()
@@ -110,19 +128,14 @@ final class AppStore: ObservableObject {
             await service.updatePerHostSettings(perHostSettings)
             startQueueScheduleMonitor()
             startQueueEventMonitor()
+            startDownloadEventMonitor()
             do {
                 if let settingsStore {
                     do {
                         let loadedSettings = try await settingsStore.load()
                         settings = loadedSettings
                         await service.updateConfiguration(
-                            schedulerConfiguration: DownloadSchedulerConfiguration(
-                                maxConcurrentDownloads: loadedSettings.maxConcurrentDownloads,
-                                maxConnectionsPerDownload: loadedSettings.threadCount,
-                                speedLimit: loadedSettings.speedLimit,
-                                userAgent: loadedSettings.userAgent,
-                                useServerLastModifiedTime: loadedSettings.useServerLastModifiedTime
-                            ),
+                            schedulerConfiguration: schedulerConfiguration(for: loadedSettings),
                             retryPolicy: DownloadRetryPolicy(
                                 maxAttempts: max(1, loadedSettings.maxDownloadRetryCount),
                                 delay: .seconds(1)
@@ -130,6 +143,16 @@ final class AppStore: ObservableObject {
                             defaultFolder: URL(fileURLWithPath: loadedSettings.defaultDownloadFolder, isDirectory: true),
                             networkConfiguration: networkConfiguration(for: loadedSettings)
                         )
+                        do {
+                            try applyAutoStartOnBoot(loadedSettings.autoStartOnBoot)
+                        } catch {
+                            refreshAutoStartStatus()
+                            errorMessage = "无法更新开机启动：\(error.localizedDescription)"
+                        }
+                        if loadedSettings.trackDeletedFilesOnDisk {
+                            await reconcileMissingFiles()
+                            startMissingFileMonitor()
+                        }
                     } catch {
                         errorMessage = error.localizedDescription
                     }
@@ -151,6 +174,10 @@ final class AppStore: ObservableObject {
         queueScheduleTask = nil
         queueEventTask?.cancel()
         queueEventTask = nil
+        downloadEventTask?.cancel()
+        downloadEventTask = nil
+        missingFileTask?.cancel()
+        missingFileTask = nil
 
         // Stop accepting browser requests before cancelling downloads so quit
         // cannot race a new add/start command with state persistence.
@@ -258,13 +285,7 @@ final class AppStore: ObservableObject {
             let saved = try await settingsStore.save(updated)
             settings = saved
             await service.updateConfiguration(
-                schedulerConfiguration: DownloadSchedulerConfiguration(
-                    maxConcurrentDownloads: saved.maxConcurrentDownloads,
-                    maxConnectionsPerDownload: saved.threadCount,
-                    speedLimit: saved.speedLimit,
-                    userAgent: saved.userAgent,
-                    useServerLastModifiedTime: saved.useServerLastModifiedTime
-                ),
+                schedulerConfiguration: schedulerConfiguration(for: saved),
                 retryPolicy: DownloadRetryPolicy(
                     maxAttempts: max(1, saved.maxDownloadRetryCount),
                     delay: .seconds(1)
@@ -272,13 +293,41 @@ final class AppStore: ObservableObject {
                 defaultFolder: URL(fileURLWithPath: saved.defaultDownloadFolder, isDirectory: true),
                 networkConfiguration: networkConfiguration(for: saved)
             )
+            try applyAutoStartOnBoot(saved.autoStartOnBoot)
+            if saved.trackDeletedFilesOnDisk {
+                await reconcileMissingFiles()
+                startMissingFileMonitor()
+            } else {
+                missingFileTask?.cancel()
+                missingFileTask = nil
+            }
             stopIntegration()
             try startIntegration(service: service, settings: saved)
             errorMessage = nil
             return true
         } catch {
+            refreshAutoStartStatus()
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    func refreshAutoStartStatus() {
+        autoStartStatus = SMAppService.mainApp.status
+    }
+
+    var autoStartStatusTitle: String {
+        switch autoStartStatus {
+        case .enabled:
+            return "已启用"
+        case .notRegistered:
+            return "未注册"
+        case .requiresApproval:
+            return "需要系统批准"
+        case .notFound:
+            return "当前 App 不支持"
+        @unknown default:
+            return "未知状态"
         }
     }
 
@@ -579,6 +628,49 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Keeps completion/failure notifications alive even when the main window
+    /// has been closed. The UI still consumes the published IDs for dialogs,
+    /// but notification delivery belongs to the application lifecycle.
+    private func startDownloadEventMonitor() {
+        guard downloadEventTask == nil, let service else { return }
+        downloadEventTask = Task { @MainActor [weak self] in
+            let events = await service.events()
+            for await event in events {
+                guard !Task.isCancelled, let self else { break }
+                self.handleDownloadEvent(event)
+            }
+        }
+    }
+
+    private func handleDownloadEvent(_ event: DownloadEvent) {
+        switch event {
+        case .created(let record):
+            notificationStatuses[record.id] = record.status
+        case .updated(let record):
+            let previous = notificationStatuses[record.id]
+            if record.status == .completed, previous != .completed {
+                NotificationController.shared.notifyCompletion(
+                    record: record,
+                    soundEnabled: settings.notificationSound,
+                    soundName: settings.successNotificationSound.isEmpty
+                        ? settings.generalNotificationSound
+                        : settings.successNotificationSound
+                )
+            } else if record.status == .failed, previous != .failed {
+                NotificationController.shared.notifyFailure(
+                    record: record,
+                    soundEnabled: settings.notificationSound,
+                    soundName: settings.errorNotificationSound.isEmpty
+                        ? settings.generalNotificationSound
+                        : settings.errorNotificationSound
+                )
+            }
+            notificationStatuses[record.id] = record.status
+        case .removed(let id):
+            notificationStatuses[id] = nil
+        }
+    }
+
     private func handleQueueEvent(_ event: DownloadQueueEvent) {
         guard case let .becameEmpty(queueID, completionAction) = event else { return }
         guard completionAction != .none else { return }
@@ -729,5 +821,56 @@ final class AppStore: ObservableObject {
             dnsServers: settings.dnsServers,
             ignoreSSLCertificates: settings.ignoreSSLCertificates
         )
+    }
+
+    private func schedulerConfiguration(for settings: AppSettingsModel) -> DownloadSchedulerConfiguration {
+        DownloadSchedulerConfiguration(
+            maxConcurrentDownloads: settings.maxConcurrentDownloads,
+            maxConnectionsPerDownload: settings.threadCount,
+            dynamicPartCreation: settings.dynamicPartCreation,
+            appendExtensionToIncompleteDownloads: settings.appendExtensionToIncompleteDownloads,
+            useSparseFileAllocation: settings.useSparseFileAllocation,
+            deletePartialFileOnDownloadCancellation: settings.deletePartialFileOnDownloadCancellation,
+            speedLimit: settings.speedLimit,
+            userAgent: settings.userAgent,
+            useServerLastModifiedTime: settings.useServerLastModifiedTime
+        )
+    }
+
+    private func applyAutoStartOnBoot(_ enabled: Bool) throws {
+        if enabled {
+            guard SMAppService.mainApp.status != .enabled else { return }
+            try SMAppService.mainApp.register()
+        } else {
+            switch SMAppService.mainApp.status {
+            case .enabled, .requiresApproval:
+                try SMAppService.mainApp.unregister()
+            case .notRegistered, .notFound:
+                break
+            @unknown default:
+                break
+            }
+        }
+        refreshAutoStartStatus()
+    }
+
+    private func reconcileMissingFiles() async {
+        do {
+            _ = try await service?.removeCompletedDownloadsMissingFiles()
+            await downloadList.reload()
+        } catch {
+            errorMessage = "无法同步已删除文件：\(error.localizedDescription)"
+        }
+    }
+
+    private func startMissingFileMonitor() {
+        missingFileTask?.cancel()
+        missingFileTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled, let self, self.settings.trackDeletedFilesOnDisk else { break }
+                await self.reconcileMissingFiles()
+            }
+        }
     }
 }

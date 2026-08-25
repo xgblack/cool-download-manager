@@ -5,7 +5,6 @@ import CoolDownloadCore
 @MainActor
 final class AppCoordinator: NSObject, ObservableObject {
     @Published var isAddDownloadPresented = false
-    @Published var isSettingsPresented = false
     @Published var isQueuePresented = false
     @Published var isBatchDownloadPresented = false
     @Published var isPerHostSettingsPresented = false
@@ -48,6 +47,19 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
     }
 
+    func applyWindowSettings() {
+        guard let window = mainWindow else { return }
+        if store.settings.mergeTopBarWithTitleBar {
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.toolbarStyle = .unifiedCompact
+        } else {
+            window.titleVisibility = .visible
+            window.titlebarAppearsTransparent = false
+            window.toolbarStyle = .automatic
+        }
+    }
+
     func configureMainWindowOpener(_ action: @escaping () -> Void) {
         openMainWindowAction = action
     }
@@ -55,8 +67,10 @@ final class AppCoordinator: NSObject, ObservableObject {
     func registerMainWindow(_ window: NSWindow?) {
         guard let window else { return }
         mainWindow = window
+        window.identifier = NSUserInterfaceItemIdentifier("com.abdownloadmanager.main-window")
         window.title = "下载管理器"
         window.minSize = NSSize(width: 900, height: 560)
+        applyWindowSettings()
         if focusMainWindowWhenRegistered {
             focusMainWindowWhenRegistered = false
             focusMainWindow(window)
@@ -83,8 +97,8 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
         mainWindow = nil
         return NSApp.windows.first { window in
-            window.title == "下载管理器"
-                || (window.styleMask.contains(.titled) && window.contentView != nil)
+            window.identifier?.rawValue == "com.abdownloadmanager.main-window"
+                || window.title == "下载管理器"
         }
     }
 
@@ -104,8 +118,8 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 
     func presentSettings() {
-        showMainWindow()
-        isSettingsPresented = true
+        // SwiftUI's Settings scene installs the standard macOS action.
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     func presentQueues() {
