@@ -4,6 +4,7 @@ public enum DownloadCoreError: Error, LocalizedError, Sendable, Equatable {
     case invalidURL(String)
     case invalidFolder(String)
     case invalidName(String)
+    case invalidTaskSettings(String)
     case duplicateDestination(String)
     case notFound(DownloadID)
     case invalidState(DownloadID, DownloadStatus)
@@ -27,6 +28,8 @@ public enum DownloadCoreError: Error, LocalizedError, Sendable, Equatable {
             return "Invalid download folder: \(value)"
         case .invalidName(let value):
             return "Invalid download name: \(value)"
+        case .invalidTaskSettings(let reason):
+            return reason
         case .duplicateDestination(let value):
             return "A download already uses this destination: \(value)"
         case .notFound(let id):

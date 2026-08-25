@@ -149,13 +149,19 @@ public protocol DownloadIntegrationHandler: Sendable {
 public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
     private let service: DownloadService
     private let queuesProvider: @Sendable () async throws -> [IntegrationQueue]
+    private let queueItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)?
+    private let categoryItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)?
 
     public init(
         service: DownloadService,
-        queuesProvider: @escaping @Sendable () async throws -> [IntegrationQueue] = { [] }
+        queuesProvider: @escaping @Sendable () async throws -> [IntegrationQueue] = { [] },
+        queueItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)? = nil,
+        categoryItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)? = nil
     ) {
         self.service = service
         self.queuesProvider = queuesProvider
+        self.queueItemAdder = queueItemAdder
+        self.categoryItemAdder = categoryItemAdder
     }
 
     public func addFromBrowser(_ request: AddDownloadsRequest) async throws {
@@ -187,6 +193,12 @@ public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
                 start: false
             )
         )
+        if let queueID = request.queueId {
+            try await queueItemAdder?(queueID, id)
+        }
+        if let categoryID = request.categoryId {
+            try await categoryItemAdder?(categoryID, id)
+        }
         if request.startQueue, let queueID = request.queueId {
             try await service.startQueue(id: queueID)
         } else if request.startDownload {

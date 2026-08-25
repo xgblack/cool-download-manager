@@ -4,6 +4,401 @@ import Testing
 
 @Suite("CoolDownloadCore")
 struct CoreTests {
+    @Test("checksum calculator hashes files incrementally")
+    func checksumCalculator() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("checksum.txt")
+        try Data("hello world".utf8).write(to: file)
+        let checksum = try FileChecksumCalculator().calculate(fileURL: file, algorithm: .sha256)
+        #expect(checksum.description == "SHA-256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9")
+        #expect(FileChecksum(string: checksum.description) == checksum)
+        #expect(FileChecksum(string: "SHA-256:not-hex") == nil)
+    }
+
+    @Test("checksum calculator reports missing files")
+    func checksumMissingFile() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missing = root.appendingPathComponent("missing")
+        do {
+            _ = try FileChecksumCalculator().calculate(fileURL: missing, algorithm: .md5)
+            Issue.record("missing checksum file should fail")
+        } catch let error as ChecksumError {
+            #expect(error == .fileNotFound(missing))
+        }
+    }
+
+    @Test("per-host settings round trip and wildcard precedence")
+    func perHostSettings() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try PerHostSettingsStore(dataRoot: root)
+        let exact = PerHostSettingsItem(host: "cdn.example.test", threadCount: 4)
+        let wildcard = PerHostSettingsItem(host: "*.example.test", threadCount: 2, speedLimit: 10)
+        _ = try await store.save([exact, wildcard])
+        #expect(try await store.matching(host: "cdn.example.test") == exact)
+        #expect(try await store.matching(host: "img.example.test") == wildcard)
+        let reopened = try PerHostSettingsStore(dataRoot: root)
+        #expect(try await reopened.load() == [exact, wildcard])
+    }
+
+    @Test("per-host settings reject duplicate and malformed hosts")
+    func perHostSettingsValidation() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try PerHostSettingsStore(dataRoot: root)
+        do {
+            _ = try await store.save([
+                PerHostSettingsItem(host: "example.test"),
+                PerHostSettingsItem(host: "EXAMPLE.TEST")
+            ])
+            Issue.record("duplicate normalized hosts should be rejected")
+        } catch let error as PerHostSettingsError {
+            #expect(error == .invalid("主机设置不能重复：example.test"))
+        }
+        do {
+            _ = try await store.save([PerHostSettingsItem(host: "https://example.test/path")])
+            Issue.record("host paths should be rejected")
+        } catch let error as PerHostSettingsError {
+            #expect(error == .invalid("主机设置不能包含路径"))
+        }
+    }
+
+    @Test("task settings persist and validate independently of global settings")
+    func taskSettingsRoundTrip() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let service = DownloadService(
+            store: store,
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 2,
+                maxConnectionsPerDownload: 8,
+                speedLimit: 4096
+            )
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/task.bin"),
+            folder: root.path
+        ))
+        let settings = DownloadTaskSettings(
+            threadCount: 2,
+            speedLimit: 128,
+            completionAction: .lock,
+            showCompletionDialog: false,
+            showPartInfo: true
+        )
+        _ = try await service.updateTaskSettings(id: id, settings: settings)
+        #expect(await service.snapshot().downloads.first?.taskSettings == settings)
+
+        do {
+            _ = try await service.updateTaskSettings(
+                id: id,
+                settings: DownloadTaskSettings(threadCount: 65)
+            )
+            Issue.record("thread counts above the supported range should fail")
+        } catch let error as DownloadCoreError {
+            #expect(error == .invalidTaskSettings("任务线程数必须在 1 到 64 之间"))
+        }
+    }
+
+    @Test("per-host headers and credentials override global request defaults")
+    func perHostRequestOverrides() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = HeaderCaptureTransport(body: Data("ok".utf8))
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(userAgent: "GlobalAgent")
+        )
+        try await service.boot()
+        await service.updatePerHostSettings([
+            PerHostSettingsItem(
+                host: "downloads.example.test",
+                username: "alice",
+                password: "secret",
+                userAgent: "HostAgent"
+            )
+        ])
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://downloads.example.test/file.bin",
+                downloadPage: "https://downloads.example.test/page"
+            ),
+            folder: root.path,
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            if await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        let request = try #require(transport.lastRequest())
+        #expect(request.value(forHTTPHeaderField: "User-Agent") == "HostAgent")
+        #expect(request.value(forHTTPHeaderField: "Referer") == "https://downloads.example.test/page")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Basic YWxpY2U6c2VjcmV0")
+    }
+
+    @Test("batch expansion matches the legacy padding rules")
+    func batchExpansion() throws {
+        let expander = BatchDownloadExpander()
+        #expect(try expander.expand(
+            pattern: "https://example.test/photo-*.jpg",
+            start: 8,
+            end: 10
+        ) == [
+            "https://example.test/photo-08.jpg",
+            "https://example.test/photo-09.jpg",
+            "https://example.test/photo-10.jpg"
+        ])
+        #expect(try expander.expand(
+            pattern: "https://example.test/*-*.bin",
+            start: 1,
+            end: 2,
+            wildcardLength: .unspecified
+        ) == [
+            "https://example.test/1-1.bin",
+            "https://example.test/2-2.bin"
+        ])
+        #expect(try expander.expand(
+            pattern: "https://example.test/*.bin",
+            start: 1,
+            end: 2,
+            wildcardLength: .custom(4)
+        ).first == "https://example.test/0001.bin")
+    }
+
+    @Test("batch expansion rejects invalid and oversized ranges")
+    func batchExpansionValidation() throws {
+        let expander = BatchDownloadExpander()
+        #expect(throws: BatchDownloadError.missingWildcard) {
+            try expander.expand(pattern: "https://example.test/file.bin", start: 1, end: 2)
+        }
+        #expect(throws: BatchDownloadError.invalidRange) {
+            try expander.expand(pattern: "https://example.test/*.bin", start: 2, end: 1)
+        }
+        #expect(throws: BatchDownloadError.tooManyItems(maximum: 1000)) {
+            try expander.expand(pattern: "https://example.test/*.bin", start: 0, end: 1000)
+        }
+    }
+
+    @Test("queue store migrates legacy fields and preserves unknown fields")
+    func queueStoreRoundTrip() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("config/download_db/queues", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"{"id":12,"name":"Archive","maxConcurrent":4,"queueItems":[3,8],"futureField":{"keep":true}}"#.utf8)
+            .write(to: directory.appendingPathComponent("12.json"))
+
+        let store = try QueueStore(dataRoot: root)
+        let loaded = try await store.load()
+        #expect(loaded == [DownloadQueueModel(
+            id: 12,
+            name: "Archive",
+            maxConcurrent: 4,
+            queueItems: [3, 8]
+        )])
+        var changed = try await store.model(id: 12)
+        changed.stopQueueOnEmpty = true
+        _ = try await store.save(changed)
+        let object = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: directory.appendingPathComponent("12.json"))
+            ) as? [String: Any]
+        )
+        #expect((object["futureField"] as? [String: Any])?["keep"] as? Bool == true)
+        #expect(object["stopQueueOnEmpty"] as? Bool == true)
+        #expect(
+            try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ).filter { $0.pathExtension == "tmp" }.isEmpty
+        )
+    }
+
+    @Test("queue store creates, edits and protects the main queue")
+    func queueStoreCRUD() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try QueueStore(dataRoot: root)
+        #expect(try await store.load().first?.id == 0)
+        let created = try await store.create(name: "Nightly")
+        #expect(created.id > 10)
+        var edited = created
+        edited.name = "Nightly 2"
+        edited.queueItems = [4, 5]
+        _ = try await store.save(edited)
+        #expect(try await store.model(id: created.id) == edited)
+        let second = try await store.create(name: "Later")
+        try await store.assignItems([4, 5], to: second.id)
+        #expect(try await store.model(id: created.id).queueItems == [])
+        #expect(try await store.model(id: second.id).queueItems == [4, 5])
+        try await store.assignItems([4], to: nil)
+        #expect(try await store.model(id: second.id).queueItems == [5])
+        try await store.remove(id: created.id)
+        do {
+            _ = try await store.model(id: created.id)
+            Issue.record("removed queue should not be readable")
+        } catch let error as QueueStoreError {
+            #expect(error == .notFound(created.id))
+        }
+        do {
+            try await store.remove(id: 0)
+            Issue.record("the main queue should not be removable")
+        } catch let error as QueueStoreError {
+            #expect(error == .cannotDeleteMainQueue)
+        }
+    }
+
+    @Test("category store loads defaults, preserves fields and moves items")
+    func categoryStoreCRUD() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaultFolder = root.appendingPathComponent("Downloads", isDirectory: true)
+        let store = try CategoryStore(dataRoot: root, defaultFolder: defaultFolder)
+
+        let defaults = try await store.load()
+        #expect(defaults.count == 6)
+        #expect(defaults.first?.name == "Compressed")
+        #expect(defaults.first?.acceptedFileTypes.contains("zip") == true)
+
+        let custom = try await store.create(
+            name: "Fixtures",
+            path: root.appendingPathComponent("Fixtures", isDirectory: true).path,
+            acceptedFileTypes: ["bin"]
+        )
+        var edited = custom
+        edited.acceptedURLPatterns = ["example.test/*"]
+        _ = try await store.save(edited)
+        try await store.assignItems([7, 8], to: custom.id)
+        #expect(try await store.model(id: custom.id).items == [7, 8])
+        #expect(try await store.matchingCategory(fileName: "file.bin", url: "https://example.test/a")?.id == custom.id)
+
+        let raw = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: store.categoriesURL)) as? [[String: Any]]
+        )
+        #expect(raw.contains { ($0["id"] as? Int) == Int(custom.id) })
+
+        try await store.assignItems([7], to: nil)
+        #expect(try await store.model(id: custom.id).items == [8])
+    }
+
+    @Test("queue schedule evaluates weekdays and overnight windows")
+    func queueScheduleEvaluation() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let mondayMorning = calendar.date(from: DateComponents(
+            calendar: calendar, year: 2026, month: 8, day: 24, hour: 3, minute: 0
+        ))!
+        let mondayMidday = calendar.date(from: DateComponents(
+            calendar: calendar, year: 2026, month: 8, day: 24, hour: 12, minute: 0
+        ))!
+        let mondayLate = calendar.date(from: DateComponents(
+            calendar: calendar, year: 2026, month: 8, day: 24, hour: 23, minute: 0
+        ))!
+        let overnight = QueueSchedule(
+            daysOfWeek: [1],
+            startTime: "22:00",
+            endTime: "06:00",
+            enabledStartTime: true,
+            enabledEndTime: true
+        )
+        #expect(overnight.isActive(at: mondayMorning, calendar: calendar))
+        #expect(!overnight.isActive(at: mondayMidday, calendar: calendar))
+        #expect(overnight.isActive(at: mondayLate, calendar: calendar))
+        #expect(QueueSchedule.default.isActive(at: mondayLate, calendar: calendar))
+    }
+
+    @Test("settings use defaults when the file is absent")
+    func settingsDefaults() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try SettingsStore(dataRoot: root)
+        let settings = try await store.load()
+        #expect(settings.threadCount == 8)
+        #expect(settings.maxConcurrentDownloads == 3)
+        #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/ABDM"))
+        #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))
+    }
+
+    @Test("settings save round trips and preserves unknown fields")
+    func settingsRoundTrip() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let config = root.appendingPathComponent("config", isDirectory: true)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        try Data(#"{"futureSetting":{"keep":true},"threadCount":12}"#.utf8)
+            .write(to: config.appendingPathComponent("appSettings.json"))
+
+        let store = try SettingsStore(dataRoot: root)
+        var settings = try await store.load()
+        #expect(settings.threadCount == 12)
+        settings.apiPort = 16200
+        settings.proxyPassword = "secret-value"
+        let saved = try await store.save(settings)
+        #expect(saved == settings)
+
+        let object = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: config.appendingPathComponent("appSettings.json"))
+            ) as? [String: Any]
+        )
+        #expect((object["futureSetting"] as? [String: Any])?["keep"] as? Bool == true)
+        #expect(object["apiPort"] as? Int == 16200)
+        #expect(object["proxyPassword"] as? String == "secret-value")
+
+        let reopened = try SettingsStore(dataRoot: root)
+        #expect(try await reopened.load() == settings)
+    }
+
+    @Test("settings reject invalid ranges without exposing secrets")
+    func settingsValidation() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SettingsStore(dataRoot: root)
+        var settings = try await store.load()
+        settings.apiPort = 0
+        settings.apiAuthKey = "do-not-leak"
+
+        do {
+            _ = try await store.save(settings)
+            Issue.record("invalid API port should be rejected")
+        } catch let error as SettingsStoreError {
+            #expect(error == .invalid("API 端口必须在 1 到 65535 之间"))
+            #expect(!error.localizedDescription.contains("do-not-leak"))
+        }
+    }
+
+    @Test("corrupt settings are not cached as defaults")
+    func corruptSettingsNotCached() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SettingsStore(dataRoot: root)
+        let settingsURL = store.settingsURL
+        try Data("[]".utf8).write(to: settingsURL)
+        do {
+            _ = try await store.load()
+            Issue.record("a non-object settings root should be rejected")
+        } catch let error as SettingsStoreError {
+            #expect(error == .corrupt(settingsURL, "根值不是 JSON 对象"))
+        }
+        try Data(#"{"threadCount":4}"#.utf8).write(to: settingsURL)
+        #expect(try await store.load().threadCount == 4)
+    }
+
     @Test("store saves, loads and locks a data root")
     func storeRoundTripAndLock() async throws {
         let root = try makeTemporaryDirectory()
@@ -288,6 +683,51 @@ struct CoreTests {
         #expect((await store.record(id: queued))?.queueID == 7)
     }
 
+    @Test("started queues emit one completion event and honor their policy")
+    func queueCompletionEvent() async throws {
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(status: 200, headers: ["Content-Length": "2"], body: Data("ok".utf8))
+        }
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root
+        )
+        try await service.boot()
+        await service.updateQueuePolicies([
+            7: DownloadQueuePolicy(
+                maxConcurrent: 1,
+                stopQueueOnEmpty: true,
+                completionAction: .lock
+            )
+        ])
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/queue-event", suggestedName: "event.bin"),
+            queueID: 7
+        ))
+        let stream = await service.queueEvents()
+        let eventTask = Task<DownloadQueueEvent?, Never> {
+            for await event in stream {
+                return event
+            }
+            return nil
+        }
+        try await Task.sleep(for: .milliseconds(1))
+        try await service.startQueue(id: 7)
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        let event = await eventTask.value
+        #expect(event == .becameEmpty(queueID: 7, completionAction: .lock))
+    }
+
     @Test("service retries transient HTTP failures and records the final success")
     func transientRetry() async throws {
         let transport = RetryTransport(failuresBeforeSuccess: 2)
@@ -369,6 +809,41 @@ struct CoreTests {
         let record = try #require(completed)
         #expect(record.downloadedBytes == 11)
         #expect(try Data(contentsOf: record.destinationURL) == Data("hello world".utf8))
+    }
+
+    @Test("completed downloads can be explicitly redownloaded")
+    func serviceRedownloadsCompletedFile() async throws {
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(status: 200, headers: ["Content-Length": "2"], body: Data("ok".utf8))
+        }
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/redownload", suggestedName: "same.bin"),
+            start: true
+        ))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let first = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
+        #expect(first.status == .completed)
+        try await service.redownload(ids: [id])
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let second = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
+        #expect(second.status == .completed)
+        #expect(try Data(contentsOf: second.destinationURL) == Data("ok".utf8))
     }
 
     @Test("download service uses configured parallel ranges and persists parts")
@@ -612,6 +1087,8 @@ struct CoreTests {
           "etag": "\\\"v1\\\"",
           "lastModified": "Wed, 21 Oct 2015 07:28:00 GMT",
           "dateAdded": 1700000000000,
+          "preferredConnectionCount": 4,
+          "speedLimit": 1024,
           "status": "Paused",
           "futureField": {"keep": true}
         }
@@ -623,6 +1100,8 @@ struct CoreTests {
         #expect(decoded.record.totalBytes == 12)
         #expect(decoded.record.etag == "\"v1\"")
         #expect(decoded.record.lastModified == "Wed, 21 Oct 2015 07:28:00 GMT")
+        #expect(decoded.record.taskSettings?.threadCount == 4)
+        #expect(decoded.record.taskSettings?.speedLimit == 1024)
 
         var changed = decoded.record
         changed.status = .completed
@@ -630,6 +1109,7 @@ struct CoreTests {
         let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
         #expect((object?["futureField"] as? [String: Any])?["keep"] as? Bool == true)
         #expect(object?["status"] as? String == "Completed")
+        #expect(object?["preferredConnectionCount"] as? Int == 4)
     }
 
     @Test("legacy parts sidecar is restored and written back")
@@ -694,6 +1174,33 @@ private final class MemoryTransport: HTTPTransport, @unchecked Sendable {
 
     static func reply(status: Int, headers: [String: String], body: Data) -> Reply {
         Reply(status: status, headers: headers, body: body)
+    }
+}
+
+private final class HeaderCaptureTransport: HTTPTransport, @unchecked Sendable {
+    private let body: Data
+    private let lock = NSLock()
+    private var requests: [URLRequest] = []
+
+    init(body: Data) {
+        self.body = body
+    }
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        lock.withLock { requests.append(request) }
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.yield(body)
+            continuation.finish()
+        }
+        return HTTPTransportResponse(
+            statusCode: 200,
+            headers: ["Content-Length": String(body.count)],
+            body: stream
+        )
+    }
+
+    func lastRequest() -> URLRequest? {
+        lock.withLock { requests.last }
     }
 }
 

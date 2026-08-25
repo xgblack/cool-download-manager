@@ -29,26 +29,132 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
 struct CoolDownloadManagerApp: App {
     @NSApplicationDelegateAdaptor(CoolDownloadManagerAppDelegate.self)
     private var appDelegate
-    @StateObject private var model = AppModel()
+    @StateObject private var store = AppStore()
+    @StateObject private var coordinator: AppCoordinator
+
+    init() {
+        let store = AppStore()
+        _store = StateObject(wrappedValue: store)
+        _coordinator = StateObject(wrappedValue: AppCoordinator(store: store))
+    }
 
     var body: some Scene {
         WindowGroup("下载管理器") {
-            ContentView()
-                .environmentObject(model)
+            MainView(store: store, coordinator: coordinator, viewState: coordinator.mainViewState)
                 .onAppear {
-                    let currentModel = model
-                    appDelegate.terminationHandler = { [weak currentModel] in
-                        await currentModel?.shutdown()
+                    let currentStore = store
+                    appDelegate.terminationHandler = { [currentStore] in
+                        await currentStore.shutdown()
                     }
                 }
         }
         .commands {
-            CommandGroup(after: .newItem) {
-                Button("添加下载") {
-                    model.addAndStart()
+            CommandGroup(replacing: .newItem) {
+                Button("新建下载") {
+                    coordinator.presentAddDownload()
                 }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .keyboardShortcut("n", modifiers: [.command])
+                Button("从剪贴板新建") {
+                    coordinator.presentAddDownload(fromClipboard: true)
+                }
+                .keyboardShortcut("v", modifiers: [.command])
+            }
+            CommandGroup(after: .newItem) {
+                Button("批量下载") {
+                    coordinator.presentBatchDownload()
+                }
+                Button("队列") {
+                    coordinator.presentQueues()
+                }
+                Button("分类") {
+                    coordinator.presentCategories()
+                }
+            }
+            CommandMenu("任务") {
+                Button("继续") {
+                    store.downloadList.startSelected()
+                }
+                .keyboardShortcut("r", modifiers: [.command])
+                .disabled(!store.downloadList.canStartSelection)
+                Button("暂停") {
+                    store.downloadList.pauseSelected()
+                }
+                .keyboardShortcut("p", modifiers: [.command])
+                .disabled(!store.downloadList.canPauseSelection)
+                Button("重新下载") {
+                    store.downloadList.redownloadSelected()
+                }
+                .disabled(!store.downloadList.selectedDownloads.contains { $0.status == .completed })
+                Button("删除") {
+                    store.downloadList.removeSelected()
+                }
+                .keyboardShortcut(.delete, modifiers: [])
+                .disabled(!store.downloadList.hasSelection)
+                Button("删除已完成") {
+                    store.downloadList.removeCompleted()
+                }
+                Button("删除未完成") {
+                    store.downloadList.removeIncomplete()
+                }
+                Button("删除全部") {
+                    store.downloadList.removeAll()
+                }
+                Divider()
+                Button("启动队列") {
+                    if case .queue(let id) = store.downloadList.filter {
+                        store.startQueue(id)
+                    } else {
+                        coordinator.showNotice("请先在侧栏选择一个队列。")
+                    }
+                }
+                Button("停止队列") {
+                    if case .queue(let id) = store.downloadList.filter {
+                        store.stopQueue(id)
+                    } else {
+                        coordinator.showNotice("请先在侧栏选择一个队列。")
+                    }
+                }
+                Button("停止全部") {
+                    store.downloadList.stopAll()
+                }
+            }
+            CommandMenu("工具") {
+                Button("浏览器集成") {
+                    coordinator.presentSettings()
+                }
+                Button("每主机设置") {
+                    coordinator.presentPerHostSettings()
+                }
+                Button("设置") {
+                    coordinator.presentSettings()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+            }
+            CommandGroup(after: .help) {
+                Button("支持") {
+                    openExternal("https://github.com/xgblack/cool-download-manager/issues")
+                }
+                Button("第三方库") {
+                    coordinator.showNotice("Swift 标准库、SwiftUI、AppKit、CryptoKit、UserNotifications\n详见项目源码和 Package.swift。")
+                }
+                Button("翻译者") {
+                    openExternal("https://github.com/xgblack/cool-download-manager/graphs/contributors")
+                }
+                Button("捐赠") {
+                    openExternal("https://github.com/xgblack/cool-download-manager")
+                }
+                Button("检查更新") {
+                    coordinator.checkForUpdates()
+                }
+                Button("关于") {
+                    coordinator.showNotice("Cool download manager\n纯 Swift macOS 重写版本")
+                }
             }
         }
+    }
+
+    private func openExternal(_ string: String) {
+        guard let url = URL(string: string) else { return }
+        NSWorkspace.shared.open(url)
     }
 }

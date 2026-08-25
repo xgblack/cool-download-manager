@@ -107,6 +107,19 @@ public enum LegacyJSONCodec {
         let parts = parseParts(object["parts"])
         let queueID = integer(object, keys: ["queueId", "queueID"])
         let categoryID = integer(object, keys: ["categoryId", "categoryID"])
+        let fileChecksum = string(object, keys: ["fileChecksum", "checksum"])
+        let legacyThreadCount = integer(object, keys: ["preferredConnectionCount", "threadCount"])
+        let legacySpeedLimit = integer(object, keys: ["speedLimit"])
+        let normalizedThreadCount = legacyThreadCount.flatMap { value in
+            (1...64).contains(value) ? Int(value) : nil
+        }
+        let normalizedSpeedLimit = legacySpeedLimit.flatMap { $0 >= 0 ? $0 : nil }
+        let taskSettings: DownloadTaskSettings? = (normalizedThreadCount != nil || normalizedSpeedLimit != nil)
+            ? DownloadTaskSettings(
+                threadCount: normalizedThreadCount,
+                speedLimit: normalizedSpeedLimit
+            )
+            : nil
         let downloadedBytes = integer(object, keys: ["downloadedBytes", "current"])
             ?? parts.reduce(0) { $0 + $1.downloaded }
 
@@ -132,6 +145,8 @@ public enum LegacyJSONCodec {
             createdAt: createdAt,
             updatedAt: updatedAt,
             error: string(object, keys: ["error", "errorMessage"]),
+            fileChecksum: fileChecksum,
+            taskSettings: taskSettings,
             revision: integer(object, keys: ["revision"]) ?? 1
         )
         return Decoded(record: record, rawObject: rawObject)
@@ -192,6 +207,11 @@ public enum LegacyJSONCodec {
         object["downloadedBytes"] = .number(String(record.downloadedBytes))
         object["queueId"] = record.queueID.map { .number(String($0)) } ?? .null
         object["categoryId"] = record.categoryID.map { .number(String($0)) } ?? .null
+        object["fileChecksum"] = record.fileChecksum.map(JSONValue.string) ?? .null
+        if let taskSettings = record.taskSettings {
+            object["preferredConnectionCount"] = taskSettings.threadCount.map { .number(String($0)) } ?? .null
+            object["speedLimit"] = taskSettings.speedLimit.map { .number(String($0)) } ?? .null
+        }
         object["revision"] = .number(String(record.revision))
         if let error = record.error {
             object["error"] = .string(error)

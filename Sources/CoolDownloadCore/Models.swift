@@ -21,10 +21,28 @@ public enum DownloadStatus: String, Codable, Sendable {
 public struct DownloadSchedulerConfiguration: Sendable, Equatable {
     public let maxConcurrentDownloads: Int
     public let maxConnectionsPerDownload: Int
+    /// A value of zero disables the global byte-rate limiter.
+    public let speedLimit: Int64
+    /// An empty value means the URLSession default User-Agent.
+    public let userAgent: String?
+    /// When enabled, a successfully completed file receives the server's
+    /// HTTP `Last-Modified` timestamp when it can be parsed safely.
+    public let useServerLastModifiedTime: Bool
 
-    public init(maxConcurrentDownloads: Int = 3, maxConnectionsPerDownload: Int = 1) {
-        self.maxConcurrentDownloads = max(1, maxConcurrentDownloads)
+    public init(
+        maxConcurrentDownloads: Int = 3,
+        maxConnectionsPerDownload: Int = 1,
+        speedLimit: Int64 = 0,
+        userAgent: String? = nil,
+        useServerLastModifiedTime: Bool = false
+    ) {
+        // The historical setting uses 0 for unlimited concurrency.
+        self.maxConcurrentDownloads = maxConcurrentDownloads <= 0 ? Int.max : max(1, maxConcurrentDownloads)
         self.maxConnectionsPerDownload = max(1, maxConnectionsPerDownload)
+        self.speedLimit = max(0, speedLimit)
+        let trimmedAgent = userAgent?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.userAgent = trimmedAgent?.isEmpty == false ? trimmedAgent : nil
+        self.useServerLastModifiedTime = useServerLastModifiedTime
     }
 }
 
@@ -82,6 +100,44 @@ public struct DownloadPart: Codable, Sendable, Equatable {
     }
 }
 
+/// Settings that override the global downloader configuration for one task.
+/// The entire value is optional on `DownloadRecord` so old records keep their
+/// exact shape and continue to inherit current global settings.
+public struct DownloadTaskSettings: Codable, Sendable, Equatable {
+    /// `nil` inherits the global connection count; valid values are 1...64.
+    public var threadCount: Int?
+    /// `nil` inherits the global limit; zero means unlimited.
+    public var speedLimit: Int64?
+    public var completionAction: QueueCompletionAction
+    /// `nil` inherits the global completion-dialog preference.
+    public var showCompletionDialog: Bool?
+    public var showPartInfo: Bool
+
+    public init(
+        threadCount: Int? = nil,
+        speedLimit: Int64? = nil,
+        completionAction: QueueCompletionAction = .none,
+        showCompletionDialog: Bool? = nil,
+        showPartInfo: Bool = false
+    ) {
+        self.threadCount = threadCount
+        self.speedLimit = speedLimit
+        self.completionAction = completionAction
+        self.showCompletionDialog = showCompletionDialog
+        self.showPartInfo = showPartInfo
+    }
+
+    public func validated() throws -> Self {
+        if let threadCount, !(1...64).contains(threadCount) {
+            throw DownloadCoreError.invalidTaskSettings("任务线程数必须在 1 到 64 之间")
+        }
+        if let speedLimit, speedLimit < 0 {
+            throw DownloadCoreError.invalidTaskSettings("任务速度限制不能为负数")
+        }
+        return self
+    }
+}
+
 public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public let id: DownloadID
     public var source: DownloadSource
@@ -98,6 +154,10 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var createdAt: Date
     public var updatedAt: Date
     public var error: String?
+    /// Optional expected checksum in the historical `ALGORITHM:hex` format.
+    public var fileChecksum: String?
+    /// Per-task overrides and completion behavior. Absent for legacy records.
+    public var taskSettings: DownloadTaskSettings?
     public var revision: Int64
 
     public init(
@@ -116,6 +176,8 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         error: String? = nil,
+        fileChecksum: String? = nil,
+        taskSettings: DownloadTaskSettings? = nil,
         revision: Int64 = 1
     ) {
         self.id = id
@@ -133,6 +195,8 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.error = error
+        self.fileChecksum = fileChecksum
+        self.taskSettings = taskSettings
         self.revision = revision
     }
 
@@ -153,6 +217,7 @@ public struct AddDownloadRequest: Codable, Sendable, Equatable {
     public var queueID: DownloadID?
     public var categoryID: DownloadID?
     public var start: Bool
+    public var taskSettings: DownloadTaskSettings?
 
     public init(
         source: DownloadSource,
@@ -160,7 +225,8 @@ public struct AddDownloadRequest: Codable, Sendable, Equatable {
         name: String? = nil,
         queueID: DownloadID? = nil,
         categoryID: DownloadID? = nil,
-        start: Bool = false
+        start: Bool = false,
+        taskSettings: DownloadTaskSettings? = nil
     ) {
         self.source = source
         self.folder = folder
@@ -168,6 +234,7 @@ public struct AddDownloadRequest: Codable, Sendable, Equatable {
         self.queueID = queueID
         self.categoryID = categoryID
         self.start = start
+        self.taskSettings = taskSettings
     }
 }
 

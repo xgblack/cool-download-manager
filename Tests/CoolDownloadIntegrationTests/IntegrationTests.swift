@@ -255,6 +255,50 @@ struct IntegrationTests {
         #expect(records.first(where: { $0.name == "silent.bin" })?.status == .added)
         #expect(records.first(where: { $0.name == "start.bin" })?.status == .completed)
     }
+
+    @Test("headless downloads register queue and category items")
+    func headlessItemRegistration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cdm-headless-items-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let queueStore = try QueueStore(dataRoot: root)
+        let queue = try await queueStore.create(name: "Browser")
+        let categoryStore = try CategoryStore(
+            dataRoot: root,
+            defaultFolder: root.appendingPathComponent("Downloads", isDirectory: true)
+        )
+        _ = try await categoryStore.load()
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: IntegrationTransport()),
+            defaultFolder: root
+        )
+        try await service.boot()
+        let handler = CoreDownloadIntegrationHandler(
+            service: service,
+            queueItemAdder: { queueID, downloadID in
+                try await queueStore.assignItems([downloadID], to: queueID)
+            },
+            categoryItemAdder: { categoryID, downloadID in
+                try await categoryStore.assignItems([downloadID], to: categoryID)
+            }
+        )
+
+        let id = try await handler.addHeadless(HeadlessDownloadRequest(
+            downloadSource: IntegrationDownloadCredential(
+                link: "https://fixture.invalid/browser.bin",
+                suggestedName: "browser.bin"
+            ),
+            queueId: queue.id,
+            categoryId: 0
+        ))
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.queueID == queue.id)
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.categoryID == 0)
+        #expect(try await queueStore.model(id: queue.id).queueItems == [id])
+        #expect(try await categoryStore.model(id: 0).items == [id])
+    }
 }
 
 private actor RecordingHandler: DownloadIntegrationHandler {

@@ -1,0 +1,433 @@
+import Foundation
+import SwiftUI
+import CoolDownloadCore
+
+enum DownloadFilter: Hashable, Sendable {
+    case all
+    case active
+    case completed
+    case failed
+    case paused
+    case queue(DownloadID)
+    case category(DownloadID)
+
+    var title: String {
+        switch self {
+        case .all: return "全部下载"
+        case .active: return "进行中"
+        case .completed: return "已完成"
+        case .failed: return "失败"
+        case .paused: return "已暂停"
+        case .queue: return "队列"
+        case .category: return "分类"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all: return "arrow.down.circle"
+        case .active: return "arrow.down.circle.fill"
+        case .completed: return "checkmark.circle"
+        case .failed: return "exclamationmark.circle"
+        case .paused: return "pause.circle"
+        case .queue: return "list.bullet.rectangle"
+        case .category: return "folder"
+        }
+    }
+}
+
+enum DownloadSort: String, CaseIterable, Sendable {
+    case createdNewest
+    case name
+    case status
+
+    var title: String {
+        switch self {
+        case .createdNewest: return "添加日期"
+        case .name: return "名称"
+        case .status: return "状态"
+        }
+    }
+}
+
+@MainActor
+final class DownloadListStore: ObservableObject {
+    @Published private(set) var downloads: [DownloadRecord] = []
+    @Published var selectedIDs: Set<DownloadID> = []
+    @Published var filter: DownloadFilter = .all
+    @Published var searchText = ""
+    @Published var sort: DownloadSort = .createdNewest
+    @Published var errorMessage: String?
+    @Published private(set) var completedID: DownloadID?
+    @Published private(set) var progressID: DownloadID?
+
+    let service: DownloadService?
+    /// Called after a snapshot no longer contains records that were visible
+    /// before. AppStore uses this to prune queue/category indexes.
+    var onRemovedIDs: ((Set<DownloadID>) -> Void)?
+    private var eventTask: Task<Void, Never>?
+    private var knownStatuses: [DownloadID: DownloadStatus] = [:]
+
+    init(service: DownloadService?) {
+        self.service = service
+    }
+
+    deinit {
+        eventTask?.cancel()
+    }
+
+    var visibleDownloads: [DownloadRecord] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filtered = downloads.filter { record in
+            matchesFilter(record) &&
+                (query.isEmpty || record.name.lowercased().contains(query) || record.source.link.lowercased().contains(query))
+        }
+
+        switch sort {
+        case .createdNewest:
+            return filtered.sorted { $0.createdAt > $1.createdAt }
+        case .name:
+            return filtered.sorted {
+                $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        case .status:
+            return filtered.sorted {
+                statusRank($0.status) < statusRank($1.status)
+            }
+        }
+    }
+
+    var selectedDownloads: [DownloadRecord] {
+        downloads.filter { selectedIDs.contains($0.id) }
+    }
+
+    var hasSelection: Bool { !selectedIDs.isEmpty }
+
+    var canStartSelection: Bool {
+        selectedDownloads.contains { record in
+            record.status == .added || record.status == .paused || record.status == .failed || record.status == .cancelled
+        }
+    }
+
+    var canPauseSelection: Bool {
+        selectedDownloads.contains { record in
+            record.status == .preparing || record.status == .downloading || record.status == .retrying
+        }
+    }
+
+    var canRetrySelection: Bool {
+        selectedDownloads.contains { record in
+            record.status == .failed || record.status == .cancelled
+        }
+    }
+
+    func reload() async {
+        guard let service else { return }
+        let snapshot = await service.snapshot()
+        apply(snapshot.downloads, announceCompletion: false)
+    }
+
+    func beginObserving() {
+        guard eventTask == nil, let service else { return }
+        eventTask = Task { [weak self] in
+            let events = await service.events()
+            for await _ in events {
+                guard !Task.isCancelled else { break }
+                let snapshot = await service.snapshot()
+                self?.apply(snapshot.downloads)
+            }
+        }
+    }
+
+    func apply(_ records: [DownloadRecord], announceCompletion: Bool = true) {
+        let previousStatuses = knownStatuses
+        let previousIDs = Set(knownStatuses.keys)
+        downloads = records.sorted { $0.createdAt > $1.createdAt }
+        knownStatuses = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0.status) })
+        let removedIDs = previousIDs.subtracting(knownStatuses.keys)
+        if !removedIDs.isEmpty {
+            onRemovedIDs?(removedIDs)
+        }
+        if announceCompletion, let completed = records.first(where: { record in
+            record.status == .completed && previousStatuses[record.id] != .completed
+        }) {
+            completedID = completed.id
+        }
+        if announceCompletion, let started = records.first(where: { record in
+            (record.status == .preparing || record.status == .downloading)
+                && previousStatuses[record.id] != .preparing
+                && previousStatuses[record.id] != .downloading
+        }) {
+            progressID = started.id
+        }
+        let availableIDs = Set(records.map(\.id))
+        selectedIDs = selectedIDs.intersection(availableIDs)
+    }
+
+    func acknowledgeCompletion() {
+        completedID = nil
+    }
+
+    func acknowledgeProgress() {
+        progressID = nil
+    }
+
+    func selectAllVisible() {
+        selectedIDs = Set(visibleDownloads.map(\.id))
+    }
+
+    func clearSelection() {
+        selectedIDs.removeAll()
+    }
+
+    func toggleSelection(_ id: DownloadID) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+    }
+
+    func addAndStart(
+        link: String,
+        name: String?,
+        folder: URL,
+        queueID: DownloadID? = nil,
+        categoryID: DownloadID? = nil,
+        startImmediately: Bool = true
+    ) {
+        guard let service else {
+            errorMessage = "下载核心尚未准备好"
+            return
+        }
+        let trimmedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedLink.isEmpty else {
+            errorMessage = "请输入下载地址"
+            return
+        }
+
+        let links = trimmedLink
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        Task { [weak self] in
+            do {
+                for link in links {
+                    _ = try await service.add(
+                        AddDownloadRequest(
+                            source: DownloadSource(
+                                kind: .http,
+                                link: link,
+                                suggestedName: links.count == 1 ? name?.nilIfBlank : nil
+                            ),
+                            folder: folder.path,
+                            name: links.count == 1 ? name?.nilIfBlank : nil,
+                            queueID: queueID,
+                            categoryID: categoryID,
+                            start: startImmediately
+                        )
+                    )
+                }
+                await self?.reload()
+            } catch {
+                self?.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func addBatch(
+        pattern: String,
+        start: Int,
+        end: Int,
+        wildcardLength: BatchWildcardLength,
+        folder: URL,
+        startImmediately: Bool
+    ) {
+        guard let service else {
+            errorMessage = "下载核心尚未准备好"
+            return
+        }
+        let links: [String]
+        do {
+            links = try BatchDownloadExpander().expand(
+                pattern: pattern,
+                start: start,
+                end: end,
+                wildcardLength: wildcardLength
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
+        Task { [weak self] in
+            do {
+                for link in links {
+                    _ = try await service.add(AddDownloadRequest(
+                        source: DownloadSource(kind: .http, link: link),
+                        folder: folder.path,
+                        start: startImmediately
+                    ))
+                }
+                await self?.reload()
+            } catch {
+                self?.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func startSelected() {
+        let ids = selectedDownloads
+            .filter { $0.status == .added || $0.status == .paused || $0.status == .failed || $0.status == .cancelled }
+            .map(\.id)
+        perform(ids: ids) { service, ids in
+            try await service.resume(ids: ids)
+        }
+    }
+
+    func pauseSelected() {
+        let ids = selectedDownloads
+            .filter { $0.status == .preparing || $0.status == .downloading || $0.status == .retrying }
+            .map(\.id)
+        perform(ids: ids) { service, ids in
+            try await service.pause(ids: ids)
+        }
+    }
+
+    func retrySelected() {
+        let ids = selectedDownloads
+            .filter { $0.status == .failed || $0.status == .cancelled }
+            .map(\.id)
+        perform(ids: ids) { service, ids in
+            try await service.retry(ids: ids)
+        }
+    }
+
+    func redownloadSelected() {
+        let ids = selectedDownloads
+            .filter { $0.status == .completed }
+            .map(\.id)
+        perform(ids: ids) { service, ids in
+            try await service.redownload(ids: ids)
+        }
+    }
+
+    func updateTaskSettings(id: DownloadID, settings: DownloadTaskSettings?) async throws {
+        guard let service else {
+            throw DownloadCoreError.cancelled
+        }
+        _ = try await service.updateTaskSettings(id: id, settings: settings)
+        await reload()
+    }
+
+    func removeSelected(removeFiles: Bool = false) {
+        perform(ids: Array(selectedIDs)) { service, ids in
+            try await service.remove(ids: ids, removeFiles: removeFiles)
+        }
+    }
+
+    func removeCompleted() {
+        let ids = downloads.filter { $0.status == .completed }.map(\.id)
+        perform(ids: ids) { service, ids in
+            try await service.remove(ids: ids, removeFiles: false)
+        }
+    }
+
+    func removeIncomplete() {
+        let ids = downloads.filter { $0.status != .completed }.map(\.id)
+        perform(ids: ids) { service, ids in
+            try await service.remove(ids: ids, removeFiles: false)
+        }
+    }
+
+    func removeAll() {
+        perform(ids: downloads.map(\.id)) { service, ids in
+            try await service.remove(ids: ids, removeFiles: false)
+        }
+    }
+
+    func startQueue(_ queueID: DownloadID, orderedIDs: [DownloadID]? = nil) {
+        perform(ids: [], allowEmpty: true) { service, _ in
+            try await service.startQueue(id: queueID, orderedIDs: orderedIDs)
+        }
+    }
+
+    func stopQueue(_ queueID: DownloadID) {
+        perform(ids: [], allowEmpty: true) { service, _ in
+            try await service.stopQueue(id: queueID)
+        }
+    }
+
+    func stopAll() {
+        let ids = downloads
+            .filter { $0.status == .preparing || $0.status == .downloading || $0.status == .retrying }
+            .map(\.id)
+        guard !ids.isEmpty else { return }
+        perform(ids: ids) { service, ids in
+            try await service.pause(ids: ids)
+        }
+    }
+
+    func record(id: DownloadID) -> DownloadRecord? {
+        downloads.first { $0.id == id }
+    }
+
+    private func perform(
+        ids: [DownloadID],
+        allowEmpty: Bool = false,
+        operation: @escaping (DownloadService, [DownloadID]) async throws -> Void
+    ) {
+        guard let service else {
+            errorMessage = "下载核心尚未准备好"
+            return
+        }
+        guard allowEmpty || !ids.isEmpty else { return }
+        Task { [weak self] in
+            do {
+                try await operation(service, ids)
+                await self?.reload()
+            } catch {
+                self?.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func matchesFilter(_ record: DownloadRecord) -> Bool {
+        switch filter {
+        case .all:
+            return true
+        case .active:
+            return record.status == .preparing || record.status == .downloading || record.status == .retrying
+        case .completed:
+            return record.status == .completed
+        case .failed:
+            return record.status == .failed
+        case .paused:
+            return record.status == .paused
+        case .queue(let id):
+            return record.queueID == id
+        case .category(let id):
+            return record.categoryID == id
+        }
+    }
+
+    private func statusRank(_ status: DownloadStatus) -> Int {
+        switch status {
+        case .downloading: return 0
+        case .preparing: return 1
+        case .retrying: return 2
+        case .paused: return 3
+        case .failed: return 4
+        case .added: return 5
+        case .cancelled: return 6
+        case .completed: return 7
+        }
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        isEmpty ? nil : self
+    }
+}

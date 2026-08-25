@@ -8,8 +8,14 @@ public struct HLSDownloadResult: Sendable {
 public final class HLSDownloader: @unchecked Sendable {
     private let transport: any HTTPTransport
 
-    public init(configuration: URLSessionConfiguration = .ephemeral) {
-        self.transport = URLSessionHTTPTransport(configuration: configuration)
+    public init(
+        configuration: URLSessionConfiguration = .ephemeral,
+        networkConfiguration: HTTPNetworkConfiguration = .default
+    ) {
+        self.transport = URLSessionHTTPTransport(
+            configuration: configuration,
+            networkConfiguration: networkConfiguration
+        )
     }
 
     public init(transport: any HTTPTransport) {
@@ -21,7 +27,8 @@ public final class HLSDownloader: @unchecked Sendable {
         writer: PartFileWriter,
         completedSegments: Set<Int> = [],
         completedPartMetadata: [DownloadPart] = [],
-        progress: (@Sendable (Int64, Int, Int, Int64) async -> Void)? = nil
+        progress: (@Sendable (Int64, Int, Int, Int64) async -> Void)? = nil,
+        rateLimiter: DownloadRateLimiter? = nil
     ) async throws -> HLSDownloadResult {
         guard let playlistURL = URL(string: source.link),
               let scheme = playlistURL.scheme?.lowercased(),
@@ -86,14 +93,14 @@ public final class HLSDownloader: @unchecked Sendable {
 
         var totalBytes = initialLength
         if let mapURL = playlist.initializationURL, effectiveCompletedSegments.isEmpty {
-            let data = try await fetchData(url: mapURL, headers: source.headers)
+            let data = try await fetchData(url: mapURL, headers: source.headers, rateLimiter: rateLimiter)
             try await writer.append(data)
             totalBytes += Int64(data.count)
         }
 
         for (index, segmentURL) in playlist.segments.enumerated() {
             if effectiveCompletedSegments.contains(index) { continue }
-            let data = try await fetchData(url: segmentURL, headers: source.headers)
+            let data = try await fetchData(url: segmentURL, headers: source.headers, rateLimiter: rateLimiter)
             try Task.checkCancellation()
             try await writer.append(data)
             totalBytes += Int64(data.count)
@@ -189,7 +196,11 @@ public final class HLSDownloader: @unchecked Sendable {
         return String(suffix.split(separator: ",").first ?? "")
     }
 
-    private func fetchData(url: URL, headers: [String: String]?) async throws -> Data {
+    private func fetchData(
+        url: URL,
+        headers: [String: String]?,
+        rateLimiter: DownloadRateLimiter? = nil
+    ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 60
@@ -201,6 +212,7 @@ public final class HLSDownloader: @unchecked Sendable {
         var result = Data()
         for try await chunk in response.body {
             try Task.checkCancellation()
+            try await rateLimiter?.consume(chunk.count)
             result.append(chunk)
         }
         return result

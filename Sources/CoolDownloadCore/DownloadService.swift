@@ -2,16 +2,21 @@ import Foundation
 
 public actor DownloadService {
     private let store: DownloadStore
-    private let downloader: HTTPDownloader
-    private let hlsDownloader: HLSDownloader
-    private let defaultFolder: URL
-    private let schedulerConfiguration: DownloadSchedulerConfiguration
-    private let retryPolicy: DownloadRetryPolicy
+    private var downloader: HTTPDownloader
+    private var hlsDownloader: HLSDownloader
+    private var defaultFolder: URL
+    private var schedulerConfiguration: DownloadSchedulerConfiguration
+    private var retryPolicy: DownloadRetryPolicy
     private var records: [DownloadID: DownloadRecord] = [:]
     private var tasks: [DownloadID: Task<Void, Never>] = [:]
     private var activeIDs: Set<DownloadID> = []
     private var queuedIDs: [DownloadID] = []
+    private var queueConcurrencyLimits: [DownloadID: Int] = [:]
+    private var queuePolicies: [DownloadID: DownloadQueuePolicy] = [:]
+    private var activeQueueIDs: Set<DownloadID> = []
+    private var perHostSettings: [PerHostSettingsItem] = []
     private var subscribers: [UUID: AsyncStream<DownloadEvent>.Continuation] = [:]
+    private var queueEventSubscribers: [UUID: AsyncStream<DownloadQueueEvent>.Continuation] = [:]
     private var shuttingDown = false
 
     public init(
@@ -51,6 +56,79 @@ public actor DownloadService {
         records = loaded
     }
 
+    /// Applies settings that affect future scheduling and new destinations.
+    /// Active jobs are left intact; queued jobs are re-evaluated immediately.
+    public func updateConfiguration(
+        schedulerConfiguration: DownloadSchedulerConfiguration? = nil,
+        retryPolicy: DownloadRetryPolicy? = nil,
+        defaultFolder: URL? = nil,
+        networkConfiguration: HTTPNetworkConfiguration? = nil
+    ) {
+        if let schedulerConfiguration {
+            self.schedulerConfiguration = schedulerConfiguration
+        }
+        if let retryPolicy {
+            self.retryPolicy = retryPolicy
+        }
+        if let defaultFolder {
+            self.defaultFolder = defaultFolder.standardizedFileURL
+        }
+        if let networkConfiguration {
+            downloader = HTTPDownloader(networkConfiguration: networkConfiguration)
+            hlsDownloader = HLSDownloader(networkConfiguration: networkConfiguration)
+        }
+        if !shuttingDown {
+            launchQueuedDownloads()
+        }
+    }
+
+    /// Replaces the host override table used for subsequently started jobs.
+    /// Active URLSession tasks retain the headers and credentials with which
+    /// they were created; changing this table therefore cannot race a writer.
+    public func updatePerHostSettings(_ settings: [PerHostSettingsItem]) {
+        perHostSettings = settings
+    }
+
+    /// Persists per-task overrides. Running work keeps its current network
+    /// operation; the new values are used on the next start/retry so changing
+    /// a detail form cannot race an in-flight writer.
+    @discardableResult
+    public func updateTaskSettings(
+        id: DownloadID,
+        settings: DownloadTaskSettings?
+    ) async throws -> DownloadRecord {
+        guard var record = records[id] else {
+            throw DownloadCoreError.notFound(id)
+        }
+        let validated = try settings?.validated()
+        record.taskSettings = validated
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        try await store.save(record)
+        emit(.updated(record))
+        return record
+    }
+
+    /// Updates queue-specific concurrency without making the downloader depend
+    /// on a UI store. A missing queue entry uses the global scheduler limit.
+    public func updateQueueConcurrency(_ limits: [DownloadID: Int]) {
+        queueConcurrencyLimits = limits.mapValues { max(1, $0) }
+        if !shuttingDown {
+            launchQueuedDownloads()
+        }
+    }
+
+    /// Replaces the queue policies used by the scheduler. Existing active
+    /// jobs keep running; queued jobs are re-evaluated against the new limits.
+    public func updateQueuePolicies(_ policies: [DownloadID: DownloadQueuePolicy]) {
+        queuePolicies = policies
+        queueConcurrencyLimits = policies.mapValues { $0.maxConcurrent }
+        if !shuttingDown {
+            launchQueuedDownloads()
+        }
+    }
+
     /// Stop scheduling and persist resumable states before the process exits.
     /// The store lock is released when the service and store are deallocated.
     public func shutdown() async {
@@ -71,7 +149,7 @@ public actor DownloadService {
             do {
                 try await store.save(record)
             } catch {
-                fputs("CoolDownloadCore: failed to persist queued state for \(id): \(error)\n", stderr)
+                reportPersistenceFailure("queued state", id: id, error: error)
             }
             emit(.updated(record))
         }
@@ -88,7 +166,7 @@ public actor DownloadService {
                 do {
                     try await store.save(paused)
                 } catch {
-                    fputs("CoolDownloadCore: failed to persist retry state for \(id): \(error)\n", stderr)
+                    reportPersistenceFailure("retry state", id: id, error: error)
                 }
                 emit(.updated(paused))
             }
@@ -101,8 +179,11 @@ public actor DownloadService {
         }
         tasks.removeAll()
         activeIDs.removeAll()
+        activeQueueIDs.removeAll()
         subscribers.values.forEach { $0.finish() }
         subscribers.removeAll()
+        queueEventSubscribers.values.forEach { $0.finish() }
+        queueEventSubscribers.removeAll()
     }
 
     public func events() -> AsyncStream<DownloadEvent> {
@@ -111,6 +192,16 @@ public actor DownloadService {
             subscribers[id] = continuation
             continuation.onTermination = { [weak self] _ in
                 Task { await self?.removeSubscriber(id) }
+            }
+        }
+    }
+
+    public func queueEvents() -> AsyncStream<DownloadQueueEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            queueEventSubscribers[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeQueueEventSubscriber(id) }
             }
         }
     }
@@ -157,7 +248,8 @@ public actor DownloadService {
             queueID: request.queueID,
             categoryID: request.categoryID,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            taskSettings: try request.taskSettings?.validated()
         )
         records[id] = record
         try await store.save(record)
@@ -191,7 +283,7 @@ public actor DownloadService {
         try await store.save(record)
         emit(.updated(record))
 
-        if activeIDs.count < schedulerConfiguration.maxConcurrentDownloads {
+        if canLaunch(id) {
             launch(id: id)
         } else if !queuedIDs.contains(id) {
             queuedIDs.append(id)
@@ -204,13 +296,34 @@ public actor DownloadService {
         }
     }
 
-    public func startQueue(id queueID: DownloadID) async throws {
-        let ids = records.values
+    public func startQueue(id queueID: DownloadID, orderedIDs: [DownloadID]? = nil) async throws {
+        let available = Set(records.values
             .filter { $0.queueID == queueID && $0.status != .completed }
-            .sorted { $0.id < $1.id }
-            .map(\.id)
+            .map(\.id))
+        let ids: [DownloadID]
+        if let orderedIDs {
+            ids = orderedIDs.filter { available.contains($0) }
+                + available.subtracting(orderedIDs).sorted()
+        } else {
+            ids = available.sorted()
+        }
+        activeQueueIDs.insert(queueID)
         for id in ids {
             try await start(id: id)
+        }
+        reconcileQueue(queueID)
+    }
+
+    /// Stops a queue and pauses every task that belongs to it. The queue is
+    /// removed from the active set before cancellation so completion checks
+    /// cannot immediately restart work while the pause operation is running.
+    public func stopQueue(id queueID: DownloadID) async throws {
+        activeQueueIDs.remove(queueID)
+        let ids = records.values
+            .filter { $0.queueID == queueID && ($0.status == .preparing || $0.status == .downloading || $0.status == .retrying) }
+            .map(\.id)
+        if !ids.isEmpty {
+            try await pause(ids: ids)
         }
     }
 
@@ -256,11 +369,81 @@ public actor DownloadService {
         }
     }
 
+    /// Starts a completed task from scratch. The existing destination and
+    /// partial file are removed before the record is reset so the normal
+    /// duplicate-destination guard cannot reject the new run.
+    public func redownload(ids: [DownloadID]) async throws {
+        for id in ids {
+            guard var record = records[id] else {
+                throw DownloadCoreError.notFound(id)
+            }
+            if let task = tasks[id] {
+                task.cancel()
+                await task.value
+            }
+            queuedIDs.removeAll { $0 == id }
+            if FileManager.default.fileExists(atPath: record.destinationURL.path) {
+                try FileManager.default.removeItem(at: record.destinationURL)
+            }
+            if FileManager.default.fileExists(atPath: record.incompleteURL.path) {
+                try FileManager.default.removeItem(at: record.incompleteURL)
+            }
+            record.status = .added
+            record.downloadedBytes = 0
+            record.totalBytes = nil
+            record.etag = nil
+            record.lastModified = nil
+            record.parts = []
+            record.error = nil
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+            try await start(id: id)
+        }
+    }
+
+    public func updateChecksum(id: DownloadID, checksum: FileChecksum?) async throws {
+        guard var record = records[id] else { throw DownloadCoreError.notFound(id) }
+        record.fileChecksum = checksum?.description
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        try await store.save(record)
+        emit(.updated(record))
+    }
+
+    public func assignQueue(ids: [DownloadID], queueID: DownloadID?) async throws {
+        for id in ids {
+            guard var record = records[id] else { throw DownloadCoreError.notFound(id) }
+            record.queueID = queueID
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+        }
+    }
+
+    public func assignCategory(ids: [DownloadID], categoryID: DownloadID?) async throws {
+        for id in ids {
+            guard var record = records[id] else { throw DownloadCoreError.notFound(id) }
+            record.categoryID = categoryID
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+        }
+    }
+
     public func remove(ids: [DownloadID], removeFiles: Bool) async throws {
         for id in ids {
             guard let record = records[id] else {
                 throw DownloadCoreError.notFound(id)
             }
+            let queueID = record.queueID
             if let task = tasks[id] {
                 task.cancel()
                 await task.value
@@ -279,6 +462,9 @@ public actor DownloadService {
             records[id] = nil
             try await store.remove(id: id)
             emit(.removed(id: id))
+            if let queueID {
+                reconcileQueue(queueID)
+            }
         }
     }
 
@@ -296,22 +482,61 @@ public actor DownloadService {
     }
 
     private func taskDidFinish(id: DownloadID) {
+        let queueID = records[id]?.queueID
         tasks[id] = nil
         activeIDs.remove(id)
         if !shuttingDown {
             launchQueuedDownloads()
+        }
+        if let queueID {
+            reconcileQueue(queueID)
         }
     }
 
     private func launchQueuedDownloads() {
         while activeIDs.count < schedulerConfiguration.maxConcurrentDownloads,
               !queuedIDs.isEmpty {
-            let id = queuedIDs.removeFirst()
+            guard let queueIndex = queuedIDs.firstIndex(where: canLaunch) else { break }
+            let id = queuedIDs.remove(at: queueIndex)
             guard let record = records[id], record.status == .preparing else {
                 continue
             }
             launch(id: id)
         }
+    }
+
+    private func canLaunch(_ id: DownloadID) -> Bool {
+        guard activeIDs.count < schedulerConfiguration.maxConcurrentDownloads else { return false }
+        guard let queueID = records[id]?.queueID,
+              let queueLimit = queueConcurrencyLimits[queueID] else { return true }
+        let activeInQueue = activeIDs.reduce(into: 0) { count, activeID in
+            if records[activeID]?.queueID == queueID { count += 1 }
+        }
+        return activeInQueue < queueLimit
+    }
+
+    private func reconcileQueue(_ queueID: DownloadID) {
+        guard activeQueueIDs.contains(queueID) else { return }
+        let policy = queuePolicies[queueID] ?? DownloadQueuePolicy()
+        let items = records.values.filter { $0.queueID == queueID }
+        guard !items.isEmpty else {
+            guard policy.stopQueueOnEmpty else { return }
+            activeQueueIDs.remove(queueID)
+            emitQueueEvent(.becameEmpty(queueID: queueID, completionAction: policy.completionAction))
+            return
+        }
+
+        let hasRemainingWork = items.contains { record in
+            switch record.status {
+            case .completed, .cancelled:
+                return false
+            case .added, .preparing, .downloading, .paused, .retrying, .failed:
+                return true
+            }
+        }
+        guard !hasRemainingWork else { return }
+        activeQueueIDs.remove(queueID)
+        emitQueueEvent(.becameEmpty(queueID: queueID, completionAction: policy.completionAction))
     }
 
     private func run(id: DownloadID) async {
@@ -343,10 +568,12 @@ public actor DownloadService {
                 emit(.updated(record))
             }
 
+            let rateLimiter = DownloadRateLimiter(bytesPerSecond: effectiveSpeedLimit(record))
             let (totalBytes, reportedTotal, etag, lastModified) = try await downloadWithRetry(
                 id: id,
-                source: record.source,
-                writer: writer
+                source: effectiveSource(record.source),
+                writer: writer,
+                rateLimiter: rateLimiter
             )
             try Task.checkCancellation()
 
@@ -376,6 +603,21 @@ public actor DownloadService {
             completed.revision += 1
             records[id] = completed
             try await store.save(completed)
+            if schedulerConfiguration.useServerLastModifiedTime,
+               let rawLastModified = completed.lastModified,
+               let modifiedDate = HTTPDateParser.date(from: rawLastModified) {
+                do {
+                    var values = URLResourceValues()
+                    values.contentModificationDate = modifiedDate
+                    var destinationURL = completed.destinationURL
+                    try destinationURL.setResourceValues(values)
+                } catch {
+                    fputs(
+                        "CoolDownloadCore: unable to set Last-Modified time for \(id): \(error)\n",
+                        stderr
+                    )
+                }
+            }
             emit(.updated(completed))
         } catch is CancellationError {
             // pause() persists the paused state before cancelling the task.
@@ -388,7 +630,7 @@ public actor DownloadService {
                 do {
                     try await store.save(paused)
                 } catch {
-                    fputs("CoolDownloadCore: failed to persist paused state for \(id): \(error)\n", stderr)
+                    reportPersistenceFailure("paused state", id: id, error: error)
                 }
                 emit(.updated(paused))
             }
@@ -403,7 +645,7 @@ public actor DownloadService {
                 do {
                     try await store.save(failed)
                 } catch {
-                    fputs("CoolDownloadCore: failed to persist failed state for \(id): \(error)\n", stderr)
+                    reportPersistenceFailure("failed state", id: id, error: error)
                 }
                 emit(.updated(failed))
             }
@@ -413,7 +655,8 @@ public actor DownloadService {
     private func downloadWithRetry(
         id: DownloadID,
         source: DownloadSource,
-        writer: PartFileWriter
+        writer: PartFileWriter,
+        rateLimiter: DownloadRateLimiter
     ) async throws -> (
         totalBytes: Int64,
         reportedTotal: Int64?,
@@ -454,7 +697,8 @@ public actor DownloadService {
                                 segmentCount: segmentCount,
                                 segmentBytes: segmentBytes
                             )
-                        }
+                        },
+                        rateLimiter: rateLimiter
                     )
                     return (result.totalBytes, result.totalBytes, nil, nil)
                 }
@@ -463,11 +707,12 @@ public actor DownloadService {
                 let result: HTTPDownloadResult
                 if let current,
                    current.source.kind == .http,
-                   schedulerConfiguration.maxConnectionsPerDownload > 1 || !current.parts.isEmpty {
+                   effectiveThreadCount(current) > 1 || !current.parts.isEmpty {
                     result = try await downloadHTTPWithRanges(
                         id: id,
                         source: source,
-                        writer: writer
+                        writer: writer,
+                        rateLimiter: rateLimiter
                     )
                 } else {
                     result = try await downloader.download(
@@ -478,7 +723,8 @@ public actor DownloadService {
                             await self?.persistProgress(id: id, bytes: bytes)
                         },
                         expectedETag: current?.etag,
-                        expectedLastModified: current?.lastModified
+                        expectedLastModified: current?.lastModified,
+                        rateLimiter: rateLimiter
                     )
                 }
                 let totalBytes: Int64
@@ -531,7 +777,8 @@ public actor DownloadService {
     private func downloadHTTPWithRanges(
         id: DownloadID,
         source: DownloadSource,
-        writer: PartFileWriter
+        writer: PartFileWriter,
+        rateLimiter: DownloadRateLimiter
     ) async throws -> HTTPDownloadResult {
         guard var record = records[id] else {
             throw DownloadCoreError.notFound(id)
@@ -547,7 +794,8 @@ public actor DownloadService {
                         await self?.persistProgress(id: id, bytes: bytes)
                     },
                     expectedETag: record.etag,
-                    expectedLastModified: record.lastModified
+                    expectedLastModified: record.lastModified,
+                    rateLimiter: rateLimiter
                 )
             }
             throw DownloadCoreError.responseMismatch("parallel download requires a known resource length")
@@ -575,7 +823,8 @@ public actor DownloadService {
                     await self?.persistProgress(id: id, bytes: bytes)
                 },
                 expectedETag: record.etag,
-                expectedLastModified: record.lastModified
+                expectedLastModified: record.lastModified,
+                rateLimiter: rateLimiter
             )
         }
 
@@ -588,7 +837,7 @@ public actor DownloadService {
             parts = makeHTTPParts(
                 totalBytes: totalBytes,
                 existingLength: existingLength,
-                count: schedulerConfiguration.maxConnectionsPerDownload
+                count: effectiveThreadCount(record)
             )
         } else {
             parts = try validateHTTPParts(record.parts, totalBytes: totalBytes)
@@ -626,7 +875,8 @@ public actor DownloadService {
                                 partID: part.id,
                                 downloaded: part.downloaded + bytes
                             )
-                        }
+                        },
+                        rateLimiter: rateLimiter
                     )
                 }
             }
@@ -734,7 +984,7 @@ public actor DownloadService {
         do {
             try await store.save(record)
         } catch {
-            fputs("CoolDownloadCore: failed to persist range progress for \(id): \(error)\n", stderr)
+            reportPersistenceFailure("range progress", id: id, error: error)
         }
         emit(.updated(record))
     }
@@ -750,7 +1000,7 @@ public actor DownloadService {
         do {
             try await store.save(record)
         } catch {
-            fputs("CoolDownloadCore: failed to persist progress for \(id): \(error)\n", stderr)
+            reportPersistenceFailure("progress", id: id, error: error)
         }
         emit(.updated(record))
     }
@@ -788,17 +1038,93 @@ public actor DownloadService {
         do {
             try await store.save(record)
         } catch {
-            fputs("CoolDownloadCore: failed to persist HLS progress for \(id): \(error)\n", stderr)
+            reportPersistenceFailure("HLS progress", id: id, error: error)
         }
         emit(.updated(record))
+    }
+
+    private func hostSettings(for link: String) -> PerHostSettingsItem? {
+        guard let host = URL(string: link)?.host?.lowercased(), !host.isEmpty else {
+            return nil
+        }
+        return perHostSettings
+            .sorted { lhs, rhs in
+                let lhsWildcards = lhs.host.filter { $0 == "*" }.count
+                let rhsWildcards = rhs.host.filter { $0 == "*" }.count
+                if lhsWildcards != rhsWildcards { return lhsWildcards < rhsWildcards }
+                return lhs.host.count > rhs.host.count
+            }
+            .first { $0.matches(host: host) }
+    }
+
+    private func effectiveThreadCount(_ record: DownloadRecord) -> Int {
+        let hostCount = hostSettings(for: record.source.link)?.threadCount
+        let configured = record.taskSettings?.threadCount
+            ?? hostCount
+            ?? schedulerConfiguration.maxConnectionsPerDownload
+        return min(max(1, configured), 64)
+    }
+
+    private func effectiveSpeedLimit(_ record: DownloadRecord) -> Int64 {
+        let hostLimit = hostSettings(for: record.source.link)?.speedLimit
+        return max(0, record.taskSettings?.speedLimit ?? hostLimit ?? schedulerConfiguration.speedLimit)
+    }
+
+    private func effectiveSource(_ source: DownloadSource) -> DownloadSource {
+        var source = source
+        var headers = source.headers ?? [:]
+
+        func hasHeader(_ name: String) -> Bool {
+            headers.keys.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+        }
+
+        let hostSettings = hostSettings(for: source.link)
+        let hostUserAgent = hostSettings?.userAgent?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let userAgent = hostUserAgent.isEmpty ? schedulerConfiguration.userAgent : hostUserAgent
+        if let userAgent, !hasHeader("User-Agent") {
+            headers["User-Agent"] = userAgent
+        }
+        if let downloadPage = source.downloadPage,
+           !downloadPage.isEmpty,
+           !hasHeader("Referer") {
+            headers["Referer"] = downloadPage
+        }
+        if let username = hostSettings?.username,
+           !username.isEmpty,
+           !hasHeader("Authorization"),
+           let password = hostSettings?.password {
+            let credentials = "\(username):\(password)"
+            headers["Authorization"] = "Basic \(Data(credentials.utf8).base64EncodedString())"
+        }
+        if !headers.isEmpty {
+            source.headers = headers
+        }
+        return source
     }
 
     private func emit(_ event: DownloadEvent) {
         subscribers.values.forEach { $0.yield(event) }
     }
 
+    private func emitQueueEvent(_ event: DownloadQueueEvent) {
+        queueEventSubscribers.values.forEach { $0.yield(event) }
+    }
+
+    private func reportPersistenceFailure(_ context: String, id: DownloadID, error: Error) {
+        // A caller may remove a temporary data root while an already-cancelled
+        // task is unwinding. There is no durable target to report in that
+        // case; retain diagnostics for real storage failures only.
+        guard FileManager.default.fileExists(atPath: store.rootURL.path) else { return }
+        fputs("CoolDownloadCore: failed to persist \(context) for \(id): \(error)\n", stderr)
+    }
+
     private func removeSubscriber(_ id: UUID) {
         subscribers[id] = nil
+    }
+
+    private func removeQueueEventSubscriber(_ id: UUID) {
+        queueEventSubscribers[id] = nil
     }
 
     private func validatedName(_ name: String) throws -> String {

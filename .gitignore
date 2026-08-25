@@ -9,9 +9,11 @@ DerivedData/
 *.xcuserstate
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
+*.profraw
 
 # Local build and packaging output
 build/
+dist/
 
 # macOS metadata
 .DS_Store

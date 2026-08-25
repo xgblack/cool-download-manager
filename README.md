@@ -24,12 +24,21 @@ The macOS vertical slice currently covers:
 - Legacy `.abdm` records, parts sidecars, and `.dl-<id>.abdm.part` files
 - Loopback HTTP compatibility endpoints and API-key validation
 - Native Messaging framing and a private Unix-socket bridge to the app
-- Basic SwiftUI download list actions: add, start, pause, retry, and remove
+- Basic SwiftUI download list actions: add, start, pause, retry, remove, queue,
+  category, checksum, and completion flows
+- Persistent settings, per-host overrides, queue scheduling, and task-level
+  thread/speed overrides, proxy/PAC selection, proxy authentication, and
+  optional server `Last-Modified` timestamps
+- Queue-specific concurrency, automatic-stop policy, and one-shot completion
+  events surfaced to the macOS UI
 
-Proxy/PAC/DNS policy, checksum verification, categories and settings, update
-installation, app signing/notarization, DMG packaging, and real installed
-browser acceptance remain release work. The implementation status and
-compatibility decisions are tracked in
+Custom DNS resolution, confirmed OS power-action execution, app
+signing/notarization, and real installed-browser acceptance remain release work.
+Queue completion actions are persisted and surfaced as an explicit UI notice;
+the core never issues a shutdown/sleep command without a macOS confirmation
+flow. DNS server addresses are stored and validated for migration compatibility,
+but URLSession does not expose a per-session resolver API. The implementation
+status and compatibility decisions are tracked in
 `.helloagents/plans/swift-native-macos-rewrite/`.
 
 ## Build And Test
@@ -60,9 +69,9 @@ Select the `CoolDownloadManager` scheme to run the SwiftUI/AppKit executable.
 The `CoolDownloadManagerNativeMessagingHost` and `CoolDownloadManagerCLI`
 schemes are available for integration smoke tests. No generated
 `.xcodeproj` is committed; Xcode reads the package manifest and keeps the
-target graph in sync with SwiftPM. The current executable is a development
-target, so app-bundle signing, notarization, and DMG packaging remain release
-work.
+target graph in sync with SwiftPM. The checked-in packaging script creates a
+local app bundle, while Developer ID signing, notarization, and installed
+browser acceptance remain release work.
 
 The root package produces these development executables:
 
@@ -71,6 +80,30 @@ CoolDownloadManager
 CoolDownloadManagerNativeMessagingHost
 CoolDownloadManagerCLI
 ```
+
+## Package A macOS App
+
+Use the checked-in packaging script for a local `.app` and optional archives.
+It automatically selects `/Applications/Xcode-beta.app` when present:
+
+```sh
+./scripts/package-macos.sh --dmg --zip
+```
+
+The outputs are written to `dist/`. The default `-` signing identity is an
+ad-hoc signature for local execution only. For distribution, pass a Developer
+ID identity and use the resulting app/DMG in the normal notarization workflow:
+
+```sh
+./scripts/package-macos.sh \
+  --signing-identity "Developer ID Application: Your Name (TEAMID)" \
+  --dmg --zip
+```
+
+The bundle contains the main app, `CoolDownloadManagerNativeMessagingHost`,
+and `CoolDownloadManagerCLI` under `Contents/MacOS`. The app installs the
+browser manifest at runtime, so test the installed bundle from its final
+location rather than moving it after the first launch.
 
 Run the CLI against a running app:
 

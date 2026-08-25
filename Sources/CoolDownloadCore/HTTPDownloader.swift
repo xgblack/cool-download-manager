@@ -64,61 +64,18 @@ public protocol HTTPTransport: Sendable {
     func response(for request: URLRequest) async throws -> HTTPTransportResponse
 }
 
-public final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
-    private let session: URLSession
-
-    public init(configuration: URLSessionConfiguration = .ephemeral) {
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.waitsForConnectivity = false
-        self.session = URLSession(configuration: configuration)
-    }
-
-    deinit {
-        session.invalidateAndCancel()
-    }
-
-    public func response(for request: URLRequest) async throws -> HTTPTransportResponse {
-        let (bytes, rawResponse) = try await session.bytes(for: request)
-        guard let response = rawResponse as? HTTPURLResponse else {
-            throw DownloadCoreError.responseMismatch("response was not HTTP")
-        }
-        let body = AsyncThrowingStream<Data, Error> { continuation in
-            Task {
-                do {
-                    var buffer = Data()
-                    buffer.reserveCapacity(64 * 1024)
-                    for try await byte in bytes {
-                        buffer.append(byte)
-                        if buffer.count >= 64 * 1024 {
-                            continuation.yield(buffer)
-                            buffer.removeAll(keepingCapacity: true)
-                        }
-                    }
-                    if !buffer.isEmpty {
-                        continuation.yield(buffer)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-        }
-        return HTTPTransportResponse(
-            statusCode: response.statusCode,
-            headers: response.allHeaderFields.reduce(into: [String: String]()) { result, entry in
-                result[String(describing: entry.key)] = String(describing: entry.value)
-            },
-            body: body
-        )
-    }
-}
-
 public final class HTTPDownloader: @unchecked Sendable {
     private let transport: any HTTPTransport
     private let bufferSize = 64 * 1024
 
-    public init(configuration: URLSessionConfiguration = .ephemeral) {
-        self.transport = URLSessionHTTPTransport(configuration: configuration)
+    public init(
+        configuration: URLSessionConfiguration = .ephemeral,
+        networkConfiguration: HTTPNetworkConfiguration = .default
+    ) {
+        self.transport = URLSessionHTTPTransport(
+            configuration: configuration,
+            networkConfiguration: networkConfiguration
+        )
     }
 
     public init(transport: any HTTPTransport) {
@@ -210,7 +167,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         writer: PartFileWriter,
         progress: (@Sendable (Int64) async -> Void)? = nil,
         expectedETag: String? = nil,
-        expectedLastModified: String? = nil
+        expectedLastModified: String? = nil,
+        rateLimiter: DownloadRateLimiter? = nil
     ) async throws -> HTTPDownloadResult {
         let url = try validatedURL(source.link)
 
@@ -290,6 +248,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         var responseBodyBytes: Int64 = 0
         for try await chunk in response.body {
             try Task.checkCancellation()
+            try await rateLimiter?.consume(chunk.count)
             if let expectedBodyLength,
                responseBodyBytes + Int64(chunk.count) > expectedBodyLength {
                 let remaining = max(0, expectedBodyLength - responseBodyBytes)
@@ -347,7 +306,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         writer: PartFileWriter,
         expectedETag: String? = nil,
         expectedLastModified: String? = nil,
-        progress: (@Sendable (Int64) async -> Void)? = nil
+        progress: (@Sendable (Int64) async -> Void)? = nil,
+        rateLimiter: DownloadRateLimiter? = nil
     ) async throws -> HTTPDownloadResult {
         guard start >= 0, end >= start else {
             throw DownloadCoreError.responseMismatch("invalid requested byte range")
@@ -395,6 +355,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         var written: Int64 = 0
         for try await chunk in response.body {
             try Task.checkCancellation()
+            try await rateLimiter?.consume(chunk.count)
             let chunkLength = Int64(chunk.count)
             guard written + chunkLength <= expectedBodyLength else {
                 throw DownloadCoreError.responseMismatch(
