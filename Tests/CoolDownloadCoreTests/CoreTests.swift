@@ -585,8 +585,9 @@ struct CoreTests {
             defaultFolder: root
         )
         try await service.boot()
+        let automaticLink = "https://fixture.invalid/3299e15a-323c-4a57-82d3-1591ea65f709"
         let id = try await service.add(AddDownloadRequest(
-            source: DownloadSource(kind: .http, link: "https://fixture.invalid/download"),
+            source: DownloadSource(kind: .http, link: automaticLink),
             folder: root.path,
             start: true
         ))
@@ -602,7 +603,7 @@ struct CoreTests {
         #expect(completed.status == .completed)
         #expect(completed.name == "server-name.bin")
         #expect(try Data(contentsOf: completed.destinationURL) == Data("body".utf8))
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("download").path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("3299e15a-323c-4a57-82d3-1591ea65f709").path))
 
         let manualID = try await service.add(AddDownloadRequest(
             source: DownloadSource(kind: .http, link: "https://fixture.invalid/another-download"),
@@ -745,90 +746,6 @@ struct CoreTests {
         let recovered = try #require(await service.snapshot().downloads.first)
         #expect(recovered.status == .paused)
         #expect(recovered.downloadedBytes == 4)
-    }
-
-    @Test("boot migrates UUID filename and its completed file")
-    func bootMigratesUUIDFilename() async throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let link = "https://cdn.example.test/object?response-content-disposition=attachment%3Bfilename%3Darchive.zip"
-        let oldName = "3299e15a-323c-4a57-82d3-1591ea65f709"
-        let store = try DownloadStore(rootURL: root)
-        let record = DownloadRecord(
-            id: 31,
-            source: DownloadSource(kind: .http, link: link),
-            folder: root.path,
-            name: oldName,
-            status: .completed
-        )
-        try Data("archive".utf8).write(to: record.destinationURL)
-        try await store.save(record)
-
-        let service = DownloadService(store: store, defaultFolder: root)
-        try await service.boot()
-        let migrated = try #require(await service.snapshot().downloads.first)
-        #expect(migrated.name == "archive.zip")
-        #expect(try Data(contentsOf: migrated.destinationURL) == Data("archive".utf8))
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(oldName).path))
-    }
-
-    @Test("boot migrates a UUID-named partial file")
-    func bootMigratesUUIDPartialFilename() async throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let oldName = "71d76cb8-ed67-42b7-90dc-f225879a3562"
-        let store = try DownloadStore(rootURL: root)
-        let record = DownloadRecord(
-            id: 32,
-            source: DownloadSource(
-                kind: .http,
-                link: "https://cdn.example.test/object?rscd=attachment%3B+filename%3Dpartial.bin"
-            ),
-            folder: root.path,
-            name: oldName,
-            status: .paused,
-            downloadedBytes: 4,
-            incompleteFileName: "\(oldName).abdm.part"
-        )
-        try Data("part".utf8).write(to: record.incompleteURL)
-        try await store.save(record)
-
-        let service = DownloadService(store: store, defaultFolder: root)
-        try await service.boot()
-        let migrated = try #require(await service.snapshot().downloads.first)
-        #expect(migrated.name == "partial.bin")
-        #expect(migrated.incompleteFileName == "partial.bin.abdm.part")
-        #expect(try Data(contentsOf: migrated.incompleteURL) == Data("part".utf8))
-        #expect(!FileManager.default.fileExists(atPath: record.incompleteURL.path))
-    }
-
-    @Test("filename migration never overwrites an existing destination")
-    func filenameMigrationCollision() async throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let oldName = "087d93f8-eb3e-4320-93bd-5f83e697059e"
-        let store = try DownloadStore(rootURL: root)
-        let record = DownloadRecord(
-            id: 33,
-            source: DownloadSource(
-                kind: .http,
-                link: "https://cdn.example.test/object?rscd=attachment%3B+filename%3Dexisting.bin"
-            ),
-            folder: root.path,
-            name: oldName,
-            status: .completed
-        )
-        try Data("old".utf8).write(to: record.destinationURL)
-        let existing = root.appendingPathComponent("existing.bin")
-        try Data("existing".utf8).write(to: existing)
-        try await store.save(record)
-
-        let service = DownloadService(store: store, defaultFolder: root)
-        try await service.boot()
-        let unchanged = try #require(await service.snapshot().downloads.first)
-        #expect(unchanged.name == oldName)
-        #expect(try Data(contentsOf: unchanged.destinationURL) == Data("old".utf8))
-        #expect(try Data(contentsOf: existing) == Data("existing".utf8))
     }
 
     @Test("scheduler never exceeds its configured concurrent download limit")

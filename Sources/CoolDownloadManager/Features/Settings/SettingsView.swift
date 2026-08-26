@@ -213,8 +213,6 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("通知与弹窗")
-            } footer: {
-                Text("完成通知优先使用完成声音；失败通知优先使用错误声音；留空时回退到普通声音。声音文件必须随 App 一起安装。")
             }
 
             Section {
@@ -322,8 +320,6 @@ struct SettingsView: View {
                 Toggle("跟踪磁盘上被删除的文件", isOn: binding(\.trackDeletedFilesOnDisk))
             } header: {
                 Text("文件一致性")
-            } footer: {
-                Text("启用后，应用会定期检查已完成任务的目标文件；文件已从磁盘删除时，同时移除下载记录。")
             }
 
         }

@@ -83,10 +83,6 @@ enum DownloadFileNameResolver {
         return result
     }
 
-    static func isUUIDName(_ value: String) -> Bool {
-        UUID(uuidString: value) != nil
-    }
-
     private static func decodeFormComponent(_ value: String) -> String {
         let formDecoded = value.replacingOccurrences(of: "+", with: " ")
         return formDecoded.removingPercentEncoding ?? formDecoded
