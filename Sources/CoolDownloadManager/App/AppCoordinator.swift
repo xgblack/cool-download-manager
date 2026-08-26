@@ -62,6 +62,9 @@ final class AppCoordinator: NSObject, ObservableObject {
         store.onBrowserDownloadRequest = { [weak self] request in
             self?.presentBrowserDownload(request)
         }
+        store.onDownloadCompleted = { [weak self] record in
+            self?.closeProgressPanel(for: record.id)
+        }
     }
 
     func attachMenuBar() {
@@ -237,6 +240,10 @@ final class AppCoordinator: NSObject, ObservableObject {
         utilityPanels.showProgress(record: record, store: store.downloadList, coordinator: self, focus: focus)
     }
 
+    func closeProgressPanel(for id: DownloadID) {
+        utilityPanels.closeProgress(for: id)
+    }
+
     func showCompletionPanel(for record: DownloadRecord, focus: Bool) {
         utilityPanels.showCompletion(record: record, store: store.downloadList, coordinator: self, focus: focus)
     }
@@ -288,6 +295,7 @@ final class AppCoordinator: NSObject, ObservableObject {
 @MainActor
 private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private var progressPanel: NSPanel?
+    private var progressRecordID: DownloadID?
     private var completionPanel: NSPanel?
     private var completionClose: (() -> Void)?
 
@@ -296,7 +304,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             record: record,
             store: store,
             coordinator: coordinator,
-            onClose: { [weak self] in self?.progressPanel?.orderOut(nil) }
+            onClose: { [weak self] in self?.hideProgressPanel() }
         )
         let panel = panel(
             existing: progressPanel,
@@ -305,7 +313,13 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             content: content
         )
         progressPanel = panel
+        progressRecordID = record.id
         present(panel, focus: focus)
+    }
+
+    func closeProgress(for id: DownloadID) {
+        guard progressRecordID == id else { return }
+        hideProgressPanel()
     }
 
     func showCompletion(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
@@ -368,7 +382,15 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    private func hideProgressPanel() {
+        progressPanel?.orderOut(nil)
+        progressRecordID = nil
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === progressPanel {
+            progressRecordID = nil
+        }
         if sender === completionPanel {
             completionClose?()
             completionClose = nil

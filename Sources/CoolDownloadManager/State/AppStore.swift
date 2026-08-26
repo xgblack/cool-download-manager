@@ -19,6 +19,10 @@ final class AppStore: ObservableObject {
     let service: DownloadService?
     var downloadList: DownloadListStore
     var onBrowserDownloadRequest: ((AddDownloadsRequest) -> Void)?
+    /// Called on the main actor when a task transitions into the completed state.
+    /// AppKit utility panels use this lifecycle callback even when the main
+    /// window is not currently visible.
+    var onDownloadCompleted: ((DownloadRecord) -> Void)?
 
     private let store: DownloadStore?
     private let settingsStore: SettingsStore?
@@ -678,6 +682,7 @@ final class AppStore: ObservableObject {
         case .updated(let record):
             let previous = notificationStatuses[record.id]
             if record.status == .completed, previous != .completed {
+                onDownloadCompleted?(record)
                 NotificationController.shared.notifyCompletion(
                     record: record,
                     soundEnabled: settings.notificationSound,

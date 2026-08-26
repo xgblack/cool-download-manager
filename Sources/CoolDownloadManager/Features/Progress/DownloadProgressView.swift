@@ -57,6 +57,11 @@ struct DownloadProgressView: View {
             actionBar
         }
         .frame(minWidth: 660, maxWidth: .infinity, minHeight: 440, maxHeight: .infinity)
+        .onChange(of: currentRecord.status) { status in
+            if status == .completed {
+                onClose()
+            }
+        }
     }
 
     private var header: some View {

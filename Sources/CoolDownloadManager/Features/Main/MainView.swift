@@ -112,6 +112,7 @@ struct MainView: View {
         }
         .onChange(of: store.downloadList.completedID) { id in
             guard let id, let record = store.downloadList.record(id: id) else { return }
+            coordinator.closeProgressPanel(for: id)
             if !(record.taskSettings?.showCompletionDialog ?? store.settings.showDownloadCompletionDialog) {
                 store.downloadList.acknowledgeCompletion()
             } else {
@@ -126,6 +127,9 @@ struct MainView: View {
             store.downloadList.acknowledgeProgress()
             guard store.settings.showDownloadProgressDialog else { return }
             guard let record = store.downloadList.record(id: id) else { return }
+            guard record.status == .preparing || record.status == .downloading || record.status == .retrying else {
+                return
+            }
             coordinator.showProgressPanel(
                 for: record,
                 focus: store.settings.focusDownloadProgressDialogOnStart
