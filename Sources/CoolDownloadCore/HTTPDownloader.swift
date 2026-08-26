@@ -7,6 +7,7 @@ public struct HTTPDownloadResult: Sendable {
     public let bytesWritten: Int64
     public let etag: String?
     public let lastModified: String?
+    public let fileName: String?
 
     public init(
         statusCode: Int,
@@ -14,7 +15,8 @@ public struct HTTPDownloadResult: Sendable {
         totalBytes: Int64?,
         bytesWritten: Int64 = 0,
         etag: String? = nil,
-        lastModified: String? = nil
+        lastModified: String? = nil,
+        fileName: String? = nil
     ) {
         self.statusCode = statusCode
         self.startOffset = startOffset
@@ -22,6 +24,7 @@ public struct HTTPDownloadResult: Sendable {
         self.bytesWritten = bytesWritten
         self.etag = etag
         self.lastModified = lastModified
+        self.fileName = fileName
     }
 }
 
@@ -30,17 +33,20 @@ public struct HTTPResourceMetadata: Sendable, Equatable {
     public let supportsRanges: Bool
     public let etag: String?
     public let lastModified: String?
+    public let fileName: String?
 
     public init(
         totalBytes: Int64?,
         supportsRanges: Bool,
         etag: String? = nil,
-        lastModified: String? = nil
+        lastModified: String? = nil,
+        fileName: String? = nil
     ) {
         self.totalBytes = totalBytes
         self.supportsRanges = supportsRanges
         self.etag = etag
         self.lastModified = lastModified
+        self.fileName = fileName
     }
 }
 
@@ -100,6 +106,9 @@ public final class HTTPDownloader: @unchecked Sendable {
             .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("bytes") == .orderedSame } == true
         let etag = response.header("ETag")
         let lastModified = response.header("Last-Modified")
+        let fileName = DownloadFileNameResolver.fromContentDisposition(
+            response.header("Content-Disposition")
+        )
         _ = try await drain(response.body)
 
         if statusCode != 405 && statusCode != 501,
@@ -109,7 +118,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 totalBytes: length,
                 supportsRanges: true,
                 etag: etag,
-                lastModified: lastModified
+                lastModified: lastModified,
+                fileName: fileName
             )
         }
 
@@ -121,7 +131,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 totalBytes: length,
                 supportsRanges: false,
                 etag: etag,
-                lastModified: lastModified
+                lastModified: lastModified,
+                fileName: fileName
             )
         }
 
@@ -135,6 +146,9 @@ public final class HTTPDownloader: @unchecked Sendable {
         let rangeResponse = try await transport.response(for: rangeRequest)
         let rangeETag = rangeResponse.header("ETag") ?? etag
         let rangeLastModified = rangeResponse.header("Last-Modified") ?? lastModified
+        let rangeFileName = DownloadFileNameResolver.fromContentDisposition(
+            rangeResponse.header("Content-Disposition")
+        ) ?? fileName
         let rangeContentLength = try Self.validatedContentLength(rangeResponse.header("Content-Length"))
         let rangeBodyLength = try await drain(rangeResponse.body)
         if rangeResponse.statusCode == 206,
@@ -149,7 +163,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 totalBytes: total,
                 supportsRanges: true,
                 etag: rangeETag,
-                lastModified: rangeLastModified
+                lastModified: rangeLastModified,
+                fileName: rangeFileName
             )
         }
         let fallbackLength = rangeContentLength ?? length
@@ -157,7 +172,8 @@ public final class HTTPDownloader: @unchecked Sendable {
             totalBytes: fallbackLength,
             supportsRanges: false,
             etag: rangeETag,
-            lastModified: rangeLastModified
+            lastModified: rangeLastModified,
+            fileName: rangeFileName
         )
     }
 
@@ -295,7 +311,10 @@ public final class HTTPDownloader: @unchecked Sendable {
             totalBytes: totalBytes,
             bytesWritten: responseBodyBytes,
             etag: response.header("ETag"),
-            lastModified: response.header("Last-Modified")
+            lastModified: response.header("Last-Modified"),
+            fileName: DownloadFileNameResolver.fromContentDisposition(
+                response.header("Content-Disposition")
+            )
         )
     }
 
@@ -377,7 +396,10 @@ public final class HTTPDownloader: @unchecked Sendable {
             totalBytes: parsedRange.total,
             bytesWritten: written,
             etag: response.header("ETag"),
-            lastModified: response.header("Last-Modified")
+            lastModified: response.header("Last-Modified"),
+            fileName: DownloadFileNameResolver.fromContentDisposition(
+                response.header("Content-Disposition")
+            )
         )
     }
 

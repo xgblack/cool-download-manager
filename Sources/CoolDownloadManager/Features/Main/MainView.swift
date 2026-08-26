@@ -3,19 +3,21 @@ import CoolDownloadCore
 
 struct MainView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject var downloadList: DownloadListStore
     @ObservedObject var coordinator: AppCoordinator
 
     @ObservedObject var viewState: MainViewState
 
     init(store: AppStore, coordinator: AppCoordinator, viewState: MainViewState) {
         self.store = store
+        self._downloadList = ObservedObject(wrappedValue: store.downloadList)
         self.coordinator = coordinator
         self.viewState = viewState
     }
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(store: store, coordinator: coordinator)
+            SidebarView(store: store, downloadList: downloadList, coordinator: coordinator)
                 .frame(minWidth: 170, idealWidth: viewState.sidebarWidth, maxWidth: 280)
         } detail: {
             NavigationStack(path: $coordinator.mainPath) {
@@ -558,12 +560,13 @@ final class MainViewState: ObservableObject {
 
 private struct SidebarView: View {
     @ObservedObject var store: AppStore
+    @ObservedObject var downloadList: DownloadListStore
     @ObservedObject var coordinator: AppCoordinator
 
     var body: some View {
         List(selection: Binding<DownloadFilter?>(
-            get: { store.downloadList.filter },
-            set: { store.downloadList.filter = $0 ?? .all }
+            get: { downloadList.filter },
+            set: { downloadList.filter = $0 ?? .all }
         )) {
             Section("下载") {
                 sidebarItem(.all)
@@ -611,7 +614,7 @@ private struct SidebarView: View {
 
     private func sidebarItem(_ filter: DownloadFilter, title: String? = nil, image: String? = nil) -> some View {
         Label(title ?? filter.title, systemImage: image ?? filter.systemImage)
-            .tag(filter)
+            .tag(Optional(filter))
     }
 }
 
@@ -637,11 +640,18 @@ private struct DownloadTableRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button(action: onSelect) {
-                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { isSelected },
+                    set: { newValue in
+                        guard newValue != isSelected else { return }
+                        onSelect()
+                    }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.checkbox)
             .frame(width: 22)
             .help(isSelected ? "取消选择" : "选择任务")
 

@@ -43,15 +43,30 @@ public actor DownloadService {
         // A process cannot safely continue a live task after a restart. Keep
         // its part file and expose it as resumable instead of leaving a stale
         // "downloading" state that has no associated task.
-        for id in loaded.keys {
-            guard var record = loaded[id],
-                  record.status == .downloading || record.status == .preparing || record.status == .retrying
-            else { continue }
-            record.status = .paused
-            record.updatedAt = Date()
-            record.revision += 1
-            loaded[id] = record
-            try await store.save(record)
+        for id in Array(loaded.keys) {
+            guard var record = loaded[id] else { continue }
+            do {
+                if let migrated = try await migratedAutomaticFileName(record, loaded: loaded) {
+                    record = migrated
+                    loaded[id] = migrated
+                }
+            } catch {
+                fputs(
+                    "CoolDownloadCore: unable to migrate the automatic filename for \(id): \(error)\n",
+                    stderr
+                )
+            }
+            var changed = false
+            if record.status == .downloading || record.status == .preparing || record.status == .retrying {
+                record.status = .paused
+                record.updatedAt = Date()
+                record.revision += 1
+                changed = true
+            }
+            if changed {
+                loaded[id] = record
+                try await store.save(record)
+            }
         }
         records = loaded
     }
@@ -244,11 +259,18 @@ public actor DownloadService {
             throw DownloadCoreError.permissionDenied(folderURL.path)
         }
 
-        let candidateID = await store.nextID()
-        let candidateName = request.name
-            ?? request.source.suggestedName
-            ?? url.lastPathComponent.nilIfEmpty
-            ?? "download-\(candidateID)"
+        let id = await store.nextID()
+        var source = request.source
+        let requestedName = request.name?.nilIfBlank
+        let suggestedName = source.suggestedName?.nilIfBlank
+        // Persist the chosen name as the source hint as well. This lets later
+        // HTTP metadata updates distinguish a user/browser-provided name from
+        // an automatic URL fallback without adding a new record field.
+        source.suggestedName = requestedName ?? suggestedName
+        let candidateName = requestedName
+            ?? suggestedName
+            ?? DownloadFileNameResolver.fromURL(request.source.link)
+            ?? "download-\(id)"
         let name = try validatedName(candidateName)
         let destination = folderURL.appendingPathComponent(name)
         if records.values.contains(where: { $0.destinationURL.standardizedFileURL == destination }) {
@@ -258,11 +280,10 @@ public actor DownloadService {
             throw DownloadCoreError.duplicateDestination(destination.path)
         }
 
-        let id = await store.nextID()
         let now = Date()
         let record = DownloadRecord(
             id: id,
-            source: request.source,
+            source: source,
             folder: folderURL.path,
             name: name,
             queueID: request.queueID,
@@ -594,7 +615,7 @@ public actor DownloadService {
             }
 
             let rateLimiter = DownloadRateLimiter(bytesPerSecond: effectiveSpeedLimit(record))
-            let (totalBytes, reportedTotal, etag, lastModified) = try await downloadWithRetry(
+            let (totalBytes, reportedTotal, etag, lastModified, serverFileName) = try await downloadWithRetry(
                 id: id,
                 source: effectiveSource(record.source),
                 writer: writer,
@@ -608,10 +629,22 @@ public actor DownloadService {
                     "received \(finalLength) bytes, expected \(totalBytes)"
                 )
             }
-            try await writer.finish()
+            let completedName = resolvedCompletionName(
+                for: record,
+                serverFileName: serverFileName
+            )
+            let completedDestination = URL(fileURLWithPath: record.folder, isDirectory: true)
+                .appendingPathComponent(completedName)
+            try await writer.finish(destinationURL: completedDestination)
 
             guard var completed = records[id] else {
                 return
+            }
+            if completed.name != completedName {
+                completed.name = completedName
+                if completed.incompleteFileName != nil {
+                    completed.incompleteFileName = "\(completedName).abdm.part"
+                }
             }
             completed.status = .completed
             completed.downloadedBytes = finalLength
@@ -686,7 +719,8 @@ public actor DownloadService {
         totalBytes: Int64,
         reportedTotal: Int64?,
         etag: String?,
-        lastModified: String?
+        lastModified: String?,
+        fileName: String?
     ) {
         var attempt = 0
         while true {
@@ -725,7 +759,7 @@ public actor DownloadService {
                         },
                         rateLimiter: rateLimiter
                     )
-                    return (result.totalBytes, result.totalBytes, nil, nil)
+                    return (result.totalBytes, result.totalBytes, nil, nil, nil)
                 }
 
                 let current = records[id]
@@ -763,7 +797,13 @@ public actor DownloadService {
                    expectedTotal != responseTotal {
                     throw DownloadCoreError.resourceChanged
                 }
-                return (totalBytes, result.totalBytes, result.etag, result.lastModified)
+                return (
+                    totalBytes,
+                    result.totalBytes,
+                    result.etag,
+                    result.lastModified,
+                    result.fileName
+                )
             } catch {
                 guard !Task.isCancelled,
                       attempt < retryPolicy.maxAttempts,
@@ -922,7 +962,8 @@ public actor DownloadService {
             totalBytes: totalBytes,
             bytesWritten: totalBytes,
             etag: results.compactMap(\.etag).first ?? metadata.etag,
-            lastModified: results.compactMap(\.lastModified).first ?? metadata.lastModified
+            lastModified: results.compactMap(\.lastModified).first ?? metadata.lastModified,
+            fileName: metadata.fileName ?? results.compactMap(\.fileName).first
         )
     }
 
@@ -1154,6 +1195,102 @@ public actor DownloadService {
         queueEventSubscribers[id] = nil
     }
 
+    private func canReplaceAutomaticFileName(_ record: DownloadRecord) -> Bool {
+        if DownloadFileNameResolver.isUUIDName(record.name) {
+            return true
+        }
+        guard record.source.suggestedName?.nilIfBlank == nil else { return false }
+        let fallbackName = DownloadFileNameResolver.pathOrHost(fromURL: record.source.link)
+        let queryName = DownloadFileNameResolver.fromURLQuery(record.source.link)
+        return record.name == fallbackName
+            || record.name == queryName
+            || record.name == "download-\(record.id)"
+            || DownloadFileNameResolver.isUUIDName(record.name)
+    }
+
+    private func resolvedCompletionName(
+        for record: DownloadRecord,
+        serverFileName: String?
+    ) -> String {
+        guard canReplaceAutomaticFileName(record),
+              let serverFileName,
+              let candidate = try? validatedName(serverFileName),
+              candidate != record.name else {
+            return record.name
+        }
+
+        let destination = URL(fileURLWithPath: record.folder, isDirectory: true)
+            .appendingPathComponent(candidate)
+            .standardizedFileURL
+        guard !records.values.contains(where: {
+            $0.id != record.id && $0.destinationURL.standardizedFileURL == destination
+        }), !FileManager.default.fileExists(atPath: destination.path) else {
+            return record.name
+        }
+        return candidate
+    }
+
+    private func migratedAutomaticFileName(
+        _ record: DownloadRecord,
+        loaded: [DownloadID: DownloadRecord]
+    ) async throws -> DownloadRecord? {
+        guard canReplaceAutomaticFileName(record),
+              let queryName = DownloadFileNameResolver.fromURLQuery(record.source.link),
+              let candidate = try? validatedName(queryName),
+              candidate != record.name else {
+            return nil
+        }
+
+        var migrated = record
+        let oldDestination = record.destinationURL.standardizedFileURL
+        migrated.name = candidate
+        if migrated.source.suggestedName == record.name {
+            migrated.source.suggestedName = nil
+        }
+        if record.incompleteFileName == "\(record.name).abdm.part" {
+            migrated.incompleteFileName = "\(candidate).abdm.part"
+        }
+        migrated.updatedAt = Date()
+        migrated.revision += 1
+
+        let newDestination = migrated.destinationURL.standardizedFileURL
+        let oldIncomplete = record.incompleteURL.standardizedFileURL
+        let newIncomplete = migrated.incompleteURL.standardizedFileURL
+        guard !loaded.values.contains(where: {
+            $0.id != record.id && $0.destinationURL.standardizedFileURL == newDestination
+        }), destinationIsAvailable(old: oldDestination, new: newDestination),
+           destinationIsAvailable(old: oldIncomplete, new: newIncomplete) else {
+            return nil
+        }
+
+        let moves = [
+            (old: oldDestination, new: newDestination),
+            (old: oldIncomplete, new: newIncomplete)
+        ].filter { item in
+            item.old != item.new && FileManager.default.fileExists(atPath: item.old.path)
+        }
+        var completedMoves: [(old: URL, new: URL)] = []
+        do {
+            for move in moves {
+                try FileManager.default.moveItem(at: move.old, to: move.new)
+                completedMoves.append(move)
+            }
+            try await store.save(migrated)
+            return migrated
+        } catch {
+            for move in completedMoves.reversed()
+            where FileManager.default.fileExists(atPath: move.new.path)
+                && !FileManager.default.fileExists(atPath: move.old.path) {
+                try? FileManager.default.moveItem(at: move.new, to: move.old)
+            }
+            throw error
+        }
+    }
+
+    private func destinationIsAvailable(old: URL, new: URL) -> Bool {
+        old == new || !FileManager.default.fileExists(atPath: new.path)
+    }
+
     private func validatedName(_ name: String) throws -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -1169,5 +1306,8 @@ public actor DownloadService {
 }
 
 private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }

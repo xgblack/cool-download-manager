@@ -95,10 +95,11 @@ public actor PartFileWriter {
         try handle.seek(toOffset: 0)
     }
 
-    public func finish() throws {
+    public func finish(destinationURL overrideDestinationURL: URL? = nil) throws {
         try handle.synchronize()
         try handle.close()
 
+        let destinationURL = overrideDestinationURL ?? self.destinationURL
         if FileManager.default.fileExists(atPath: destinationURL.path) {
             _ = try FileManager.default.replaceItemAt(
                 destinationURL,

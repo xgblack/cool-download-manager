@@ -125,7 +125,6 @@ final class AppCoordinator: NSObject, ObservableObject {
         mainWindow = nil
         return NSApp.windows.first { window in
             window.identifier?.rawValue == "com.abdownloadmanager.main-window"
-                || window.title == "下载管理器"
         }
     }
 
