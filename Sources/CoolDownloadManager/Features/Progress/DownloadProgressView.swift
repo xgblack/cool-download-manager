@@ -189,6 +189,12 @@ struct DownloadProgressView: View {
     }
 
     private var partTable: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            partTableContent(at: context.date)
+        }
+    }
+
+    private func partTableContent(at date: Date) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text("分片")
@@ -199,8 +205,11 @@ struct DownloadProgressView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("已下载")
                     .frame(width: 100, alignment: .trailing)
+                Text("速度")
+                    .frame(width: 96, alignment: .trailing)
                 Text("范围")
-                    .frame(width: 150, alignment: .trailing)
+                    .foregroundStyle(Color.secondary.opacity(0.65))
+                    .frame(width: 96, alignment: .trailing)
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -226,12 +235,17 @@ struct DownloadProgressView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(width: 100, alignment: .trailing)
-                    Text(partRangeText(part))
+                    Text(partSpeedText(part, at: date))
                         .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(width: 96, alignment: .trailing)
+                    Text(partRangeText(part))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(Color.secondary.opacity(0.65))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .frame(width: 150, alignment: .trailing)
+                        .frame(width: 96, alignment: .trailing)
+                        .help(partRangeText(part))
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
@@ -419,6 +433,15 @@ struct DownloadProgressView: View {
         let downloaded = formattedByteCount(part.downloaded)
         guard let to = part.to, to >= part.from else { return downloaded }
         return "\(downloaded) / \(formattedByteCount(to - part.from + 1))"
+    }
+
+    private func partSpeedText(_ part: DownloadPart, at date: Date) -> String {
+        guard currentRecord.status == .downloading,
+              !part.completed,
+              let speed = store.speed(for: currentRecord.id, partID: part.id, at: date) else {
+            return "--"
+        }
+        return "\(speedFormatter.string(fromByteCount: Int64(speed)))/秒"
     }
 
     private func partRangeText(_ part: DownloadPart) -> String {

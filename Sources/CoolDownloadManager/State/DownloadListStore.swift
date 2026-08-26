@@ -50,6 +50,107 @@ enum DownloadSort: String, CaseIterable, Sendable {
     }
 }
 
+struct DownloadPartSpeedSampler {
+    private struct ProgressSample {
+        var bytes: Int64
+        var date: Date
+    }
+
+    private struct SpeedSample {
+        var bytesPerSecond: Double
+        var date: Date
+    }
+
+    private let minimumSampleInterval: TimeInterval
+    private let idleInterval: TimeInterval
+    private var progressByDownload: [DownloadID: [Int: ProgressSample]] = [:]
+    private var speedsByDownload: [DownloadID: [Int: SpeedSample]] = [:]
+
+    init(minimumSampleInterval: TimeInterval = 0.25, idleInterval: TimeInterval = 1.5) {
+        self.minimumSampleInterval = max(0.05, minimumSampleInterval)
+        self.idleInterval = max(self.minimumSampleInterval, idleInterval)
+    }
+
+    mutating func update(_ records: [DownloadRecord], at now: Date) {
+        let availableDownloadIDs = Set(records.map(\.id))
+        progressByDownload = progressByDownload.filter { availableDownloadIDs.contains($0.key) }
+        speedsByDownload = speedsByDownload.filter { availableDownloadIDs.contains($0.key) }
+        for record in records {
+            update(record, at: now)
+        }
+    }
+
+    mutating func update(_ record: DownloadRecord, at now: Date) {
+        guard record.status == .downloading, !record.parts.isEmpty else {
+            remove(downloadID: record.id)
+            return
+        }
+
+        let availablePartIDs = Set(record.parts.map(\.id))
+        var progress = (progressByDownload[record.id] ?? [:])
+            .filter { availablePartIDs.contains($0.key) }
+        var speeds = (speedsByDownload[record.id] ?? [:])
+            .filter { availablePartIDs.contains($0.key) }
+
+        for part in record.parts {
+            guard !part.completed else {
+                progress.removeValue(forKey: part.id)
+                speeds.removeValue(forKey: part.id)
+                continue
+            }
+
+            let bytes = max(0, part.downloaded)
+            guard let previous = progress[part.id] else {
+                progress[part.id] = ProgressSample(bytes: bytes, date: now)
+                speeds.removeValue(forKey: part.id)
+                continue
+            }
+
+            let elapsed = now.timeIntervalSince(previous.date)
+            let delta = bytes - previous.bytes
+            guard elapsed > 0, delta >= 0 else {
+                progress[part.id] = ProgressSample(bytes: bytes, date: now)
+                speeds.removeValue(forKey: part.id)
+                continue
+            }
+
+            if delta > 0, elapsed >= minimumSampleInterval {
+                speeds[part.id] = SpeedSample(
+                    bytesPerSecond: Double(delta) / elapsed,
+                    date: now
+                )
+                progress[part.id] = ProgressSample(bytes: bytes, date: now)
+            } else if delta == 0, elapsed >= idleInterval {
+                speeds[part.id] = SpeedSample(bytesPerSecond: 0, date: now)
+                progress[part.id] = ProgressSample(bytes: bytes, date: now)
+            }
+        }
+
+        if progress.isEmpty {
+            progressByDownload.removeValue(forKey: record.id)
+        } else {
+            progressByDownload[record.id] = progress
+        }
+        if speeds.isEmpty {
+            speedsByDownload.removeValue(forKey: record.id)
+        } else {
+            speedsByDownload[record.id] = speeds
+        }
+    }
+
+    mutating func remove(downloadID: DownloadID) {
+        progressByDownload.removeValue(forKey: downloadID)
+        speedsByDownload.removeValue(forKey: downloadID)
+    }
+
+    func speed(for downloadID: DownloadID, partID: Int, at now: Date) -> Double? {
+        guard let sample = speedsByDownload[downloadID]?[partID] else { return nil }
+        let age = now.timeIntervalSince(sample.date)
+        guard age >= 0 else { return nil }
+        return age >= idleInterval ? 0 : sample.bytesPerSecond
+    }
+}
+
 @MainActor
 final class DownloadListStore: ObservableObject {
     @Published private(set) var downloads: [DownloadRecord] = []
@@ -70,6 +171,7 @@ final class DownloadListStore: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
     private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
+    private var partSpeedSampler = DownloadPartSpeedSampler()
 
     init(service: DownloadService?) {
         self.service = service
@@ -149,19 +251,28 @@ final class DownloadListStore: ObservableObject {
     private func apply(_ event: DownloadEvent) {
         switch event {
         case .created(let record), .updated(let record):
+            partSpeedSampler.update(record, at: Date())
             var next = downloads.filter { $0.id != record.id }
             next.append(record)
-            apply(next)
+            apply(next, updatePartSpeeds: false)
         case .removed(let id):
+            partSpeedSampler.remove(downloadID: id)
             guard downloads.contains(where: { $0.id == id }) else { return }
-            apply(downloads.filter { $0.id != id })
+            apply(downloads.filter { $0.id != id }, updatePartSpeeds: false)
         }
     }
 
-    func apply(_ records: [DownloadRecord], announceCompletion: Bool = true) {
+    func apply(
+        _ records: [DownloadRecord],
+        announceCompletion: Bool = true,
+        updatePartSpeeds: Bool = true
+    ) {
         let previousStatuses = knownStatuses
         let previousIDs = Set(knownStatuses.keys)
         let now = Date()
+        if updatePartSpeeds {
+            partSpeedSampler.update(records, at: now)
+        }
         var nextProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
         var nextSpeeds: [DownloadID: Double] = [:]
         for record in records {
@@ -212,6 +323,10 @@ final class DownloadListStore: ObservableObject {
             return Double(record.downloadedBytes) / elapsed
         }
         return speeds[id]
+    }
+
+    func speed(for id: DownloadID, partID: Int, at date: Date = Date()) -> Double? {
+        partSpeedSampler.speed(for: id, partID: partID, at: date)
     }
 
     func acknowledgeCompletion() {

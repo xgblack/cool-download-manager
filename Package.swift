@@ -75,6 +75,13 @@ let package = Package(
             path: "Tests/CoolDownloadIntegrationTests",
             swiftSettings: testSwiftSettings,
             linkerSettings: testLinkerSettings
+        ),
+        .testTarget(
+            name: "CoolDownloadManagerTests",
+            dependencies: ["CoolDownloadManager", "CoolDownloadCore"],
+            path: "Tests/CoolDownloadManagerTests",
+            swiftSettings: testSwiftSettings,
+            linkerSettings: testLinkerSettings
         )
     ],
     swiftLanguageModes: [.v6]
