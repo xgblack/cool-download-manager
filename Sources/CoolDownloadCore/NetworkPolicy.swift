@@ -139,7 +139,7 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
     public func response(for request: URLRequest) async throws -> HTTPTransportResponse {
         let (bytes, rawResponse) = try await session.bytes(for: request)
         guard let response = rawResponse as? HTTPURLResponse else {
-            throw DownloadCoreError.responseMismatch("response was not HTTP")
+            throw DownloadCoreError.responseMismatch("响应不是 HTTP")
         }
         let body = AsyncThrowingStream<Data, Error> { continuation in
             Task {

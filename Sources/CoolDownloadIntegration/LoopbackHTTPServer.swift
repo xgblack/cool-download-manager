@@ -6,7 +6,7 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
 
     private let listeners: [NWListener]
     private let router: IntegrationRouter
-    private let queue = DispatchQueue(label: "com.abdownloadmanager.integration.http")
+    private let queue = DispatchQueue(label: "com.cooldownloadmanager.integration.http")
     private let maximumRequestBytes = 4 * 1024 * 1024
 
     public init(port: UInt16 = IntegrationRouter.defaultPort, router: IntegrationRouter) throws {
@@ -168,7 +168,7 @@ public enum IntegrationServerError: Error, LocalizedError, Sendable, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidPort(let port): return "Invalid loopback port \(port)"
+        case .invalidPort(let port): return "本机回环端口无效：\(port)"
         }
     }
 }

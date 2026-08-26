@@ -170,8 +170,8 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var fileChecksum: String?
     /// Per-task overrides and completion behavior. Absent for legacy records.
     public var taskSettings: DownloadTaskSettings?
-    /// The deterministic temporary filename used for this task. `nil` keeps
-    /// the historical `.dl-{id}.abdm.part` path for old records.
+    /// The deterministic temporary filename used for this task. `nil` uses
+    /// the default `.dl-{id}.cooldm.part` path.
     public var incompleteFileName: String?
     public var revision: Int64
 
@@ -223,7 +223,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
 
     public var incompleteURL: URL {
         URL(fileURLWithPath: folder, isDirectory: true)
-            .appendingPathComponent(incompleteFileName ?? ".dl-\(id).abdm.part")
+            .appendingPathComponent(incompleteFileName ?? ".dl-\(id).cooldm.part")
     }
 }
 

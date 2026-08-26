@@ -291,14 +291,14 @@ struct SettingsView: View {
                     TextField("代理用户名", text: binding(\.proxyUsername))
                     SecureField("代理密码", text: binding(\.proxyPassword))
                 } else if viewState.model.proxyMode == "pac" {
-                    TextField("PAC URL", text: binding(\.proxyPACURL))
+                    TextField("PAC 地址", text: binding(\.proxyPACURL))
                 }
             } header: {
                 Text("代理")
             }
 
             Section {
-                TextField("User-Agent", text: binding(\.userAgent))
+                TextField("客户端标识 User-Agent", text: binding(\.userAgent))
                 Toggle("忽略 SSL 证书错误", isOn: binding(\.ignoreSSLCertificates))
             } header: {
                 Text("连接")

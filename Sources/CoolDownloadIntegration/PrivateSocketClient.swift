@@ -125,10 +125,10 @@ public enum PrivateSocketClientError: Error, LocalizedError, Sendable, Equatable
 
     public var errorDescription: String? {
         switch self {
-        case .system(let code): return "Private socket error \(code): \(String(cString: strerror(code)))"
-        case .pathTooLong(let path): return "Private socket path is too long: \(path)"
-        case .invalidLength(let length): return "Invalid private socket length \(length)"
-        case .closed: return "Private socket closed before a response"
+        case .system(let code): return "私有套接字错误 \(code)：\(String(cString: strerror(code)))"
+        case .pathTooLong(let path): return "私有套接字路径过长：\(path)"
+        case .invalidLength(let length): return "私有套接字长度无效：\(length)"
+        case .closed: return "私有套接字在收到响应前已关闭"
         }
     }
 }

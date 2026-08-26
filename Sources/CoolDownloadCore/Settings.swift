@@ -1,7 +1,6 @@
 import Foundation
 
-/// Persistent application settings compatible with the historical
-/// `.abdm/config/appSettings.json` key names.
+/// Persistent application settings for the CoolDM data directory.
 public struct AppSettingsModel: Codable, Equatable, Sendable {
     public var theme: String
     public var uiScale: Double?
@@ -73,7 +72,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             generalNotificationSound: "",
             errorNotificationSound: "",
             successNotificationSound: "",
-            defaultDownloadFolder: home.appendingPathComponent("Downloads/ABDM", isDirectory: true).path,
+            defaultDownloadFolder: home.appendingPathComponent("Downloads/CoolDM", isDirectory: true).path,
             apiEnabled: true,
             apiPort: 15151,
             apiAuthEnabled: false,

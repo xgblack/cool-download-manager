@@ -19,11 +19,11 @@ final class MenuBarController {
         if let button = statusItem.button {
             button.image = NSImage(
                 systemSymbolName: "arrow.down.circle",
-                accessibilityDescription: "下载管理器"
+                accessibilityDescription: "酷的下载管理器"
             )
             button.image?.isTemplate = true
-            button.toolTip = "下载管理器"
-            button.setAccessibilityLabel("下载管理器")
+            button.toolTip = "酷的下载管理器"
+            button.setAccessibilityLabel("酷的下载管理器")
         }
 
         let menu = NSMenu()

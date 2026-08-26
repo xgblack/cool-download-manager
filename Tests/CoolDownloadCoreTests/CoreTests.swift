@@ -360,7 +360,7 @@ struct CoreTests {
         let settings = try await store.load()
         #expect(settings.threadCount == 8)
         #expect(settings.maxConcurrentDownloads == 3)
-        #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/ABDM"))
+        #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/CoolDM"))
         #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))
     }
 
@@ -481,6 +481,15 @@ struct CoreTests {
         #expect(!FileManager.default.fileExists(atPath: record.incompleteURL.path))
     }
 
+    @Test("new records use the cooldm temporary filename")
+    func defaultIncompleteFileNameUsesCoolDM() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = makeRecord(id: 31, folder: root)
+
+        #expect(record.incompleteURL.lastPathComponent == ".dl-31.cooldm.part")
+    }
+
     @Test("HTTP downloader validates range and restarts when ignored")
     func httpRange() async throws {
         let transport = MemoryTransport()
@@ -518,7 +527,7 @@ struct CoreTests {
             _ = try await downloader.download(source: source, offset: 3, writer: writer)
             Issue.record("mismatched Content-Range should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .responseMismatch("Content-Range starts at 4, expected 3"))
+            #expect(error == .responseMismatch("Content-Range 起始位置为 4，应为 3"))
         }
     }
 
@@ -529,13 +538,51 @@ struct CoreTests {
         let service = DownloadService(store: try DownloadStore(rootURL: root), defaultFolder: root)
         try await service.boot()
 
-        let link = "https://cdn.example.test/3299e15a-323c-4a57-82d3-1591ea65f709?response-content-disposition=attachment%3B+filename%3DABDownloadManager_1.10.2_linux_x64.tar.gz"
+        let link = "https://cdn.example.test/3299e15a-323c-4a57-82d3-1591ea65f709?response-content-disposition=attachment%3B+filename%3DCoolDM_1.10.2_linux_x64.tar.gz"
         let id = try await service.add(AddDownloadRequest(
             source: DownloadSource(kind: .http, link: link),
             folder: root.path
         ))
 
-        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.name == "ABDownloadManager_1.10.2_linux_x64.tar.gz")
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.name == "CoolDM_1.10.2_linux_x64.tar.gz")
+    }
+
+    @Test("service auto-renames duplicate browser destinations")
+    func duplicateBrowserDestinations() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("existing download".utf8).write(to: root.appendingPathComponent("archive.tar.gz"))
+        try Data().write(to: root.appendingPathComponent("archive (1).tar.gz.cooldm.part"))
+
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                appendExtensionToIncompleteDownloads: true
+            )
+        )
+        try await service.boot()
+
+        let firstID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/archive-one",
+                suggestedName: "archive.tar.gz"
+            ),
+            folder: root.path
+        ))
+        let secondID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/archive-two",
+                suggestedName: "archive.tar.gz"
+            ),
+            folder: root.path
+        ))
+
+        let downloads = await service.snapshot().downloads
+        #expect(downloads.first(where: { $0.id == firstID })?.name == "archive (2).tar.gz")
+        #expect(downloads.first(where: { $0.id == secondID })?.name == "archive (3).tar.gz")
     }
 
     @Test("HTTP response exposes Content-Disposition filename")
@@ -623,6 +670,59 @@ struct CoreTests {
         #expect(try Data(contentsOf: manual.destinationURL) == Data("body".utf8))
     }
 
+    @Test("server filename gets a suffix when a queued task reserves it")
+    func serviceSuffixesConflictingServerFilename() async throws {
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(
+                status: 200,
+                headers: [
+                    "Content-Length": "4",
+                    "Content-Disposition": "attachment; filename=server-name.bin"
+                ],
+                body: Data("body".utf8)
+            )
+        }
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root
+        )
+        try await service.boot()
+
+        _ = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/queued",
+                suggestedName: "server-name.bin"
+            ),
+            folder: root.path
+        ))
+        let automaticID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/3299e15a-323c-4a57-82d3-1591ea65f709"
+            ),
+            folder: root.path,
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            if await service.snapshot().downloads.first(where: { $0.id == automaticID })?.status == .completed {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let completed = try #require(await service.snapshot().downloads.first(where: { $0.id == automaticID }))
+        #expect(completed.status == .completed)
+        #expect(completed.name == "server-name (1).bin")
+        #expect(try Data(contentsOf: completed.destinationURL) == Data("body".utf8))
+    }
+
     @Test("HTTP downloader surfaces server errors")
     func httpError() async throws {
         let transport = MemoryTransport()
@@ -661,7 +761,7 @@ struct CoreTests {
             )
             Issue.record("an oversized response body should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .responseMismatch("received more than 3 bytes"))
+            #expect(error == .responseMismatch("接收的数据超过预期大小 3 字节"))
         }
         #expect(try await writer.length() == 0)
     }
@@ -685,7 +785,7 @@ struct CoreTests {
             )
             Issue.record("a short response body should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .responseMismatch("received 3 bytes, expected 4"))
+            #expect(error == .responseMismatch("实际接收 3 字节，应为 4 字节"))
         }
         #expect(try await writer.length() == 0)
     }
@@ -704,7 +804,7 @@ struct CoreTests {
             _ = try await HTTPDownloader(transport: transport).download(source: source, offset: 1, writer: writer)
             Issue.record("malformed Content-Range should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .responseMismatch("206 response did not include a valid Content-Range"))
+            #expect(error == .responseMismatch("206 响应未包含有效的 Content-Range"))
         }
     }
 
@@ -726,7 +826,7 @@ struct CoreTests {
             _ = try await HTTPDownloader(transport: transport).download(source: source, offset: 0, writer: writer)
             Issue.record("malformed Content-Length should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .responseMismatch("Content-Length is not a non-negative integer"))
+            #expect(error == .responseMismatch("Content-Length 不是非负整数"))
         }
         #expect(try await writer.length() == 0)
     }
@@ -1087,7 +1187,7 @@ struct CoreTests {
             _ = try await HLSDownloader(transport: transport).download(source: source, writer: writer)
             Issue.record("encrypted HLS should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .unsupportedHLS("encrypted HLS requires a key provider"))
+            #expect(error == .unsupportedHLS("加密 HLS 需要密钥提供方"))
         }
     }
 
@@ -1121,7 +1221,7 @@ struct CoreTests {
             )
             Issue.record("non-contiguous HLS metadata should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .responseMismatch("HLS completed segments are not a contiguous playlist prefix"))
+            #expect(error == .responseMismatch("HLS 已完成分片不是连续的播放列表前缀"))
         }
     }
 

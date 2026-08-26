@@ -14,14 +14,14 @@ public enum NativeMessagingManifestInstaller {
         let directories = manifestDirectories
         let firefox = try JSONSerialization.data(withJSONObject: [
             "name": hostName,
-            "description": "Cool download manager",
+            "description": "酷的下载管理器",
             "path": hostPath,
             "type": "stdio",
             "allowed_extensions": [firefoxExtensionID]
         ], options: [.sortedKeys, .prettyPrinted])
         let chrome = try JSONSerialization.data(withJSONObject: [
             "name": hostName,
-            "description": "Cool download manager",
+            "description": "酷的下载管理器",
             "path": hostPath,
             "type": "stdio",
             "allowed_origins": [chromeExtensionOrigin]
@@ -79,8 +79,8 @@ public enum ManifestInstallerError: Error, LocalizedError, Sendable, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .nonAbsoluteHostPath(let path): return "Native Messaging host path is not absolute: \(path)"
-        case .writeFailed(let path): return "Cannot write Native Messaging manifest: \(path)"
+        case .nonAbsoluteHostPath(let path): return "Native Messaging 宿主路径不是绝对路径：\(path)"
+        case .writeFailed(let path): return "无法写入 Native Messaging 清单：\(path)"
         }
     }
 }

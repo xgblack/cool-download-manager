@@ -299,7 +299,7 @@ public actor QueueStore {
         models = loadedModels
         loaded = true
         if models.isEmpty {
-            models[0] = DownloadQueueModel(id: 0, name: "Main")
+            models[0] = DownloadQueueModel(id: 0, name: "主队列")
         }
         return sortedModels()
     }

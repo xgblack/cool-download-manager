@@ -134,11 +134,27 @@ final class DownloadListStore: ObservableObject {
         guard eventTask == nil, let service else { return }
         eventTask = Task { [weak self] in
             let events = await service.events()
-            for await _ in events {
+            for await event in events {
                 guard !Task.isCancelled else { break }
-                let snapshot = await service.snapshot()
-                self?.apply(snapshot.downloads)
+                // Use the record carried by the event. A browser-initiated
+                // download can move from added to preparing/downloading
+                // before a snapshot round trip completes; re-reading only a
+                // snapshot here could miss the transition that opens the
+                // progress window.
+                self?.apply(event)
             }
+        }
+    }
+
+    private func apply(_ event: DownloadEvent) {
+        switch event {
+        case .created(let record), .updated(let record):
+            var next = downloads.filter { $0.id != record.id }
+            next.append(record)
+            apply(next)
+        case .removed(let id):
+            guard downloads.contains(where: { $0.id == id }) else { return }
+            apply(downloads.filter { $0.id != id })
         }
     }
 
@@ -324,11 +340,35 @@ final class DownloadListStore: ObservableObject {
         }
     }
 
+    /// Operates on one task without changing the table selection. Utility
+    /// panels use these methods so their controls do not disturb the main
+    /// download list.
+    func start(id: DownloadID) {
+        guard let record = record(id: id),
+              record.status == .added || record.status == .paused
+                || record.status == .failed || record.status == .cancelled else {
+            return
+        }
+        perform(ids: [id]) { service, ids in
+            try await service.resume(ids: ids)
+        }
+    }
+
     func pauseSelected() {
         let ids = selectedDownloads
             .filter { $0.status == .preparing || $0.status == .downloading || $0.status == .retrying }
             .map(\.id)
         perform(ids: ids) { service, ids in
+            try await service.pause(ids: ids)
+        }
+    }
+
+    func pause(id: DownloadID) {
+        guard let record = record(id: id),
+              record.status == .preparing || record.status == .downloading || record.status == .retrying else {
+            return
+        }
+        perform(ids: [id]) { service, ids in
             try await service.pause(ids: ids)
         }
     }
@@ -342,11 +382,27 @@ final class DownloadListStore: ObservableObject {
         }
     }
 
+    func retry(id: DownloadID) {
+        guard let record = record(id: id), record.status == .failed || record.status == .cancelled else {
+            return
+        }
+        perform(ids: [id]) { service, ids in
+            try await service.retry(ids: ids)
+        }
+    }
+
     func redownloadSelected() {
         let ids = selectedDownloads
             .filter { $0.status == .completed }
             .map(\.id)
         perform(ids: ids) { service, ids in
+            try await service.redownload(ids: ids)
+        }
+    }
+
+    func redownload(id: DownloadID) {
+        guard let record = record(id: id), record.status == .completed else { return }
+        perform(ids: [id]) { service, ids in
             try await service.redownload(ids: ids)
         }
     }

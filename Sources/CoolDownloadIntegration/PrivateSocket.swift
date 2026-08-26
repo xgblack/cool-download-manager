@@ -25,11 +25,11 @@ public enum PrivateSocketError: Error, LocalizedError, Sendable, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidMagic: return "Invalid private socket frame magic"
-        case .truncatedFrame: return "Private socket frame was truncated"
-        case .invalidLength(let length): return "Invalid private socket frame length \(length)"
-        case .messageTooLarge(let size): return "Private socket message is too large: \(size)"
-        case .malformedJSON(let reason): return "Malformed private socket JSON: \(reason)"
+        case .invalidMagic: return "私有套接字帧标识无效"
+        case .truncatedFrame: return "私有套接字帧不完整"
+        case .invalidLength(let length): return "私有套接字帧长度无效：\(length)"
+        case .messageTooLarge(let size): return "私有套接字消息过大：\(size)"
+        case .malformedJSON(let reason): return "私有套接字 JSON 格式错误：\(reason)"
         }
     }
 }

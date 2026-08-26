@@ -103,7 +103,7 @@ struct PerHostSettingsView: View {
                         TextField("主机或通配符，例如 *.example.com", text: $state.host)
                         TextField("用户名（可选）", text: $state.username)
                         SecureField("密码（可选）", text: $state.password)
-                        TextField("User-Agent（可选）", text: $state.userAgent)
+                        TextField("客户端标识 User-Agent（可选）", text: $state.userAgent)
                         HStack {
                             Text("线程数")
                             TextField("留空使用全局", text: $state.threadCount)
@@ -154,7 +154,13 @@ final class PerHostSettingsViewState: ObservableObject {
         loadDraft()
     }
 
-    var isDirty: Bool { items != savedItems || draft != currentItem }
+    var isDirty: Bool {
+        // With no selected host there is no editable draft. Comparing the
+        // empty draft value with `nil` would otherwise make every fresh
+        // settings window look unsaved.
+        guard selectedHost != nil else { return items != savedItems }
+        return items != savedItems || draft != currentItem
+    }
 
     func replaceItems(_ values: [PerHostSettingsItem]) {
         items = values

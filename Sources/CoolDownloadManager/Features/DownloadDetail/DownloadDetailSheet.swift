@@ -76,12 +76,12 @@ struct DownloadDetailSheet: View {
             detailRow("文件大小", sizeText)
             detailRow("已下载", byteFormatter.string(fromByteCount: record.downloadedBytes))
             detailRow("保存路径", record.destinationURL.path)
-            detailRow("源 URL", record.source.link)
+            detailRow("源地址", record.source.link)
             if let etag = record.etag {
-                detailRow("ETag", etag)
+            detailRow("ETag（实体标签）", etag)
             }
             if let modified = record.lastModified {
-                detailRow("Last-Modified", modified)
+            detailRow("Last-Modified（修改时间）", modified)
             }
             if let error = record.error {
                 VStack(alignment: .leading, spacing: 4) {

@@ -1,9 +1,9 @@
-# Native macOS implementation
+# 酷的下载管理器 macOS 原生版本
 
-The root Swift package is the first vertical slice of the native rewrite.
+The root Swift package is the native macOS implementation.
 It contains:
 
-- `CoolDownloadCore`: actor-based storage, HTTP/Range downloads, optional parallel range connections, ETag/Last-Modified validation, HLS media playlist downloads, pause/resume, bounded scheduling, queue policies and completion events, finite transient retries, atomic `.dl-<id>.abdm.part` files, legacy record/parts JSON projection, and recovery state.
+- `CoolDownloadCore`: actor-based storage under `~/.cooldm`, HTTP/Range downloads, optional parallel range connections, ETag/Last-Modified validation, HLS media playlist downloads, pause/resume, bounded scheduling, queue policies and completion events, finite transient retries, atomic `.dl-<id>.cooldm.part` files, JSON record/parts projection, and recovery state.
 - `CoolDownloadIntegration`: loopback HTTP API on `127.0.0.1:15151`, API-key validation, Native Messaging framing, private Unix socket, queue listing, and manifest installation.
 - `CoolDownloadManager`: SwiftUI/AppKit executable that owns the core directly.
 - `CoolDownloadManagerNativeMessagingHost`: short-lived stdio adapter for the existing browser extension.

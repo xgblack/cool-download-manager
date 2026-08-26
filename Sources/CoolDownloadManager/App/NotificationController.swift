@@ -12,7 +12,7 @@ final class NotificationController {
         notify(
             title: "下载完成",
             body: record.name,
-            identifier: "com.abdownloadmanager.completed.\(record.id).\(record.revision)",
+            identifier: "com.cooldownloadmanager.completed.\(record.id).\(record.revision)",
             soundEnabled: soundEnabled,
             soundName: soundName
         )
@@ -22,7 +22,7 @@ final class NotificationController {
         notify(
             title: "下载失败",
             body: record.error.map { "\(record.name)：\($0)" } ?? record.name,
-            identifier: "com.abdownloadmanager.failed.\(record.id).\(record.revision)",
+            identifier: "com.cooldownloadmanager.failed.\(record.id).\(record.revision)",
             soundEnabled: soundEnabled,
             soundName: soundName
         )

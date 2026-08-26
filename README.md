@@ -1,18 +1,24 @@
-# Cool download manager
+# 酷的下载管理器
 
-Cool download manager is being rewritten as a native macOS application in
-Swift. The current branch contains the SwiftUI/AppKit application, a pure
-Swift download core, the browser integration service, the Native Messaging
-host, and a small command-line client.
+酷的下载管理器正在使用 Swift 重写为原生 macOS 应用。当前分支包含
+SwiftUI/AppKit 应用、纯 Swift 下载核心、浏览器集成服务、Native Messaging
+宿主和命令行客户端。
 
-The browser extension remains unchanged. The rewrite keeps the compatibility
-identifiers used by released versions:
+The browser extension remains unchanged. The existing extension still requires
+these Native Messaging protocol identifiers:
 
 - Native Messaging host: `com.abdownloadmanager`
-- Data directory: `~/.abdm`
 - Chrome origin: `chrome-extension://bbobopahenonfdgjgaleledndnnfhooj/`
 - Firefox extension ID: `firefox-integration@abdownloadmanager.com`
 - Loopback HTTP port: `15151`
+
+The native application uses new private identifiers and does not migrate data
+from the old desktop application:
+
+- Bundle ID: `com.cooldownloadmanager`
+- Data directory: `~/.cooldm`
+- Default download directory: `~/Downloads/CoolDM`
+- Incomplete file suffix: `.cooldm.part`
 
 ## Current Scope
 
@@ -21,7 +27,7 @@ The macOS vertical slice currently covers:
 - HTTP and HTTPS downloads with pause, resume, retries, and persisted state
 - HTTP Range probing and parallel byte-range downloads
 - HLS master/media playlists and ordered segment assembly
-- Legacy `.abdm` records, parts sidecars, and `.dl-<id>.abdm.part` files
+- JSON download records, parts sidecars, and `.dl-<id>.cooldm.part` files
 - Loopback HTTP compatibility endpoints and API-key validation
 - Native Messaging framing and a private Unix-socket bridge to the app
 - Basic SwiftUI download list actions: add, start, pause, retry, remove, queue,
@@ -147,13 +153,14 @@ stdout; diagnostics go to stderr.
 ## Compatibility And Migration
 
 The Swift branch is a complete rewrite and no longer builds the deleted
-Kotlin/Gradle application. The Swift core is the only process allowed to
-write the `.abdm` data directory. Do not run an older Compose build against
-the same data directory at the same time.
+Kotlin/Gradle application. The Swift core is the only process allowed to write
+the `.cooldm` data directory. Files under the old `~/.abdm` directory are not
+automatically migrated or read by this version. Do not run an older Compose
+build against the new data directory.
 
 The browser extension source is maintained separately at
 [`amir1376/ab-download-manager-browser-integration`](https://github.com/amir1376/ab-download-manager-browser-integration).
-No extension changes are required for the compatibility values above.
+No extension changes are required for the Native Messaging values above.
 
 ## License
 

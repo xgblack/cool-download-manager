@@ -27,7 +27,7 @@ public actor LegacyQueueStore {
             queues.append(IntegrationQueue(id: id, name: name))
         }
         if queues.isEmpty {
-            return [IntegrationQueue(id: 0, name: "Main")]
+            return [IntegrationQueue(id: 0, name: "主队列")]
         }
         return queues.sorted { $0.id < $1.id }
     }
@@ -38,7 +38,7 @@ public enum LegacyQueueStoreError: Error, LocalizedError, Sendable, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .corrupt(let url): return "Cannot read queue record: \(url.path)"
+        case .corrupt(let url): return "无法读取队列记录：\(url.path)"
         }
     }
 }

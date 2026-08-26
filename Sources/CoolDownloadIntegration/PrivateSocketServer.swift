@@ -5,8 +5,8 @@ public final class PrivateSocketServer: @unchecked Sendable {
     public let socketURL: URL
 
     private let handler: @Sendable (PrivateSocketMessage) async -> PrivateSocketMessage
-    private let acceptQueue = DispatchQueue(label: "com.abdownloadmanager.integration.socket.accept")
-    private let workerQueue = DispatchQueue(label: "com.abdownloadmanager.integration.socket.worker", attributes: .concurrent)
+    private let acceptQueue = DispatchQueue(label: "com.cooldownloadmanager.integration.socket.accept")
+    private let workerQueue = DispatchQueue(label: "com.cooldownloadmanager.integration.socket.worker", attributes: .concurrent)
     private var listener: Int32 = -1
     private let stateLock = NSLock()
     private var stopped = false
@@ -100,10 +100,10 @@ public final class PrivateSocketServer: @unchecked Sendable {
 
         public var errorDescription: String? {
             switch self {
-            case .alreadyRunning(let url): return "Private socket is already in use: \(url.path)"
-            case .pathOccupied(let url): return "Private socket path is occupied by a non-socket file: \(url.path)"
+            case .alreadyRunning(let url): return "私有套接字已被占用：\(url.path)"
+            case .pathOccupied(let url): return "私有套接字路径已被非套接字文件占用：\(url.path)"
             case .probeFailed(let url, let reason):
-                return "Could not verify private socket \(url.path): \(reason)"
+                return "无法验证私有套接字 \(url.path)：\(reason)"
             }
         }
     }

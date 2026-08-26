@@ -260,14 +260,10 @@ public actor DownloadService {
             ?? suggestedName
             ?? DownloadFileNameResolver.fromURL(request.source.link)
             ?? "download-\(id)"
-        let name = try validatedName(candidateName)
-        let destination = folderURL.appendingPathComponent(name)
-        if records.values.contains(where: { $0.destinationURL.standardizedFileURL == destination }) {
-            throw DownloadCoreError.duplicateDestination(destination.path)
-        }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            throw DownloadCoreError.duplicateDestination(destination.path)
-        }
+        let name = availableFileName(
+            for: try validatedName(candidateName),
+            in: folderURL
+        )
 
         let now = Date()
         let record = DownloadRecord(
@@ -281,7 +277,7 @@ public actor DownloadService {
             updatedAt: now,
             taskSettings: try request.taskSettings?.validated(),
             incompleteFileName: schedulerConfiguration.appendExtensionToIncompleteDownloads
-                ? "\(name).abdm.part"
+                ? "\(name).cooldm.part"
                 : nil
         )
         records[id] = record
@@ -618,10 +614,24 @@ public actor DownloadService {
                     "received \(finalLength) bytes, expected \(totalBytes)"
                 )
             }
+            guard var completing = records[id] else {
+                return
+            }
             let completedName = resolvedCompletionName(
-                for: record,
+                for: completing,
                 serverFileName: serverFileName
             )
+            if completing.name != completedName {
+                // Reserve a response-derived filename before yielding to the
+                // writer actor. A second add() can then choose its own suffix
+                // instead of racing this completed file.
+                completing.name = completedName
+                completing.updatedAt = Date()
+                completing.revision += 1
+                records[id] = completing
+                try await store.save(completing)
+                emit(.updated(completing))
+            }
             let completedDestination = URL(fileURLWithPath: record.folder, isDirectory: true)
                 .appendingPathComponent(completedName)
             try await writer.finish(destinationURL: completedDestination)
@@ -629,11 +639,8 @@ public actor DownloadService {
             guard var completed = records[id] else {
                 return
             }
-            if completed.name != completedName {
-                completed.name = completedName
-                if completed.incompleteFileName != nil {
-                    completed.incompleteFileName = "\(completedName).abdm.part"
-                }
+            if completed.incompleteFileName != nil {
+                completed.incompleteFileName = "\(completedName).cooldm.part"
             }
             completed.status = .completed
             completed.downloadedBytes = finalLength
@@ -852,7 +859,7 @@ public actor DownloadService {
                     rateLimiter: rateLimiter
                 )
             }
-            throw DownloadCoreError.responseMismatch("parallel download requires a known resource length")
+            throw DownloadCoreError.responseMismatch("并行下载需要已知的资源大小")
         }
         if let expectedTotal = record.totalBytes, expectedTotal != totalBytes {
             throw DownloadCoreError.resourceChanged
@@ -943,7 +950,7 @@ public actor DownloadService {
         guard let completed = records[id],
               completed.parts.allSatisfy(\.completed),
               completed.downloadedBytes == totalBytes else {
-            throw DownloadCoreError.responseMismatch("parallel ranges did not cover the complete file")
+            throw DownloadCoreError.responseMismatch("并行分段未覆盖完整文件")
         }
         return HTTPDownloadResult(
             statusCode: 206,
@@ -988,7 +995,7 @@ public actor DownloadService {
     ) throws -> [DownloadPart] {
         let sorted = parts.sorted { $0.from < $1.from }
         guard !sorted.isEmpty, totalBytes > 0 else {
-            throw DownloadCoreError.responseMismatch("HTTP range metadata is empty")
+            throw DownloadCoreError.responseMismatch("HTTP 范围元数据为空")
         }
         var expectedFrom: Int64 = 0
         for part in sorted {
@@ -997,12 +1004,12 @@ public actor DownloadService {
                   to >= part.from,
                   part.downloaded >= 0,
                   part.downloaded <= to - part.from + 1 else {
-                throw DownloadCoreError.responseMismatch("HTTP range metadata is not contiguous")
+                throw DownloadCoreError.responseMismatch("HTTP 范围元数据不连续")
             }
             expectedFrom = to + 1
         }
         guard expectedFrom == totalBytes else {
-            throw DownloadCoreError.responseMismatch("HTTP range metadata does not cover the resource")
+            throw DownloadCoreError.responseMismatch("HTTP 范围元数据未覆盖完整资源")
         }
         return sorted.map { part in
             var normalized = part
@@ -1015,7 +1022,7 @@ public actor DownloadService {
         var total: Int64 = 0
         for part in parts {
             guard part.downloaded >= 0 else {
-                throw DownloadCoreError.responseMismatch("negative downloaded range length")
+                throw DownloadCoreError.responseMismatch("已下载范围长度不能为负数")
             }
             total += part.downloaded
         }
@@ -1204,15 +1211,70 @@ public actor DownloadService {
             return record.name
         }
 
-        let destination = URL(fileURLWithPath: record.folder, isDirectory: true)
-            .appendingPathComponent(candidate)
-            .standardizedFileURL
-        guard !records.values.contains(where: {
-            $0.id != record.id && $0.destinationURL.standardizedFileURL == destination
-        }), !FileManager.default.fileExists(atPath: destination.path) else {
-            return record.name
+        return availableFileName(
+            for: candidate,
+            in: URL(fileURLWithPath: record.folder, isDirectory: true),
+            excluding: record.id
+        )
+    }
+
+    /// Produces a destination that cannot collide with an existing task,
+    /// completed file, or visible incomplete file. Existing history is left
+    /// untouched; this only affects newly created downloads.
+    private func availableFileName(
+        for requestedName: String,
+        in folder: URL,
+        excluding excludedID: DownloadID? = nil
+    ) -> String {
+        var suffix = 0
+        var candidate = requestedName
+        while isFileNameReserved(candidate, in: folder, excluding: excludedID) {
+            suffix += 1
+            candidate = numberedFileName(requestedName, suffix: suffix)
         }
         return candidate
+    }
+
+    private func isFileNameReserved(
+        _ name: String,
+        in folder: URL,
+        excluding excludedID: DownloadID?
+    ) -> Bool {
+        let destination = folder.appendingPathComponent(name).standardizedFileURL
+        let incomplete: URL? = schedulerConfiguration.appendExtensionToIncompleteDownloads
+            ? folder.appendingPathComponent("\(name).cooldm.part").standardizedFileURL
+            : nil
+
+        if FileManager.default.fileExists(atPath: destination.path)
+            || (incomplete.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
+            return true
+        }
+
+        return records.values.contains { record in
+            guard record.id != excludedID else { return false }
+            let recordDestination = record.destinationURL.standardizedFileURL
+            let recordIncomplete = record.incompleteURL.standardizedFileURL
+            return recordDestination == destination
+                || recordIncomplete == destination
+                || incomplete.map { $0 == recordDestination || $0 == recordIncomplete } == true
+        }
+    }
+
+    private func numberedFileName(_ name: String, suffix: Int) -> String {
+        let compoundExtensions = [".tar.lzma", ".tar.bz2", ".tar.gz", ".tar.lz", ".tar.xz", ".tar.zst"]
+        let lowercased = name.lowercased()
+        if let compoundExtension = compoundExtensions.first(where: { lowercased.hasSuffix($0) }) {
+            let extensionStart = name.index(name.endIndex, offsetBy: -compoundExtension.count)
+            return "\(name[..<extensionStart]) (\(suffix))\(name[extensionStart...])"
+        }
+
+        let pathExtension = (name as NSString).pathExtension
+        guard !pathExtension.isEmpty else {
+            return "\(name) (\(suffix))"
+        }
+        let extensionSuffix = ".\(pathExtension)"
+        let extensionStart = name.index(name.endIndex, offsetBy: -extensionSuffix.count)
+        return "\(name[..<extensionStart]) (\(suffix))\(name[extensionStart...])"
     }
 
     private func validatedName(_ name: String) throws -> String {

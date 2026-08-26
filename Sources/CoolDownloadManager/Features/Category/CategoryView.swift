@@ -193,7 +193,7 @@ struct CategoryView: View {
                     SettingsSectionView(title: "分类配置", description: "分类可按文件扩展名和 URL 通配符自动匹配。") {
                         TextField("名称", text: $state.name)
                         HStack {
-                            TextField("SF Symbol 图标", text: $state.icon)
+                            TextField("系统图标名称", text: $state.icon)
                             Image(systemName: state.icon.isEmpty ? "folder" : state.icon)
                                 .frame(width: 24)
                                 .foregroundStyle(.secondary)

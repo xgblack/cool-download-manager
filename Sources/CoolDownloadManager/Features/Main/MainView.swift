@@ -531,6 +531,41 @@ struct MainView: View {
     }
 }
 
+private struct DownloadDateLabel: View {
+    let date: Date
+    let relative: Bool
+
+    var body: some View {
+        // Refresh periodically so "刚刚" naturally becomes minutes or hours
+        // even when no download event causes the row to redraw.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            Text(displayText(at: context.date))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    private func displayText(at now: Date) -> String {
+        guard relative else {
+            return date.formatted(date: .abbreviated, time: .omitted)
+        }
+
+        let elapsed = now.timeIntervalSince(date)
+        guard elapsed >= 0 else { return "刚刚" }
+        if elapsed < 60 { return "刚刚" }
+        if elapsed < 60 * 60 {
+            return "\(max(1, Int(elapsed / 60))) 分钟前"
+        }
+        if elapsed < 60 * 60 * 24 {
+            return "\(max(1, Int(elapsed / (60 * 60)))) 小时前"
+        }
+        if elapsed < 60 * 60 * 24 * 7 {
+            return "\(max(1, Int(elapsed / (60 * 60 * 24)))) 天前"
+        }
+        return date.formatted(date: .abbreviated, time: .omitted)
+    }
+}
+
 private struct IconLabelStyleModifier: ViewModifier {
     let showLabels: Bool
 
@@ -609,7 +644,7 @@ private struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("下载管理器")
+        .navigationTitle("酷的下载管理器")
     }
 
     private func sidebarItem(_ filter: DownloadFilter, title: String? = nil, image: String? = nil) -> some View {
@@ -697,13 +732,7 @@ private struct DownloadTableRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 130, alignment: .trailing)
 
-            Group {
-                if relativeDate {
-                    Text(record.createdAt, style: .relative)
-                } else {
-                    Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
-                }
-            }
+            DownloadDateLabel(date: record.createdAt, relative: relativeDate)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 120, alignment: .trailing)

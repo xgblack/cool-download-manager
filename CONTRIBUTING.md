@@ -1,42 +1,35 @@
-# Contributing to Cool download manager
+# 为酷的下载管理器贡献代码
 
-Thank you for your interest in contributing to Cool download manager! I appreciate any help you can offer.
+感谢你对酷的下载管理器的关注，欢迎提交改进建议。
 
-## What Contributions Are Accepted?
+## 接受的贡献
 
-I welcome the following types of contributions:
+欢迎提交以下类型的贡献：
 
-- **Bug Reports**: If you find a bug, please report it by opening an issue with details about the problem.
+- **问题报告**：发现问题时，请创建 issue 并附上复现细节。
 
-- **Feature Requests**: Have an idea for a new feature? Let me know by opening an issue or starting a discussion.
+- **功能建议**：有新功能想法时，请创建 issue 或发起讨论。
 
-- **Translations**: You can translate Cool download manager into other languages on Crowdin. See the Translations section
-  below for more information.
+- **界面文字**：当前版本只维护简体中文界面，欢迎提交中文文案改进。
 
-- **Pull Requests**: If you’d like to contribute code, feel free to submit a pull request. Just make sure to read the guidelines below before you start.
+- **代码提交**：欢迎提交 pull request，请先阅读下方指南。
 
-## Bug Reports
+## 问题报告
 
-#### Before opening an issue:
+#### 创建 issue 前
 
-- Make sure you are using the [latest version](https://github.com/amir1376/ab-download-manager/releases/latest).
-- Search existing issues.
-- Include steps to reproduce the problem.
-- Include logs when applicable.
+- 确认使用的是[最新版本](https://github.com/amir1376/ab-download-manager/releases/latest)。
+- 搜索已有 issue。
+- 附上问题复现步骤。
+- 必要时附上日志。
 
-#### After opening an issue:
+#### 创建 issue 后
 
-- If you find the cause of the issue, share it before closing the issue. Documenting solutions helps other users,
-  reduces duplicate reports, and saves everyone time.
+- 如果找到问题原因，请在关闭 issue 前补充说明，帮助其他用户并减少重复报告。
 
-## Translations
+## 界面文案
 
-If you’d like to help translate Cool download manager into another language, or improve existing translations, you can do
-so on Crowdin. Here’s how:
-
-- Visit the project in [Crowdin](https://crowdin.com/project/ab-download-manager)
-- Please DO NOT submit translations via pull requests.
-- If you want to add a new language, please see [here](https://github.com/amir1376/ab-download-manager/issues/144)
+当前版本不维护多语言翻译，界面文案直接使用简体中文。
 
 ## Pull Requests
 

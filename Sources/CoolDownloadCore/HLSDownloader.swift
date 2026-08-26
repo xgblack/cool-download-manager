@@ -38,7 +38,7 @@ public final class HLSDownloader: @unchecked Sendable {
 
         let playlist = try await loadPlaylist(at: playlistURL, headers: source.headers, depth: 0)
         guard !playlist.segments.isEmpty else {
-            throw DownloadCoreError.unsupportedHLS("playlist contains no media segments")
+            throw DownloadCoreError.unsupportedHLS("播放列表不包含媒体分片")
         }
         var effectiveCompletedSegments = completedSegments
         var initialLength = try await writer.length()
@@ -47,7 +47,7 @@ public final class HLSDownloader: @unchecked Sendable {
             guard effectiveCompletedSegments == expectedPrefix,
                   lastCompleted < playlist.segments.count else {
                 throw DownloadCoreError.responseMismatch(
-                    "HLS completed segments are not a contiguous playlist prefix"
+                    "HLS 已完成分片不是连续的播放列表前缀"
                 )
             }
 
@@ -120,17 +120,17 @@ public final class HLSDownloader: @unchecked Sendable {
         depth: Int
     ) async throws -> Playlist {
         guard depth < 3 else {
-            throw DownloadCoreError.unsupportedHLS("master playlist nesting is too deep")
+            throw DownloadCoreError.unsupportedHLS("主播放列表嵌套层级过深")
         }
         let data = try await fetchData(url: url, headers: headers)
         guard let text = String(data: data, encoding: .utf8) else {
-            throw DownloadCoreError.unsupportedHLS("playlist is not UTF-8 text")
+            throw DownloadCoreError.unsupportedHLS("播放列表不是 UTF-8 文本")
         }
         let lines = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         guard lines.first == "#EXTM3U" else {
-            throw DownloadCoreError.unsupportedHLS("missing #EXTM3U header")
+            throw DownloadCoreError.unsupportedHLS("缺少 #EXTM3U 标头")
         }
         if let variant = highestBandwidthVariant(lines: lines, baseURL: url) {
             return try await loadPlaylist(at: variant, headers: headers, depth: depth + 1)
@@ -143,16 +143,16 @@ public final class HLSDownloader: @unchecked Sendable {
             if line.hasPrefix("#EXT-X-KEY") {
                 let method = attribute("METHOD", in: line) ?? "NONE"
                 if method.uppercased() != "NONE" {
-                    throw DownloadCoreError.unsupportedHLS("encrypted HLS requires a key provider")
+                    throw DownloadCoreError.unsupportedHLS("加密 HLS 需要密钥提供方")
                 }
             }
             if line.hasPrefix("#EXT-X-BYTERANGE") {
-                throw DownloadCoreError.unsupportedHLS("segment byte ranges are not implemented")
+                throw DownloadCoreError.unsupportedHLS("尚未实现分片字节范围")
             }
             if line.hasPrefix("#EXT-X-MAP") {
                 guard let rawURI = attribute("URI", in: line),
                       let resolved = URL(string: rawURI, relativeTo: url)?.absoluteURL else {
-                    throw DownloadCoreError.unsupportedHLS("invalid initialization segment URI")
+                    throw DownloadCoreError.unsupportedHLS("初始化分片 URI 无效")
                 }
                 initializationURL = resolved
             }
@@ -162,7 +162,7 @@ public final class HLSDownloader: @unchecked Sendable {
             }
             guard expectsSegmentURI, !line.hasPrefix("#") else { continue }
             guard let segmentURL = URL(string: line, relativeTo: url)?.absoluteURL else {
-                throw DownloadCoreError.unsupportedHLS("invalid segment URI")
+                throw DownloadCoreError.unsupportedHLS("分片 URI 无效")
             }
             segments.append(segmentURL)
             expectsSegmentURI = false

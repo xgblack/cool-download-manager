@@ -26,10 +26,10 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func settingsWindowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
-              window.identifier?.rawValue == "com.abdownloadmanager.settings-window" else {
+              window.identifier?.rawValue == "com.cooldownloadmanager.settings-window" else {
             return
         }
-        window.title = "下载管理器"
+        window.title = "酷的下载管理器"
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -66,7 +66,7 @@ struct CoolDownloadManagerApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("下载管理器", id: "main") {
+        WindowGroup("酷的下载管理器", id: "main") {
             MainView(store: store, coordinator: coordinator, viewState: coordinator.mainViewState)
                 .background {
                     WindowAccessor { window in
@@ -201,10 +201,10 @@ struct CoolDownloadManagerApp: App {
                     // title after attachment so the settings page stays in
                     // Chinese as well.
                     guard let window else { return }
-                    window.identifier = NSUserInterfaceItemIdentifier("com.abdownloadmanager.settings-window")
-                    window.title = "下载管理器"
+                    window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.settings-window")
+                    window.title = "酷的下载管理器"
                     DispatchQueue.main.async {
-                        window.title = "下载管理器"
+                        window.title = "酷的下载管理器"
                     }
                     window.minSize = NSSize(width: 790, height: 560)
                     window.toolbarStyle = .unified

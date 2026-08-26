@@ -94,8 +94,8 @@ final class AppCoordinator: NSObject, ObservableObject {
     func registerMainWindow(_ window: NSWindow?) {
         guard let window else { return }
         mainWindow = window
-        window.identifier = NSUserInterfaceItemIdentifier("com.abdownloadmanager.main-window")
-        window.title = "下载管理器"
+        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.main-window")
+        window.title = "酷的下载管理器"
         window.minSize = NSSize(width: 900, height: 560)
         applyWindowSettings()
         if focusMainWindowWhenRegistered {
@@ -124,7 +124,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
         mainWindow = nil
         return NSApp.windows.first { window in
-            window.identifier?.rawValue == "com.abdownloadmanager.main-window"
+            window.identifier?.rawValue == "com.cooldownloadmanager.main-window"
         }
     }
 
@@ -264,7 +264,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         let panel = panel(
             existing: progressPanel,
             title: "下载进度",
-            size: NSSize(width: 430, height: 190),
+            size: NSSize(width: 720, height: 520),
             content: content
         )
         progressPanel = panel
@@ -288,7 +288,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         let panel = panel(
             existing: completionPanel,
             title: "下载完成",
-            size: NSSize(width: 520, height: 280),
+            size: NSSize(width: 580, height: 330),
             content: content
         )
         completionPanel = panel
@@ -313,6 +313,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
+        panel.minSize = size
         panel.setContentSize(size)
         panel.contentViewController = NSHostingController(rootView: AnyView(content))
         return panel

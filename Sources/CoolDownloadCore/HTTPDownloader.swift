@@ -230,18 +230,18 @@ public final class HTTPDownloader: @unchecked Sendable {
             guard let contentRange = response.header("Content-Range"),
                   let parsedRange = Self.parseContentRange(contentRange) else {
                 throw DownloadCoreError.responseMismatch(
-                    "206 response did not include a valid Content-Range"
+                    "206 响应未包含有效的 Content-Range"
                 )
             }
             guard parsedRange.start == offset else {
                 throw DownloadCoreError.responseMismatch(
-                    "Content-Range starts at \(parsedRange.start), expected \(offset)"
+                    "Content-Range 起始位置为 \(parsedRange.start)，应为 \(offset)"
                 )
             }
             if let total = parsedRange.total {
                 let minimumTotal = parsedRange.end.map({ $0 + 1 }) ?? parsedRange.start
                 guard total >= minimumTotal else {
-                    throw DownloadCoreError.responseMismatch("Content-Range total is smaller than its start")
+                throw DownloadCoreError.responseMismatch("Content-Range 总大小小于起始位置")
                 }
                 contentRangeTotal = total
             }
@@ -249,7 +249,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                let contentLength = responseContentLength,
                contentLength != end - parsedRange.start + 1 {
                 throw DownloadCoreError.responseMismatch(
-                    "Content-Length does not match Content-Range"
+                    "Content-Length 与 Content-Range 不匹配"
                 )
             }
         }
@@ -277,7 +277,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                 }
                 try await writer.truncate(to: originalOffset)
                 throw DownloadCoreError.responseMismatch(
-                    "received more than \(expectedBodyLength) bytes"
+                    "接收的数据超过预期大小 \(expectedBodyLength) 字节"
                 )
             }
             buffer.append(chunk)
@@ -299,7 +299,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         if let expectedBodyLength, responseBodyBytes != expectedBodyLength {
             try await writer.truncate(to: originalOffset)
             throw DownloadCoreError.responseMismatch(
-                "received \(responseBodyBytes) bytes, expected \(expectedBodyLength)"
+                "实际接收 \(responseBodyBytes) 字节，应为 \(expectedBodyLength) 字节"
             )
         }
 
@@ -329,7 +329,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         rateLimiter: DownloadRateLimiter? = nil
     ) async throws -> HTTPDownloadResult {
         guard start >= 0, end >= start else {
-            throw DownloadCoreError.responseMismatch("invalid requested byte range")
+            throw DownloadCoreError.responseMismatch("请求的字节范围无效")
         }
         let url = try validatedURL(source.link)
         var request = URLRequest(url: url)
@@ -358,17 +358,17 @@ public final class HTTPDownloader: @unchecked Sendable {
               parsedRange.start == start,
               parsedRange.end == end else {
             throw DownloadCoreError.responseMismatch(
-                "Content-Range does not match requested bytes=\(start)-\(end)"
+                "Content-Range 与请求的 bytes=\(start)-\(end) 不匹配"
             )
         }
         let expectedBodyLength = end - start + 1
         let responseContentLength = try Self.validatedContentLength(response.header("Content-Length"))
         if let contentLength = responseContentLength,
            contentLength != expectedBodyLength {
-            throw DownloadCoreError.responseMismatch("Content-Length does not match requested range")
+            throw DownloadCoreError.responseMismatch("Content-Length 与请求的范围不匹配")
         }
         if let total = parsedRange.total, total < end + 1 {
-            throw DownloadCoreError.responseMismatch("Content-Range total is smaller than requested range")
+            throw DownloadCoreError.responseMismatch("Content-Range 总大小小于请求的范围")
         }
 
         var written: Int64 = 0
@@ -378,7 +378,7 @@ public final class HTTPDownloader: @unchecked Sendable {
             let chunkLength = Int64(chunk.count)
             guard written + chunkLength <= expectedBodyLength else {
                 throw DownloadCoreError.responseMismatch(
-                    "received more than \(expectedBodyLength) bytes for requested range"
+                    "接收的数据超过请求范围的预期大小 \(expectedBodyLength) 字节"
                 )
             }
             try await writer.write(chunk, at: start + written)
@@ -387,7 +387,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
         guard written == expectedBodyLength else {
             throw DownloadCoreError.responseMismatch(
-                "received \(written) bytes for requested range, expected \(expectedBodyLength)"
+                "请求范围实际接收 \(written) 字节，应为 \(expectedBodyLength) 字节"
             )
         }
         return HTTPDownloadResult(
@@ -481,7 +481,7 @@ public final class HTTPDownloader: @unchecked Sendable {
     private static func validatedContentLength(_ value: String?) throws -> Int64? {
         guard let value else { return nil }
         guard let integer = nonNegativeInteger(value) else {
-            throw DownloadCoreError.responseMismatch("Content-Length is not a non-negative integer")
+            throw DownloadCoreError.responseMismatch("Content-Length 不是非负整数")
         }
         return integer
     }

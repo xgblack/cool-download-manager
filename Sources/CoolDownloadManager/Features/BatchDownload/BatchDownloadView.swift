@@ -118,7 +118,7 @@ struct BatchDownloadView: View {
                 Spacer()
                 Button("取消", action: onClose)
                     .keyboardShortcut(.cancelAction)
-                Button("添加 (state.preview?.count ?? 0) 个任务") {
+                Button("添加 \(state.preview?.count ?? 0) 个任务") {
                     confirm()
                 }
                 .keyboardShortcut(.defaultAction)

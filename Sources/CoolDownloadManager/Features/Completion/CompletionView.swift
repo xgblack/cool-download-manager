@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import CoolDownloadCore
 
@@ -7,53 +8,104 @@ struct CompletionView: View {
     @ObservedObject var coordinator: AppCoordinator
     let onClose: () -> Void
 
+    private var currentRecord: DownloadRecord {
+        store.record(id: record.id) ?? record
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(record.name)
-                    .font(.headline)
-                    .lineLimit(2)
-                LabeledContent("大小") {
-                    Text(sizeText)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top, spacing: 14) {
+                        fileIcon
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("下载完成", systemImage: "checkmark.circle.fill")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.green)
+                            Text(currentRecord.name)
+                                .font(.headline)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        detailRow("大小", value: sizeText)
+                        detailRow("保存位置", value: currentRecord.destinationURL.path, selectable: true)
+                    }
                 }
-                LabeledContent("保存位置") {
-                    Text(record.destinationURL.path)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(22)
 
             Divider()
-            HStack {
+            HStack(spacing: 10) {
                 Button("打开文件", systemImage: "arrow.up.right.square") {
-                    coordinator.openFile(record)
+                    coordinator.openFile(currentRecord)
                     onClose()
                 }
-                Button("打开所在目录", systemImage: "folder") {
-                    coordinator.revealFile(record)
+                .disabled(currentRecord.status != .completed)
+
+                Button("显示位置", systemImage: "folder") {
+                    coordinator.revealFile(currentRecord)
                     onClose()
                 }
+                .disabled(currentRecord.status != .completed)
+
                 Spacer()
+
                 Button("重新下载", systemImage: "arrow.clockwise") {
-                    store.selectedIDs = [record.id]
-                    store.redownloadSelected()
+                    store.redownload(id: currentRecord.id)
                     onClose()
                 }
-                .disabled(record.status != .completed)
+                .disabled(currentRecord.status != .completed)
+
+                Button("完成") {
+                    onClose()
+                }
+                .keyboardShortcut(.cancelAction)
             }
             .buttonStyle(.borderless)
-            .padding(12)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
         }
-        .frame(width: 520, height: 280)
-        .navigationTitle("下载完成")
+        .frame(minWidth: 560, maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
+    }
+
+    private var fileIcon: some View {
+        let image = NSWorkspace.shared.icon(forFile: currentRecord.destinationURL.path)
+        return Image(nsImage: image)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: 48, height: 48)
+            .accessibilityHidden(true)
     }
 
     private var sizeText: String {
         let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: record.totalBytes ?? record.downloadedBytes)
+        formatter.countStyle = coordinator.store.settings.sizeUnit == "DecimalBytes" ? .decimal : .binary
+        return formatter.string(fromByteCount: currentRecord.totalBytes ?? currentRecord.downloadedBytes)
+    }
+
+    @ViewBuilder
+    private func detailRow(_ title: String, value: String, selectable: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            Text(title)
+                .foregroundStyle(.secondary)
+                .frame(width: 74, alignment: .leading)
+            Group {
+                if selectable {
+                    Text(value).textSelection(.enabled)
+                } else {
+                    Text(value)
+                }
+            }
+            .lineLimit(2)
+            .truncationMode(.middle)
+        }
+        .font(.callout)
     }
 }

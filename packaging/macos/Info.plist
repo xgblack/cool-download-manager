@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Cool download manager</string>
+	<string>酷的下载管理器</string>
 	<key>CFBundleExecutable</key>
 	<string>CoolDownloadManager</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.abdownloadmanager</string>
+	<string>com.cooldownloadmanager</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon.icns</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>CoolDownloadManager</string>
+	<string>酷的下载管理器</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

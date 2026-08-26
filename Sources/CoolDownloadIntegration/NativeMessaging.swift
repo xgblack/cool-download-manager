@@ -60,12 +60,12 @@ public enum NativeMessagingError: Error, LocalizedError, Sendable, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .eof: return "Native Messaging stream reached EOF"
-        case .truncatedFrame: return "Native Messaging frame was truncated"
-        case .invalidLength(let length): return "Invalid Native Messaging length \(length)"
-        case .messageTooLarge(let size): return "Native Messaging message is too large: \(size)"
-        case .invalidUTF8: return "Native Messaging payload is not UTF-8"
-        case .malformedJSON(let reason): return "Malformed Native Messaging JSON: \(reason)"
+        case .eof: return "Native Messaging 流已到达 EOF"
+        case .truncatedFrame: return "Native Messaging 帧不完整"
+        case .invalidLength(let length): return "Native Messaging 长度无效：\(length)"
+        case .messageTooLarge(let size): return "Native Messaging 消息过大：\(size)"
+        case .invalidUTF8: return "Native Messaging 负载不是 UTF-8"
+        case .malformedJSON(let reason): return "Native Messaging JSON 格式错误：\(reason)"
         }
     }
 }

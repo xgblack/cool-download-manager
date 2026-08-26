@@ -16,7 +16,7 @@ usage() {
 Usage: scripts/package-macos.sh [options]
 
 Builds the SwiftPM macOS executable with Xcode and creates:
-  dist/CoolDownloadManager.app
+  dist/酷的下载管理器.app
 
 Options:
   --configuration <Debug|Release>  Build configuration (default: Release)
@@ -115,7 +115,7 @@ if [[ ! -x "${DEVELOPER_DIR:-}/usr/bin/xcodebuild" ]]; then
 fi
 
 PRODUCTS_DIR="$DERIVED_DATA_DIR/Build/Products/$CONFIGURATION"
-APP_NAME="CoolDownloadManager.app"
+APP_NAME="酷的下载管理器.app"
 APP_DIR="$OUTPUT_DIR/$APP_NAME"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -174,18 +174,18 @@ fi
 
 ARCH="$(uname -m)"
 if [[ "$MAKE_ZIP" -eq 1 ]]; then
-    ZIP_PATH="$OUTPUT_DIR/CoolDownloadManager-macOS-$ARCH.zip"
+    ZIP_PATH="$OUTPUT_DIR/酷的下载管理器-macOS-$ARCH.zip"
     rm -f "$ZIP_PATH"
     echo "==> Creating $ZIP_PATH"
     ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
 fi
 
 if [[ "$MAKE_DMG" -eq 1 ]]; then
-    DMG_PATH="$OUTPUT_DIR/CoolDownloadManager-macOS-$ARCH.dmg"
+    DMG_PATH="$OUTPUT_DIR/酷的下载管理器-macOS-$ARCH.dmg"
     rm -f "$DMG_PATH"
     echo "==> Creating $DMG_PATH"
     hdiutil create \
-        -volname "Cool download manager" \
+        -volname "酷的下载管理器" \
         -srcfolder "$APP_DIR" \
         -ov \
         -format UDZO \

@@ -84,7 +84,7 @@ struct ChecksumView: View {
                 .font(.caption)
                 .foregroundStyle(state.statusColor(for: record.id))
                 .frame(width: 100, alignment: .leading)
-            TextField("ALGORITHM:hex", text: state.expectedBinding(for: record.id))
+                    TextField("例如 SHA-256:十六进制值", text: state.expectedBinding(for: record.id))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 260)
             HStack(spacing: 4) {

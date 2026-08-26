@@ -36,7 +36,7 @@ final class AppStore: ObservableObject {
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataRoot = home.appendingPathComponent(".abdm", isDirectory: true)
+        let dataRoot = home.appendingPathComponent(".cooldm", isDirectory: true)
         let defaultSettings = AppSettingsModel.defaults(home: home)
         let initialSettings = Self.loadInitialSettings(dataRoot: dataRoot, fallback: defaultSettings)
         let defaultFolder = URL(fileURLWithPath: initialSettings.defaultDownloadFolder, isDirectory: true)
@@ -340,7 +340,7 @@ final class AppStore: ObservableObject {
         case .requiresApproval:
             return "需要系统批准"
         case .notFound:
-            return "当前 App 不支持"
+            return "当前应用不支持"
         @unknown default:
             return "未知状态"
         }
@@ -757,7 +757,7 @@ final class AppStore: ObservableObject {
         }
 
         let socketURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".abdm/config/native-messaging.sock")
+            .appendingPathComponent(".cooldm/config/native-messaging.sock")
         let socketServer = PrivateSocketServer(socketURL: socketURL) { message in
             do {
                 switch message.action {
@@ -774,7 +774,7 @@ final class AppStore: ObservableObject {
                     return PrivateSocketMessage(
                         requestId: message.requestId,
                         action: message.action,
-                        payload: "{\"message\":\"unsupported action\"}",
+                        payload: "{\"message\":\"不支持的操作\"}",
                         isError: true
                     )
                 }
@@ -785,7 +785,7 @@ final class AppStore: ObservableObject {
                         message: error.localizedDescription
                     )),
                     encoding: .utf8
-                )) ?? "{\"message\":\"request failed\"}"
+                )) ?? "{\"message\":\"请求失败\"}"
                 return PrivateSocketMessage(
                     requestId: message.requestId,
                     action: message.action,

@@ -3,7 +3,7 @@ import Darwin
 import CoolDownloadIntegration
 
 let socketURL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".abdm/config/native-messaging.sock")
+    .appendingPathComponent(".cooldm/config/native-messaging.sock")
 let input = FileHandle.standardInput
 let output = FileHandle.standardOutput
 let client = PrivateSocketClient(socketURL: socketURL)
@@ -32,7 +32,7 @@ func handle(
         guard request.content.action == "ping" || request.content.action == "add" else {
             return NativeMessagingMessage(
                 id: request.id,
-                content: try NativeMessagingContent.error(type: "unsupported_action", message: "Unsupported action")
+                content: try NativeMessagingContent.error(type: "unsupported_action", message: "不支持的操作")
             )
         }
         let forwarded = try sendToMainApp(PrivateSocketMessage(

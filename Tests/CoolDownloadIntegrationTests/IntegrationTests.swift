@@ -256,6 +256,68 @@ struct IntegrationTests {
         #expect(records.first(where: { $0.name == "start.bin" })?.status == .completed)
     }
 
+    @Test("browser-started downloads publish the progress lifecycle")
+    func browserStartedDownloadPublishesProgressLifecycle() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cdm-browser-progress-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: IntegrationTransport()),
+            defaultFolder: root
+        )
+        try await service.boot()
+        let handler = CoreDownloadIntegrationHandler(service: service)
+        let events = await service.events()
+
+        let observer = Task { () -> [DownloadStatus] in
+            var statuses: [DownloadStatus] = []
+            for await event in events {
+                let record: DownloadRecord?
+                switch event {
+                case .created(let value), .updated(let value):
+                    record = value
+                case .removed:
+                    record = nil
+                }
+                if let record, record.name == "browser-progress.bin" {
+                    statuses.append(record.status)
+                    if record.status == .completed {
+                        return statuses
+                    }
+                }
+            }
+            return statuses
+        }
+
+        try await handler.addFromBrowser(AddDownloadsRequest(
+            items: [IntegrationDownloadCredential(
+                link: "https://fixture.invalid/browser-progress.bin",
+                suggestedName: "browser-progress.bin"
+            )],
+            options: AddDownloadOptions(silentAdd: true, silentStart: true)
+        ))
+
+        let observedStatuses = try await withThrowingTaskGroup(of: [DownloadStatus].self) { group in
+            group.addTask { await observer.value }
+            group.addTask {
+                try await Task.sleep(for: .seconds(2))
+                throw EventTimeout()
+            }
+            defer {
+                observer.cancel()
+                group.cancelAll()
+            }
+            return try await group.next()!
+        }
+
+        #expect(observedStatuses.contains(.preparing))
+        #expect(observedStatuses.contains(.downloading))
+        #expect(observedStatuses.contains(.completed))
+    }
+
     @Test("headless downloads register queue and category items")
     func headlessItemRegistration() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -323,6 +385,8 @@ private actor RecordingHandler: DownloadIntegrationHandler {
         return 1
     }
 }
+
+private struct EventTimeout: Error {}
 
 private struct IntegrationTransport: HTTPTransport, Sendable {
     func response(for request: URLRequest) async throws -> HTTPTransportResponse {

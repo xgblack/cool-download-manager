@@ -39,7 +39,7 @@ public actor PartFileWriter {
 
     public func truncate(to length: Int64) throws {
         guard length >= 0 else {
-            throw DownloadCoreError.responseMismatch("cannot truncate to a negative length")
+            throw DownloadCoreError.responseMismatch("不能截断为负数长度")
         }
         try handle.truncate(atOffset: UInt64(length))
         try handle.seek(toOffset: UInt64(length))
@@ -52,7 +52,7 @@ public actor PartFileWriter {
 
     public func write(_ data: Data, at offset: Int64) throws {
         guard offset >= 0 else {
-            throw DownloadCoreError.responseMismatch("cannot write at a negative offset")
+            throw DownloadCoreError.responseMismatch("不能写入负数偏移位置")
         }
         try handle.seek(toOffset: UInt64(offset))
         try handle.write(contentsOf: data)
@@ -68,7 +68,7 @@ public actor PartFileWriter {
     /// account for the requested space up front.
     public func prepare(length: Int64, sparse: Bool) throws {
         guard length >= 0 else {
-            throw DownloadCoreError.responseMismatch("cannot prepare a negative file length")
+            throw DownloadCoreError.responseMismatch("不能准备负数文件长度")
         }
         let currentLength = try self.length()
         if currentLength > length {
