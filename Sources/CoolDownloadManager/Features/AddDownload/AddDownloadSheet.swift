@@ -9,6 +9,7 @@ struct AddDownloadSheet: View {
     @Binding var queueID: DownloadID?
     @Binding var categoryID: DownloadID?
     @Binding var startImmediately: Bool
+    let title: String
     let queues: [IntegrationQueue]
     let categories: [DownloadCategory]
     let onChooseFolder: () -> Void
@@ -24,9 +25,6 @@ struct AddDownloadSheet: View {
                     .font(.body.monospaced())
                     .frame(minHeight: 72, maxHeight: 120)
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(.quaternary))
-                Text("支持多个 URL，每行一个；浏览器扩展的静默导入使用同一核心入口。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 12) {
@@ -81,6 +79,6 @@ struct AddDownloadSheet: View {
         }
         .padding(20)
         .frame(width: 620)
-        .navigationTitle("新建下载")
+        .navigationTitle(title)
     }
 }

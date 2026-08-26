@@ -199,6 +199,7 @@ struct MainView: View {
                     queueID: $viewState.queueID,
                     categoryID: $viewState.categoryID,
                     startImmediately: $viewState.startImmediately,
+                    title: coordinator.activeBrowserRequest == nil ? "新建下载" : "确认下载",
                     queues: store.queues,
                     categories: store.categories,
                     onChooseFolder: { viewState.isShowingFolderPicker = true },
@@ -213,7 +214,8 @@ struct MainView: View {
                             folder: viewState.folderURL,
                             queueID: queueID,
                             categoryID: categoryID,
-                            startImmediately: startImmediately
+                            startImmediately: startImmediately,
+                            integrationItems: coordinator.activeBrowserRequest?.items
                         )
                         resetAddForm()
                         coordinator.closeMainSheet()
@@ -547,7 +549,7 @@ private struct DownloadDateLabel: View {
 
     private func displayText(at now: Date) -> String {
         guard relative else {
-            return date.formatted(date: .abbreviated, time: .omitted)
+            return absoluteDateText
         }
 
         let elapsed = now.timeIntervalSince(date)
@@ -562,7 +564,17 @@ private struct DownloadDateLabel: View {
         if elapsed < 60 * 60 * 24 * 7 {
             return "\(max(1, Int(elapsed / (60 * 60 * 24)))) 天前"
         }
-        return date.formatted(date: .abbreviated, time: .omitted)
+        return absoluteDateText
+    }
+
+    private var absoluteDateText: String {
+        date.formatted(
+            .dateTime
+                .locale(Locale(identifier: "zh_CN"))
+                .year()
+                .month()
+                .day()
+        )
     }
 }
 
@@ -649,7 +661,7 @@ private struct SidebarView: View {
 
     private func sidebarItem(_ filter: DownloadFilter, title: String? = nil, image: String? = nil) -> some View {
         Label(title ?? filter.title, systemImage: image ?? filter.systemImage)
-            .tag(Optional(filter))
+            .tag(filter)
     }
 }
 
@@ -799,16 +811,22 @@ private struct DownloadTableRow: View {
     private var sizeText: String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = sizeUnit == "DecimalBytes" ? .decimal : .binary
-        if let total = record.totalBytes {
-            return "\(formatter.string(fromByteCount: record.downloadedBytes)) / \(formatter.string(fromByteCount: total))"
+        if let total = record.totalBytes, total > 0 {
+            let downloaded = ByteCountText.string(
+                fromByteCount: record.downloadedBytes,
+                formatter: formatter
+            )
+            let totalText = ByteCountText.string(fromByteCount: total, formatter: formatter)
+            return "\(downloaded) / \(totalText)"
         }
-        return formatter.string(fromByteCount: record.downloadedBytes)
+        return ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: formatter)
     }
 
     private var speedText: String? {
         guard let speed, speed > 0 else { return nil }
         let formatter = ByteCountFormatter()
         formatter.countStyle = speedUnit == "DecimalBytes" ? .decimal : .binary
+        formatter.allowsNonnumericFormatting = false
         return "\(formatter.string(fromByteCount: Int64(speed))) / 秒"
     }
 

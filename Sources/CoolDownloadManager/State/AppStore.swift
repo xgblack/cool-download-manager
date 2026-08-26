@@ -18,6 +18,7 @@ final class AppStore: ObservableObject {
 
     let service: DownloadService?
     var downloadList: DownloadListStore
+    var onBrowserDownloadRequest: ((AddDownloadsRequest) -> Void)?
 
     private let store: DownloadStore?
     private let settingsStore: SettingsStore?
@@ -217,7 +218,8 @@ final class AppStore: ObservableObject {
         folder: URL,
         queueID: DownloadID? = nil,
         categoryID: DownloadID? = nil,
-        startImmediately: Bool = true
+        startImmediately: Bool = true,
+        integrationItems: [IntegrationDownloadCredential]? = nil
     ) {
         guard let service else {
             errorMessage = "下载核心尚未准备好"
@@ -260,17 +262,29 @@ final class AppStore: ObservableObject {
                 self.errorMessage = "请输入下载地址"
                 return
             }
+            let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let explicitName = trimmedName?.isEmpty == false ? trimmedName : nil
             do {
                 var ids: [DownloadID] = []
-                for item in links {
-                    let id = try await service.add(AddDownloadRequest(
-                        source: DownloadSource(
+                for (index, item) in links.enumerated() {
+                    var source: DownloadSource
+                    if let integrationItems, integrationItems.indices.contains(index) {
+                        source = integrationItems[index].asCoreSource()
+                        source.link = item
+                        if links.count == 1, let explicitName {
+                            source.suggestedName = explicitName
+                        }
+                    } else {
+                        source = DownloadSource(
                             kind: item.lowercased().contains(".m3u8") ? .hls : .http,
                             link: item,
-                            suggestedName: links.count == 1 ? name : nil
-                        ),
+                            suggestedName: links.count == 1 ? explicitName : nil
+                        )
+                    }
+                    let id = try await service.add(AddDownloadRequest(
+                        source: source,
                         folder: resolvedFolder.path,
-                        name: links.count == 1 ? name : nil,
+                        name: links.count == 1 ? explicitName : nil,
                         queueID: queueID,
                         categoryID: resolvedCategoryID,
                         start: startImmediately
@@ -742,6 +756,12 @@ final class AppStore: ObservableObject {
             categoryItemAdder: { [categoryStore] categoryID, downloadID in
                 guard let categoryStore else { return }
                 try await categoryStore.assignItems([downloadID], to: categoryID)
+            },
+            interactiveAddHandler: { [weak self] request in
+                guard let self else {
+                    throw DownloadIntegrationError.confirmationUnavailable
+                }
+                try await self.requestBrowserDownloadConfirmation(request)
             }
         )
         let server: LoopbackHTTPServer?
@@ -803,6 +823,13 @@ final class AppStore: ObservableObject {
         integrationServer = server
         privateSocketServer = socketServer
         installNativeMessagingManifestIfAvailable()
+    }
+
+    private func requestBrowserDownloadConfirmation(_ request: AddDownloadsRequest) throws {
+        guard let onBrowserDownloadRequest else {
+            throw DownloadIntegrationError.confirmationUnavailable
+        }
+        onBrowserDownloadRequest(request)
     }
 
     private func stopIntegration() {

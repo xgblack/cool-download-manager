@@ -301,7 +301,7 @@ struct CoreTests {
 
         let defaults = try await store.load()
         #expect(defaults.count == 6)
-        #expect(defaults.first?.name == "Compressed")
+        #expect(defaults.first?.name == "压缩文件")
         #expect(defaults.first?.acceptedFileTypes.contains("zip") == true)
 
         let custom = try await store.create(
@@ -323,6 +323,44 @@ struct CoreTests {
 
         try await store.assignItems([7], to: nil)
         #expect(try await store.model(id: custom.id).items == [8])
+    }
+
+    @Test("category store localizes untouched English built-in names")
+    func categoryStoreLocalizesEnglishBuiltInNames() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaultFolder = root.appendingPathComponent("Downloads", isDirectory: true)
+        let store = try CategoryStore(dataRoot: root, defaultFolder: defaultFolder)
+        let compressedPath = defaultFolder.appendingPathComponent("Compressed", isDirectory: true).path
+        let customProgramPath = defaultFolder.appendingPathComponent("CustomPrograms", isDirectory: true).path
+        let encoded = try JSONSerialization.data(withJSONObject: [
+            [
+                "id": 0,
+                "name": "Compressed",
+                "path": compressedPath,
+                "futureField": "preserved"
+            ],
+            [
+                "id": 1,
+                "name": "我的程序",
+                "path": customProgramPath
+            ]
+        ])
+        try encoded.write(to: store.categoriesURL)
+
+        let categories = try await store.load()
+        #expect(categories.first(where: { $0.id == 0 })?.name == "压缩文件")
+        #expect(categories.first(where: { $0.id == 0 })?.path == compressedPath)
+        #expect(categories.first(where: { $0.id == 1 })?.name == "我的程序")
+        #expect(categories.first(where: { $0.id == 1 })?.path == customProgramPath)
+
+        let persisted = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: store.categoriesURL)) as? [[String: Any]]
+        )
+        let compressed = try #require(persisted.first { ($0["id"] as? Int) == 0 })
+        #expect(compressed["name"] as? String == "压缩文件")
+        #expect(compressed["path"] as? String == compressedPath)
+        #expect(compressed["futureField"] as? String == "preserved")
     }
 
     @Test("queue schedule evaluates weekdays and overnight windows")

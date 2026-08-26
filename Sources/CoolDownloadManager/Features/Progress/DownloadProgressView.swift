@@ -38,7 +38,7 @@ struct DownloadProgressView: View {
               total > currentRecord.downloadedBytes else {
             return nil
         }
-        return durationFormatter.string(from: Double(total - currentRecord.downloadedBytes) / speed)
+        return formattedDuration(Double(total - currentRecord.downloadedBytes) / speed)
     }
 
     var body: some View {
@@ -298,9 +298,9 @@ struct DownloadProgressView: View {
     }
 
     private var sizeText: String {
-        let downloaded = byteFormatter.string(fromByteCount: currentRecord.downloadedBytes)
+        let downloaded = formattedByteCount(currentRecord.downloadedBytes)
         guard let total = currentRecord.totalBytes else { return downloaded }
-        return "\(downloaded) / \(byteFormatter.string(fromByteCount: total))"
+        return "\(downloaded) / \(formattedByteCount(total))"
     }
 
     private var speedText: String {
@@ -348,15 +348,26 @@ struct DownloadProgressView: View {
     private var speedFormatter: ByteCountFormatter {
         let formatter = ByteCountFormatter()
         formatter.countStyle = coordinator.store.settings.speedUnit == "DecimalBytes" ? .decimal : .binary
+        formatter.allowsNonnumericFormatting = false
         return formatter
     }
 
-    private var durationFormatter: DateComponentsFormatter {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute, .second]
-        formatter.unitsStyle = .abbreviated
-        formatter.zeroFormattingBehavior = .pad
-        return formatter
+    private func formattedDuration(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval.rounded(.up)))
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        let remainingSeconds = seconds % 60
+        if hours > 0 {
+            return "\(hours) 小时 \(minutes) 分钟"
+        }
+        if minutes > 0 {
+            return "\(minutes) 分钟 \(remainingSeconds) 秒"
+        }
+        return "\(remainingSeconds) 秒"
+    }
+
+    private func formattedByteCount(_ byteCount: Int64) -> String {
+        ByteCountText.string(fromByteCount: byteCount, formatter: byteFormatter)
     }
 
     private func partLength(_ part: DownloadPart) -> CGFloat {
@@ -400,9 +411,9 @@ struct DownloadProgressView: View {
     }
 
     private func partSizeText(_ part: DownloadPart) -> String {
-        let downloaded = byteFormatter.string(fromByteCount: part.downloaded)
+        let downloaded = formattedByteCount(part.downloaded)
         guard let to = part.to, to >= part.from else { return downloaded }
-        return "\(downloaded) / \(byteFormatter.string(fromByteCount: to - part.from + 1))"
+        return "\(downloaded) / \(formattedByteCount(to - part.from + 1))"
     }
 
     private func partRangeText(_ part: DownloadPart) -> String {

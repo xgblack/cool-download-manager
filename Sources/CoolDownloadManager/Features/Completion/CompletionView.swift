@@ -85,9 +85,10 @@ struct CompletionView: View {
     }
 
     private var sizeText: String {
+        let byteCount = currentRecord.totalBytes ?? currentRecord.downloadedBytes
         let formatter = ByteCountFormatter()
         formatter.countStyle = coordinator.store.settings.sizeUnit == "DecimalBytes" ? .decimal : .binary
-        return formatter.string(fromByteCount: currentRecord.totalBytes ?? currentRecord.downloadedBytes)
+        return ByteCountText.string(fromByteCount: byteCount, formatter: formatter)
     }
 
     @ViewBuilder

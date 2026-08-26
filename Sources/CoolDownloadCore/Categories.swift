@@ -153,7 +153,10 @@ public actor CategoryStore {
             var loadedRaw: [DownloadID: JSONValue] = [:]
             if case .array(let values) = value {
                 for (raw, category) in zip(values, decoded) {
-                    let valid = try category.validated()
+                    var valid = try category.validated()
+                    if let names = Self.englishBuiltInNames[valid.id], valid.name == names.english {
+                        valid.name = names.chinese
+                    }
                     guard loadedModels[valid.id] == nil else {
                         throw CategoryStoreError.invalid("分类 ID 重复")
                     }
@@ -166,6 +169,20 @@ public actor CategoryStore {
             models = loadedModels
             rawObjects = loadedRaw
             loaded = true
+            var renamedBuiltInCategory = false
+            for (id, category) in models {
+                guard let names = Self.englishBuiltInNames[id], category.name == names.chinese,
+                      case .object(var object) = rawObjects[id],
+                      object["name"] == .string(names.english) else {
+                    continue
+                }
+                object["name"] = .string(names.chinese)
+                rawObjects[id] = .object(object)
+                renamedBuiltInCategory = true
+            }
+            if renamedBuiltInCategory {
+                try persistAll()
+            }
             return sortedModels()
         } catch let error as CategoryStoreError {
             throw error
@@ -270,12 +287,12 @@ public actor CategoryStore {
 
     public static func defaultCategories(folder: URL) -> [DownloadCategory] {
         let definitions: [(String, String, [String])] = [
-            ("Compressed", "archivebox", ["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg", "tgz"]),
-            ("Programs", "app.dashed", ["apk", "exe", "msi", "bat", "sh", "jar", "app", "deb", "rpm", "bin"]),
-            ("Videos", "film", ["mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpeg", "ts"]),
-            ("Music", "music.note", ["mp3", "wav", "aac", "flac", "ogg", "aiff", "wma", "m4a"]),
-            ("Pictures", "photo", ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "svg", "webp", "heic", "ico", "raw", "psd"]),
-            ("Documents", "doc.text", ["doc", "docx", "pdf", "txt", "rtf", "odt", "xls", "xlsx", "ppt", "pptx", "csv", "epub", "pages"])
+            ("压缩文件", "archivebox", ["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg", "tgz"]),
+            ("程序", "app.dashed", ["apk", "exe", "msi", "bat", "sh", "jar", "app", "deb", "rpm", "bin"]),
+            ("视频", "film", ["mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpeg", "ts"]),
+            ("音乐", "music.note", ["mp3", "wav", "aac", "flac", "ogg", "aiff", "wma", "m4a"]),
+            ("图片", "photo", ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "svg", "webp", "heic", "ico", "raw", "psd"]),
+            ("文档", "doc.text", ["doc", "docx", "pdf", "txt", "rtf", "odt", "xls", "xlsx", "ppt", "pptx", "csv", "epub", "pages"])
         ]
         return definitions.enumerated().map { index, definition in
             DownloadCategory(
@@ -287,6 +304,15 @@ public actor CategoryStore {
             )
         }
     }
+
+    private static let englishBuiltInNames: [DownloadID: (english: String, chinese: String)] = [
+        0: ("Compressed", "压缩文件"),
+        1: ("Programs", "程序"),
+        2: ("Videos", "视频"),
+        3: ("Music", "音乐"),
+        4: ("Pictures", "图片"),
+        5: ("Documents", "文档")
+    ]
 
     private func sortedModels() -> [DownloadCategory] {
         models.values.sorted { lhs, rhs in

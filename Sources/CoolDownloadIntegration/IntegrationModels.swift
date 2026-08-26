@@ -146,25 +146,47 @@ public protocol DownloadIntegrationHandler: Sendable {
     func addHeadless(_ request: HeadlessDownloadRequest) async throws -> DownloadID
 }
 
+public enum DownloadIntegrationError: Error, LocalizedError, Sendable, Equatable {
+    case confirmationUnavailable
+
+    public var errorDescription: String? {
+        switch self {
+        case .confirmationUnavailable:
+            return "无法打开下载确认窗口"
+        }
+    }
+}
+
 public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
     private let service: DownloadService
     private let queuesProvider: @Sendable () async throws -> [IntegrationQueue]
     private let queueItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)?
     private let categoryItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)?
+    private let interactiveAddHandler: (@Sendable (AddDownloadsRequest) async throws -> Void)?
 
     public init(
         service: DownloadService,
         queuesProvider: @escaping @Sendable () async throws -> [IntegrationQueue] = { [] },
         queueItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)? = nil,
-        categoryItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)? = nil
+        categoryItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)? = nil,
+        interactiveAddHandler: (@Sendable (AddDownloadsRequest) async throws -> Void)? = nil
     ) {
         self.service = service
         self.queuesProvider = queuesProvider
         self.queueItemAdder = queueItemAdder
         self.categoryItemAdder = categoryItemAdder
+        self.interactiveAddHandler = interactiveAddHandler
     }
 
     public func addFromBrowser(_ request: AddDownloadsRequest) async throws {
+        guard request.options.silentAdd else {
+            guard let interactiveAddHandler else {
+                throw DownloadIntegrationError.confirmationUnavailable
+            }
+            try await interactiveAddHandler(request)
+            return
+        }
+
         for item in request.items {
             let id = try await service.add(
                 AddDownloadRequest(
@@ -172,7 +194,7 @@ public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
                     start: false
                 )
             )
-            if request.options.silentAdd && request.options.silentStart {
+            if request.options.silentStart {
                 try await service.start(id: id)
             }
         }

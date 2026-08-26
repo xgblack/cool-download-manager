@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import CoolDownloadCore
+import CoolDownloadIntegration
 
 enum MainDestination: Hashable {
     case downloadDetail(DownloadID)
@@ -44,6 +45,7 @@ final class AppCoordinator: NSObject, ObservableObject {
     @Published var settingsDestination: SettingsDestination = .section(.general)
     @Published var pendingURLText = ""
     @Published var noticeMessage: String?
+    @Published private(set) var activeBrowserRequest: AddDownloadsRequest?
 
     let store: AppStore
     let mainViewState = MainViewState()
@@ -52,10 +54,14 @@ final class AppCoordinator: NSObject, ObservableObject {
     private weak var mainWindow: NSWindow?
     private var openMainWindowAction: (() -> Void)?
     private var focusMainWindowWhenRegistered = false
+    private var queuedBrowserRequests: [AddDownloadsRequest] = []
 
     init(store: AppStore) {
         self.store = store
         super.init()
+        store.onBrowserDownloadRequest = { [weak self] request in
+            self?.presentBrowserDownload(request)
+        }
     }
 
     func attachMenuBar() {
@@ -137,9 +143,34 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func presentAddDownload(fromClipboard: Bool = false) {
         showMainWindow()
+        activeBrowserRequest = nil
         if fromClipboard {
             pendingURLText = NSPasteboard.general.string(forType: .string) ?? ""
         }
+        mainSheet = .addDownload
+    }
+
+    private func presentBrowserDownload(_ request: AddDownloadsRequest) {
+        guard !request.items.isEmpty else { return }
+        guard mainSheet == nil, activeBrowserRequest == nil else {
+            queuedBrowserRequests.append(request)
+            return
+        }
+
+        activeBrowserRequest = request
+        pendingURLText = ""
+        mainViewState.urlText = request.items.map(\.link).joined(separator: "\n")
+        mainViewState.nameText = request.items.count == 1
+            ? request.items[0].suggestedName ?? ""
+            : ""
+        mainViewState.folderURL = URL(
+            fileURLWithPath: store.settings.defaultDownloadFolder,
+            isDirectory: true
+        )
+        mainViewState.queueID = nil
+        mainViewState.categoryID = nil
+        mainViewState.startImmediately = true
+        showMainWindow()
         mainSheet = .addDownload
     }
 
@@ -194,6 +225,12 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func closeMainSheet() {
         mainSheet = nil
+        activeBrowserRequest = nil
+        guard !queuedBrowserRequests.isEmpty else { return }
+        let next = queuedBrowserRequests.removeFirst()
+        DispatchQueue.main.async { [weak self] in
+            self?.presentBrowserDownload(next)
+        }
     }
 
     func showProgressPanel(for record: DownloadRecord, focus: Bool) {

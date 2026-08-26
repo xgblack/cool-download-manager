@@ -217,7 +217,13 @@ struct IntegrationTests {
             defaultFolder: root
         )
         try await service.boot()
-        let handler = CoreDownloadIntegrationHandler(service: service)
+        let interactiveRequests = InteractiveRequestRecorder()
+        let handler = CoreDownloadIntegrationHandler(
+            service: service,
+            interactiveAddHandler: { request in
+                await interactiveRequests.record(request)
+            }
+        )
 
         try await handler.addFromBrowser(AddDownloadsRequest(
             items: [IntegrationDownloadCredential(
@@ -251,9 +257,35 @@ struct IntegrationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         let records = await service.snapshot().downloads
-        #expect(records.first(where: { $0.name == "gui.bin" })?.status == .added)
+        #expect(records.first(where: { $0.name == "gui.bin" }) == nil)
+        #expect(await interactiveRequests.requests.map(\.items.first?.suggestedName) == ["gui.bin"])
         #expect(records.first(where: { $0.name == "silent.bin" })?.status == .added)
         #expect(records.first(where: { $0.name == "start.bin" })?.status == .completed)
+    }
+
+    @Test("interactive browser adds fail instead of creating a zero-byte task when confirmation is unavailable")
+    func interactiveAddRequiresConfirmationHandler() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cdm-interactive-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: IntegrationTransport()),
+            defaultFolder: root
+        )
+        try await service.boot()
+        let handler = CoreDownloadIntegrationHandler(service: service)
+        let request = AddDownloadsRequest(
+            items: [IntegrationDownloadCredential(link: "https://fixture.invalid/confirm.bin")],
+            options: AddDownloadOptions(silentAdd: false, silentStart: false)
+        )
+
+        await #expect(throws: DownloadIntegrationError.confirmationUnavailable) {
+            try await handler.addFromBrowser(request)
+        }
+        #expect(await service.snapshot().downloads.isEmpty)
     }
 
     @Test("browser-started downloads publish the progress lifecycle")
@@ -383,6 +415,14 @@ private actor RecordingHandler: DownloadIntegrationHandler {
     func addHeadless(_ request: HeadlessDownloadRequest) async throws -> Int64 {
         headlessRequests.append(request)
         return 1
+    }
+}
+
+private actor InteractiveRequestRecorder {
+    var requests: [AddDownloadsRequest] = []
+
+    func record(_ request: AddDownloadsRequest) {
+        requests.append(request)
     }
 }
 

@@ -74,7 +74,10 @@ struct DownloadDetailSheet: View {
 
             detailRow("状态", statusText)
             detailRow("文件大小", sizeText)
-            detailRow("已下载", byteFormatter.string(fromByteCount: record.downloadedBytes))
+            detailRow(
+                "已下载",
+                ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)
+            )
             detailRow("保存路径", record.destinationURL.path)
             detailRow("源地址", record.source.link)
             if let etag = record.etag {
@@ -272,7 +275,7 @@ struct DownloadDetailSheet: View {
 
     private var sizeText: String {
         guard let total = record.totalBytes else { return "未知" }
-        return byteFormatter.string(fromByteCount: total)
+        return ByteCountText.string(fromByteCount: total, formatter: byteFormatter)
     }
 
     private var byteFormatter: ByteCountFormatter {
