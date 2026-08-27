@@ -5,14 +5,12 @@ import CoolDownloadCore
 
 enum SettingsWindowLayout {
     static let sidebarWidth: CGFloat = 224
-    static let collapsedSidebarWidth: CGFloat = 54
     static let headerHeight: CGFloat = 58
     static let actionBarHeight: CGFloat = 60
 }
 
-/// The settings window uses one explicit chrome grid below the native title bar.
-/// Keeping the rail, header and content in the same HStack prevents the
-/// separator from drifting when the sidebar is hidden or a child page opens.
+/// The settings window inserts the sidebar as a column only while it is visible.
+/// This keeps the content flush with the window edge after the sidebar is hidden.
 struct SettingsView: View {
     @ObservedObject var store: AppStore
     @ObservedObject var coordinator: AppCoordinator
@@ -41,14 +39,10 @@ struct SettingsView: View {
             Divider()
 
             HStack(spacing: 0) {
-                if viewState.path.isEmpty {
+                if viewState.path.isEmpty && viewState.isSidebarVisible {
                     settingsSidebar
-                } else {
-                    Color.clear
-                        .frame(width: SettingsWindowLayout.collapsedSidebarWidth)
+                    Divider()
                 }
-
-                Divider()
 
                 detailContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -126,17 +120,15 @@ struct SettingsView: View {
         List(selection: $viewState.section) {
             Section {
                 ForEach(SettingsSection.allCases, id: \.self) { section in
-                    HStack(spacing: viewState.isSidebarVisible ? 10 : 0) {
+                    HStack(spacing: 10) {
                         SettingsSidebarIcon(section: section)
-                        if viewState.isSidebarVisible {
-                            Text(section.title)
-                                .lineLimit(1)
-                        }
+                        Text(section.title)
+                            .lineLimit(1)
                     }
                     .padding(.vertical, 3)
                     .frame(
                         maxWidth: .infinity,
-                        alignment: viewState.isSidebarVisible ? .leading : .center
+                        alignment: .leading
                     )
                     .tag(section)
                     .help(section.title)
@@ -145,13 +137,9 @@ struct SettingsView: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .padding(.horizontal, viewState.isSidebarVisible ? 8 : 4)
+        .padding(.horizontal, 8)
         .padding(.vertical, 10)
-        .frame(
-            width: viewState.isSidebarVisible
-                ? SettingsWindowLayout.sidebarWidth
-                : SettingsWindowLayout.collapsedSidebarWidth
-        )
+        .frame(width: SettingsWindowLayout.sidebarWidth)
         .frame(maxHeight: .infinity)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
@@ -289,15 +277,18 @@ private struct SettingsWindowHeader: View {
     let onToggleSidebar: () -> Void
     let onBack: () -> Void
 
-    private var leftRailWidth: CGFloat {
+    private var showsSidebarColumn: Bool {
         isSidebarVisible && !isDetailPage
-            ? SettingsWindowLayout.sidebarWidth
-            : SettingsWindowLayout.collapsedSidebarWidth
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            HStack(spacing: 9) {
+            if showsSidebarColumn {
+                sidebarHeader
+                Divider()
+            }
+
+            HStack(spacing: 11) {
                 if isDetailPage {
                     Button(action: onBack) {
                         Image(systemName: "chevron.left")
@@ -306,32 +297,18 @@ private struct SettingsWindowHeader: View {
                     }
                     .buttonStyle(.borderless)
                     .help("返回网络设置")
-                } else {
+                    .accessibilityLabel("返回网络设置")
+                } else if !isSidebarVisible {
                     Button(action: onToggleSidebar) {
-                        Image(systemName: isSidebarVisible ? "sidebar.left" : "sidebar.right")
+                        Image(systemName: "sidebar.right")
                             .font(.system(size: 15, weight: .medium))
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.borderless)
-                    .help(isSidebarVisible ? "隐藏侧栏" : "显示侧栏")
-
-                    if isSidebarVisible {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Text("设置")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
+                    .help("显示侧栏")
+                    .accessibilityLabel("显示侧栏")
                 }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 13)
-            .frame(width: leftRailWidth, height: SettingsWindowLayout.headerHeight)
 
-            Divider()
-
-            HStack(spacing: 11) {
                 Image(systemName: isDetailPage ? "server.rack" : section.systemImage)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(isDetailPage ? .teal : section.tint)
@@ -352,6 +329,29 @@ private struct SettingsWindowHeader: View {
         }
         .frame(height: SettingsWindowLayout.headerHeight)
         .background(.bar)
+    }
+
+    private var sidebarHeader: some View {
+        HStack(spacing: 9) {
+            Button(action: onToggleSidebar) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .help("隐藏侧栏")
+            .accessibilityLabel("隐藏侧栏")
+
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("设置")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 13)
+        .frame(width: SettingsWindowLayout.sidebarWidth, height: SettingsWindowLayout.headerHeight)
     }
 }
 
