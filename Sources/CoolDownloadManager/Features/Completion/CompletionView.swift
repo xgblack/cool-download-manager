@@ -35,35 +35,21 @@ struct CompletionView: View {
             actionBar
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 580, maxWidth: .infinity, minHeight: 340, maxHeight: .infinity)
+        .frame(minWidth: 640, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 16) {
-            ZStack(alignment: .bottomTrailing) {
-                fileIcon
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 20, weight: .semibold))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .green)
-                    .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(2))
-                    .offset(x: 4, y: 4)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text("下载完成")
-                    .font(.title2.weight(.semibold))
-                Text(currentRecord.name)
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-            }
-            Spacer(minLength: 16)
+        NativePageHeader(
+            title: "下载完成",
+            subtitle: currentRecord.name,
+            systemImage: "checkmark.circle.fill",
+            tint: .green
+        ) {
+            fileIcon
+                .frame(width: 36, height: 36)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .help(currentRecord.name)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 20)
-        .background(.bar)
     }
 
     private var actionBar: some View {
@@ -101,7 +87,6 @@ struct CompletionView: View {
         return Image(nsImage: image)
             .resizable()
             .interpolation(.high)
-            .frame(width: 56, height: 56)
             .accessibilityHidden(true)
     }
 

@@ -19,9 +19,9 @@ struct MainView: View {
         NavigationSplitView {
             SidebarView(store: store, downloadList: downloadList, coordinator: coordinator)
                 .navigationSplitViewColumnWidth(
-                    min: 170,
+                    min: 210,
                     ideal: viewState.sidebarWidth,
-                    max: 280
+                    max: 320
                 )
         } detail: {
             NavigationStack(path: $coordinator.mainPath) {
@@ -29,37 +29,8 @@ struct MainView: View {
                     .navigationDestination(for: MainDestination.self) { destination in
                         destinationView(destination)
                     }
-                    .toolbar {
-                        ToolbarItem(placement: .automatic) {
-                            Button {
-                                coordinator.presentSettings()
-                            } label: {
-                                Label("设置", systemImage: "gearshape")
-                                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                            }
-                            .help("打开设置")
-                        }
-                        ToolbarItem(placement: .automatic) {
-                            Button {
-                                coordinator.presentQueues()
-                            } label: {
-                                Label("队列", systemImage: "list.bullet.rectangle")
-                                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                            }
-                            .help("管理下载队列")
-                        }
-                        ToolbarItem(placement: .automatic) {
-                            Button {
-                                coordinator.presentCategories()
-                            } label: {
-                                Label("分类", systemImage: "folder")
-                                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                            }
-                            .help("管理下载分类")
-                        }
-                    }
             }
-            .frame(minWidth: 700, minHeight: 480)
+            .frame(minWidth: 760, minHeight: 520)
         }
         .navigationSplitViewStyle(.balanced)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -165,7 +136,11 @@ struct MainView: View {
 
     private var rootContent: some View {
         VStack(spacing: 0) {
+            workspaceHeader
+            Divider()
             commandBar
+            Divider()
+            listToolbar
             Divider()
             downloadTable
             footer
@@ -268,21 +243,29 @@ struct MainView: View {
 
     @ViewBuilder
     private func infoView(_ page: MainInfoPage) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                switch page {
-                case .thirdParty:
-                    Text("第三方库").font(.title2.weight(.semibold))
-                    Text("本应用使用 Swift 标准库、SwiftUI、AppKit、CryptoKit 和 UserNotifications。")
-                        .foregroundStyle(.secondary)
-                case .translators:
-                    Text("翻译者").font(.title2.weight(.semibold))
-                    Text("感谢所有为项目提供翻译和反馈的贡献者。")
-                        .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            NativePageHeader(
+                title: page == .thirdParty ? "第三方库" : "翻译者",
+                subtitle: "酷的下载管理器",
+                systemImage: page == .thirdParty ? "shippingbox" : "person.2",
+                tint: page == .thirdParty ? .purple : .orange
+            )
+            Divider()
+
+            NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
+                NativePageSurface {
+                    switch page {
+                    case .thirdParty:
+                        Text("本应用使用 Swift 标准库、SwiftUI、AppKit、CryptoKit 和 UserNotifications。")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    case .translators:
+                        Text("感谢所有为项目提供翻译和反馈的贡献者。")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(28)
         }
     }
 
@@ -305,71 +288,182 @@ struct MainView: View {
         }
     }
 
-    private var shouldShowCompletionDialog: Bool {
-        guard let id = store.downloadList.completedID,
-              let record = store.downloadList.record(id: id) else { return false }
-        return record.taskSettings?.showCompletionDialog ?? store.settings.showDownloadCompletionDialog
+    private var workspaceHeader: some View {
+        NativePageHeader(
+            title: "下载",
+            subtitle: downloadList.filter.title + " · " + String(downloadList.visibleDownloads.count) + " 个任务",
+            systemImage: "arrow.down.circle.fill",
+            tint: .accentColor
+        ) {
+            HStack(spacing: 8) {
+                Button {
+                    coordinator.presentQueues()
+                } label: {
+                    Label("队列", systemImage: "list.bullet.rectangle")
+                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                }
+                .buttonStyle(.borderless)
+                .help("管理下载队列")
+                .accessibilityLabel("队列")
+
+                Button {
+                    coordinator.presentCategories()
+                } label: {
+                    Label("分类", systemImage: "folder")
+                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                }
+                .buttonStyle(.borderless)
+                .help("管理下载分类")
+                .accessibilityLabel("分类")
+
+                Button {
+                    coordinator.presentBatchDownload()
+                } label: {
+                    Label("批量下载", systemImage: "square.stack.3d.up")
+                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    coordinator.presentAddDownload()
+                } label: {
+                    Label("新建下载", systemImage: "plus")
+                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    coordinator.presentSettings()
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+                }
+                .buttonStyle(.borderless)
+                .help("打开设置")
+                .accessibilityLabel("设置")
+            }
+        }
     }
 
     private var commandBar: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
+        NativePageSurface(padding: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "link")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 30, height: 30)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
                 TextField("粘贴下载地址", text: $viewState.urlText)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { submitAdd() }
+
                 TextField("文件名（可选）", text: $viewState.nameText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
+                    .frame(width: 190)
+
                 Button {
                     submitAdd()
                 } label: {
-                    Label("添加并开始", systemImage: "plus.circle.fill")
+                    Label("添加并开始", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(viewState.urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
                 Button {
                     coordinator.presentAddDownload()
                 } label: {
-                    Image(systemName: "rectangle.and.pencil.and.ellipsis")
+                    Image(systemName: "slider.horizontal.3")
                 }
+                .buttonStyle(.borderless)
                 .help("打开完整添加下载窗口")
-            }
-
-            HStack(spacing: 8) {
-                TextField("搜索名称或下载地址", text: $store.downloadList.searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 300)
-                Spacer()
-                Menu {
-                    ForEach(DownloadSort.allCases, id: \.self) { sort in
-                        Button {
-                            store.downloadList.sort = sort
-                        } label: {
-                            Label(sort.title, systemImage: store.downloadList.sort == sort ? "checkmark" : "")
-                        }
-                    }
-                } label: {
-                    Label("排序", systemImage: "arrow.up.arrow.down")
-                }
-                .help("选择列表排序")
-                Button {
-                    store.downloadList.selectAllVisible()
-                } label: {
-                    Image(systemName: "checkmark.circle")
-                }
-                .help("全选当前列表")
-                Button {
-                    store.downloadList.clearSelection()
-                } label: {
-                    Image(systemName: "xmark.circle")
-                }
-                .help("清除选择")
+                .accessibilityLabel("更多下载选项")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var listToolbar: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("下载列表")
+                    .font(.headline)
+                Text(listToolbarSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 16)
+
+            if downloadList.hasSelection {
+                Label("已选 " + String(downloadList.selectedIDs.count), systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索名称或地址", text: $downloadList.searchText)
+                    .textFieldStyle(.plain)
+                    .frame(width: 190)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+            }
+
+            Menu {
+                ForEach(DownloadSort.allCases, id: \.self) { sort in
+                    Button {
+                        downloadList.sort = sort
+                    } label: {
+                        Label(sort.title, systemImage: downloadList.sort == sort ? "checkmark" : "")
+                    }
+                }
+            } label: {
+                Label("排序", systemImage: "arrow.up.arrow.down")
+            }
+            .menuStyle(.borderlessButton)
+            .help("选择列表排序")
+
+            Button {
+                downloadList.selectAllVisible()
+            } label: {
+                Image(systemName: "checkmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("全选当前列表")
+            .accessibilityLabel("全选当前列表")
+
+            Button {
+                downloadList.clearSelection()
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("清除选择")
+            .accessibilityLabel("清除选择")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 11)
         .background(.bar)
+    }
+
+    private var listToolbarSummary: String {
+        let total = downloadList.downloads.count
+        let active = downloadList.downloads.filter { isActive($0) }.count
+        return "共 " + String(total) + " 个任务 · " + String(active) + " 个进行中"
+    }
+
+    private func isActive(_ record: DownloadRecord) -> Bool {
+        record.status == .preparing || record.status == .downloading || record.status == .retrying
     }
 
     private var downloadTable: some View {
@@ -414,31 +508,35 @@ struct MainView: View {
                                 }
                             )
                             Divider()
+                                .padding(.leading, MainTableLayout.leadingInset)
                         }
                     }
                 }
                 .background(Color(nsColor: .windowBackgroundColor))
+                .scrollContentBackground(.hidden)
             }
         }
     }
 
     private var tableHeader: some View {
         HStack(spacing: 12) {
-            Text("")
-                .frame(width: 22)
+            Image(systemName: "checkmark.square")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(width: MainTableLayout.selectionWidth)
             Text("名称")
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("状态 / 进度")
-                .frame(width: 170, alignment: .leading)
+                .frame(width: MainTableLayout.statusWidth, alignment: .leading)
             Text("大小")
-                .frame(width: 130, alignment: .trailing)
+                .frame(width: MainTableLayout.sizeWidth, alignment: .trailing)
             Text("添加日期")
-                .frame(width: 120, alignment: .trailing)
+                .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, MainTableLayout.horizontalInset)
+        .padding(.vertical, 9)
         .background(.bar)
     }
 
@@ -457,9 +555,10 @@ struct MainView: View {
 
     private var footer: some View {
         NativePageActionBar {
-            Text(footerSummary)
+            Label(footerSummary, systemImage: "arrow.down.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             Spacer()
             Button {
                 store.downloadList.startSelected()
@@ -585,6 +684,20 @@ private struct DownloadDateLabel: View {
     }
 }
 
+@MainActor
+final class MainViewState: ObservableObject {
+    @Published var urlText = ""
+    @Published var nameText = ""
+    @Published var folderURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Downloads", isDirectory: true)
+    @Published var queueID: DownloadID?
+    @Published var categoryID: DownloadID?
+    @Published var startImmediately = true
+    @Published var isShowingFolderPicker = false
+    @Published var isShowingRemoveConfirmation = false
+    @Published var sidebarWidth: CGFloat = 240
+}
+
 private struct IconLabelStyleModifier: ViewModifier {
     let showLabels: Bool
 
@@ -598,18 +711,13 @@ private struct IconLabelStyleModifier: ViewModifier {
     }
 }
 
-@MainActor
-final class MainViewState: ObservableObject {
-    @Published var urlText = ""
-    @Published var nameText = ""
-    @Published var folderURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Downloads", isDirectory: true)
-    @Published var queueID: DownloadID?
-    @Published var categoryID: DownloadID?
-    @Published var startImmediately = true
-    @Published var isShowingFolderPicker = false
-    @Published var isShowingRemoveConfirmation = false
-    @Published var sidebarWidth: CGFloat = 190
+private enum MainTableLayout {
+    static let selectionWidth: CGFloat = 24
+    static let statusWidth: CGFloat = 190
+    static let sizeWidth: CGFloat = 150
+    static let dateWidth: CGFloat = 132
+    static let horizontalInset: CGFloat = 20
+    static let leadingInset: CGFloat = horizontalInset + selectionWidth + 12
 }
 
 private struct SidebarView: View {
@@ -618,57 +726,122 @@ private struct SidebarView: View {
     @ObservedObject var coordinator: AppCoordinator
 
     var body: some View {
-        List(selection: Binding<DownloadFilter?>(
-            get: { downloadList.filter },
-            set: { downloadList.filter = $0 ?? .all }
-        )) {
-            Section("下载") {
-                sidebarItem(.all)
-                sidebarItem(.active)
-                sidebarItem(.paused)
-                sidebarItem(.completed)
-                sidebarItem(.failed)
-            }
+        VStack(spacing: 0) {
+            MainSidebarHeader(count: downloadList.downloads.count)
+            Divider()
 
-            if !store.queues.isEmpty {
-                Section("队列") {
-                    ForEach(store.queues, id: \.id) { queue in
-                        sidebarItem(.queue(queue.id), title: queue.name, image: "folder")
-                    }
+            List(selection: Binding<DownloadFilter?>(
+                get: { downloadList.filter },
+                set: { downloadList.filter = $0 ?? .all }
+            )) {
+                Section("下载") {
+                    sidebarItem(.all)
+                    sidebarItem(.active)
+                    sidebarItem(.paused)
+                    sidebarItem(.completed)
+                    sidebarItem(.failed)
                 }
-            }
 
-            if !store.categories.isEmpty {
-                Section {
-                    ForEach(store.categories, id: \.id) { category in
-                        sidebarItem(
-                            .category(category.id),
-                            title: category.name,
-                            image: category.icon.isEmpty ? "folder" : category.icon
-                        )
-                    }
-                } header: {
-                    HStack {
-                        Text("分类")
-                        Spacer()
-                        Button {
-                            coordinator.presentCategories()
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
+                if !store.queues.isEmpty {
+                    Section("队列") {
+                        ForEach(store.queues, id: \.id) { queue in
+                            sidebarItem(.queue(queue.id), title: queue.name, image: "list.bullet.rectangle")
                         }
-                        .buttonStyle(.plain)
-                        .help("管理分类")
+                    }
+                }
+
+                if !store.categories.isEmpty {
+                    Section {
+                        ForEach(store.categories, id: \.id) { category in
+                            sidebarItem(
+                                .category(category.id),
+                                title: category.name,
+                                image: category.icon.isEmpty ? "folder" : category.icon
+                            )
+                        }
+                    } header: {
+                        HStack {
+                            Text("分类")
+                            Spacer()
+                            Button {
+                                coordinator.presentCategories()
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .help("管理分类")
+                        }
                     }
                 }
             }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
         }
-        .listStyle(.sidebar)
-        .navigationTitle("酷的下载管理器")
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     private func sidebarItem(_ filter: DownloadFilter, title: String? = nil, image: String? = nil) -> some View {
-        Label(title ?? filter.title, systemImage: image ?? filter.systemImage)
-            .tag(filter)
+        HStack(spacing: 9) {
+            Label(title ?? filter.title, systemImage: image ?? filter.systemImage)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text("\(count(for: filter))")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .tag(filter)
+        .help(title ?? filter.title)
+    }
+
+    private func count(for filter: DownloadFilter) -> Int {
+        switch filter {
+        case .all:
+            return downloadList.downloads.count
+        case .active:
+            return downloadList.downloads.filter { isActive($0) }.count
+        case .completed:
+            return downloadList.downloads.filter { $0.status == .completed }.count
+        case .failed:
+            return downloadList.downloads.filter { $0.status == .failed }.count
+        case .paused:
+            return downloadList.downloads.filter { $0.status == .paused }.count
+        case .queue(let id):
+            return downloadList.downloads.filter { $0.queueID == id }.count
+        case .category(let id):
+            return downloadList.downloads.filter { $0.categoryID == id }.count
+        }
+    }
+
+    private func isActive(_ record: DownloadRecord) -> Bool {
+        record.status == .preparing || record.status == .downloading || record.status == .retrying
+    }
+}
+
+private struct MainSidebarHeader: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30, height: 30)
+                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("酷的下载管理器")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(count) 个任务")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: NativePageLayout.headerHeight)
+        .background(.bar)
     }
 }
 
@@ -692,6 +865,7 @@ private struct DownloadTableRow: View {
     let sizeUnit: String
     let speedUnit: String
     let onMoveToCategory: (DownloadID?) -> Void
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -707,60 +881,73 @@ private struct DownloadTableRow: View {
             )
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .frame(width: 22)
+            .frame(width: MainTableLayout.selectionWidth)
             .help(isSelected ? "取消选择" : "选择任务")
 
             HStack(spacing: 9) {
                 Image(systemName: iconName)
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(iconColor)
-                    .frame(width: 20)
+                    .frame(width: 32, height: 32)
+                    .background(iconColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(record.name)
                         .lineLimit(1)
-                        .font(.body)
+                        .font(.body.weight(.medium))
                     Text(record.source.link)
                         .lineLimit(1)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .truncationMode(.middle)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(statusText)
+                    Label(statusText, systemImage: statusIcon)
+                        .foregroundStyle(iconColor)
                     if let percent {
                         Text("\(percent)%")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
                 }
                 if let total = record.totalBytes, total > 0 {
                     ProgressView(value: Double(record.downloadedBytes), total: Double(total))
                         .progressViewStyle(.linear)
+                        .tint(iconColor)
                 }
             }
             .font(.caption)
-            .frame(width: 170, alignment: .leading)
+            .frame(width: MainTableLayout.statusWidth, alignment: .leading)
 
             VStack(alignment: .trailing, spacing: 2) {
                 Text(sizeText)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.primary)
                 if let speedText {
                     Text(speedText)
+                        .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .trailing)
+            .frame(width: MainTableLayout.sizeWidth, alignment: .trailing)
 
             DownloadDateLabel(date: record.createdAt, relative: relativeDate)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .trailing)
+                .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
         }
         .contentShape(Rectangle())
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(isSelected ? Color.accentColor.opacity(0.13) : Color.clear)
+        .padding(.horizontal, MainTableLayout.horizontalInset)
+        .padding(.vertical, 11)
+        .background(
+            isSelected
+                ? Color.accentColor.opacity(0.13)
+                : isHovered ? Color(nsColor: .controlBackgroundColor).opacity(0.52) : Color.clear
+        )
+        .onHover { isHovered = $0 }
         .onTapGesture(count: 2, perform: onOpen)
         .contextMenu {
             Button("打开文件", systemImage: "arrow.up.right.square") { onOpen() }
@@ -828,6 +1015,17 @@ private struct DownloadTableRow: View {
         }
     }
 
+    private var statusIcon: String {
+        switch record.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .paused: return "pause.fill"
+        case .downloading, .preparing, .retrying: return "arrow.down"
+        case .cancelled: return "xmark.circle.fill"
+        case .added: return "clock"
+        }
+    }
+
     private var sizeText: String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = sizeUnit == "DecimalBytes" ? .decimal : .binary
@@ -856,7 +1054,8 @@ private struct DownloadTableRow: View {
         case .failed: return "exclamationmark.triangle.fill"
         case .paused: return "pause.circle.fill"
         case .downloading, .preparing, .retrying: return "arrow.down.circle.fill"
-        default: return "ellipsis.circle"
+        case .cancelled: return "xmark.circle.fill"
+        case .added: return "clock.arrow.circlepath"
         }
     }
 

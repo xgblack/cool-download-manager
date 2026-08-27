@@ -200,7 +200,7 @@ struct CoolDownloadManagerApp: App {
                     }
                 }
         }
-        .defaultSize(width: 980, height: 700)
+        .defaultSize(width: 1_160, height: 760)
     }
 
     private func openExternal(_ string: String) {

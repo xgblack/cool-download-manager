@@ -18,6 +18,14 @@ struct AddDownloadSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            NativePageHeader(
+                title: title,
+                subtitle: "输入地址并选择下载选项",
+                systemImage: "arrow.down.circle.fill",
+                tint: .accentColor
+            )
+            Divider()
+
             NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
                 SettingsSectionView(title: "下载地址", description: "") {
                     TextEditor(text: $urlText)
@@ -93,7 +101,7 @@ struct AddDownloadSheet: View {
                     .disabled(urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .frame(width: 680, height: 550)
+        .frame(width: 700, height: 620)
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(title)
     }

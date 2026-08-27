@@ -112,7 +112,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         mainWindow = window
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.main-window")
         window.title = "酷的下载管理器"
-        window.minSize = NSSize(width: 900, height: 560)
+        window.minSize = NSSize(width: 1_040, height: 640)
         applyWindowSettings()
         if focusMainWindowWhenRegistered {
             focusMainWindowWhenRegistered = false
@@ -368,7 +368,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         let panel = panel(
             existing: progressPanel,
             title: "下载进度",
-            size: NSSize(width: 720, height: 520),
+            size: NSSize(width: 820, height: 540),
             floatsAboveNormalWindows: false,
             content: content
         )
@@ -399,7 +399,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         let panel = panel(
             existing: completionPanel,
             title: "下载完成",
-            size: NSSize(width: 600, height: 360),
+            size: NSSize(width: 640, height: 360),
             floatsAboveNormalWindows: true,
             content: content
         )

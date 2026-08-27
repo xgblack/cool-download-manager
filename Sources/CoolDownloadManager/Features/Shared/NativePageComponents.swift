@@ -56,7 +56,7 @@ struct NativePageHeader<Trailing: View>: View {
             trailing()
         }
         .padding(.horizontal, 20)
-        .frame(minHeight: NativePageLayout.headerHeight)
+        .frame(height: NativePageLayout.headerHeight)
         .background(.bar)
     }
 }

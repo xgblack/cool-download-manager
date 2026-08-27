@@ -16,6 +16,18 @@ struct CategoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            NativePageHeader(
+                title: "分类",
+                subtitle: "按类型整理下载任务",
+                systemImage: "folder.fill",
+                tint: .orange
+            ) {
+                Text("\(state.items.count) 个分类")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+
             HStack(spacing: 0) {
                 categoryList
                     .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)

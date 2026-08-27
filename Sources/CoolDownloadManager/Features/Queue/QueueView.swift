@@ -13,6 +13,18 @@ struct QueueView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            NativePageHeader(
+                title: "队列",
+                subtitle: "按顺序管理下载任务",
+                systemImage: "list.bullet.rectangle.fill",
+                tint: .blue
+            ) {
+                Text("\(store.queueModels.count) 个队列")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+
             HStack(spacing: 0) {
                 queueList
                     .frame(minWidth: 210, idealWidth: 230, maxWidth: 260)

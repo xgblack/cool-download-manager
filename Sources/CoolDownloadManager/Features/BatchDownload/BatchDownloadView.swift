@@ -38,6 +38,14 @@ struct BatchDownloadView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            NativePageHeader(
+                title: "批量下载",
+                subtitle: "按编号范围创建多个下载任务",
+                systemImage: "square.stack.3d.up.fill",
+                tint: .blue
+            )
+            Divider()
+
             NativePageContent(maxWidth: NativePageLayout.contentWidth) {
                     SettingsSectionView(title: "下载地址", description: "使用 * 代表连续编号，例如 photo-*.jpg。") {
                         HStack {
@@ -121,7 +129,7 @@ struct BatchDownloadView: View {
                 .disabled(state.preview == nil)
             }
         }
-        .frame(width: 760, height: 640)
+        .frame(width: 780, height: 700)
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("批量下载")
         .fileImporter(

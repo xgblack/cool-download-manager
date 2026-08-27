@@ -56,7 +56,7 @@ struct DownloadProgressView: View {
             actionBar
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 720, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
+        .frame(minWidth: 820, maxWidth: .infinity, minHeight: 540, maxHeight: .infinity)
         .onChange(of: currentRecord.status) { status in
             if status == .completed {
                 onClose()
