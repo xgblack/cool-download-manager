@@ -171,7 +171,9 @@ final class DownloadListStore: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
     private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
+    private var averageSpeedSessions: [DownloadID: (bytes: Int64, date: Date)] = [:]
     private var partSpeedSampler = DownloadPartSpeedSampler()
+    private var suppressedProgressIDs: Set<DownloadID> = []
 
     init(service: DownloadService?) {
         self.service = service
@@ -251,10 +253,15 @@ final class DownloadListStore: ObservableObject {
     private func apply(_ event: DownloadEvent) {
         switch event {
         case .created(let record), .updated(let record):
-            partSpeedSampler.update(record, at: Date())
+            if let current = downloads.first(where: { $0.id == record.id }),
+               shouldKeepCurrent(current, over: record) {
+                return
+            }
+            let now = Date()
+            partSpeedSampler.update(record, at: now)
             var next = downloads.filter { $0.id != record.id }
             next.append(record)
-            apply(next, updatePartSpeeds: false)
+            apply(next, updatePartSpeeds: false, at: now)
         case .removed(let id):
             partSpeedSampler.remove(downloadID: id)
             guard downloads.contains(where: { $0.id == id }) else { return }
@@ -265,17 +272,24 @@ final class DownloadListStore: ObservableObject {
     func apply(
         _ records: [DownloadRecord],
         announceCompletion: Bool = true,
-        updatePartSpeeds: Bool = true
+        updatePartSpeeds: Bool = true,
+        at now: Date = Date()
     ) {
+        let currentByID = Dictionary(uniqueKeysWithValues: downloads.map { ($0.id, $0) })
+        let acceptedRecords = records.map { incoming in
+            guard let current = currentByID[incoming.id], shouldKeepCurrent(current, over: incoming) else {
+                return incoming
+            }
+            return current
+        }
         let previousStatuses = knownStatuses
         let previousIDs = Set(knownStatuses.keys)
-        let now = Date()
         if updatePartSpeeds {
-            partSpeedSampler.update(records, at: now)
+            partSpeedSampler.update(acceptedRecords, at: now)
         }
         var nextProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
         var nextSpeeds: [DownloadID: Double] = [:]
-        for record in records {
+        for record in acceptedRecords {
             if let previous = previousProgress[record.id] {
                 let elapsed = now.timeIntervalSince(previous.date)
                 let delta = record.downloadedBytes - previous.bytes
@@ -287,40 +301,59 @@ final class DownloadListStore: ObservableObject {
         }
         previousProgress = nextProgress
         speeds = nextSpeeds
-        downloads = records.sorted { $0.createdAt > $1.createdAt }
-        knownStatuses = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0.status) })
+        let availableIDs = Set(acceptedRecords.map(\.id))
+        averageSpeedSessions = averageSpeedSessions.filter { availableIDs.contains($0.key) }
+        for record in acceptedRecords {
+            if record.status == .downloading {
+                let currentSession = averageSpeedSessions[record.id]
+                if previousStatuses[record.id] != .downloading
+                    || currentSession == nil
+                    || record.downloadedBytes < currentSession?.bytes ?? 0 {
+                    averageSpeedSessions[record.id] = (record.downloadedBytes, now)
+                }
+            } else {
+                averageSpeedSessions[record.id] = nil
+            }
+        }
+        downloads = acceptedRecords.sorted { $0.createdAt > $1.createdAt }
+        knownStatuses = Dictionary(uniqueKeysWithValues: acceptedRecords.map { ($0.id, $0.status) })
         let removedIDs = previousIDs.subtracting(knownStatuses.keys)
         if !removedIDs.isEmpty {
             onRemovedIDs?(removedIDs)
         }
-        if announceCompletion, let completed = records.first(where: { record in
+        if announceCompletion, let completed = acceptedRecords.first(where: { record in
             record.status == .completed && previousStatuses[record.id] != .completed
         }) {
             completedID = completed.id
         }
-        if announceCompletion, let started = records.first(where: { record in
+        if announceCompletion, let started = acceptedRecords.first(where: { record in
             (record.status == .preparing || record.status == .downloading)
                 && previousStatuses[record.id] != .preparing
                 && previousStatuses[record.id] != .downloading
         }) {
-            progressID = started.id
+            if suppressedProgressIDs.remove(started.id) == nil {
+                progressID = started.id
+            }
         }
-        if announceCompletion, let failed = records.first(where: { record in
+        if announceCompletion, let failed = acceptedRecords.first(where: { record in
             record.status == .failed && previousStatuses[record.id] != .failed
         }) {
             failedID = failed.id
         }
-        let availableIDs = Set(records.map(\.id))
         selectedIDs = selectedIDs.intersection(availableIDs)
+        suppressedProgressIDs.formIntersection(availableIDs)
     }
 
-    func speed(for id: DownloadID, average: Bool = false) -> Double? {
+    func speed(for id: DownloadID, average: Bool = false, at date: Date = Date()) -> Double? {
         guard let record = downloads.first(where: { $0.id == id }), record.downloadedBytes > 0 else {
             return nil
         }
         if average {
-            let elapsed = max(1, Date().timeIntervalSince(record.createdAt))
-            return Double(record.downloadedBytes) / elapsed
+            guard let session = averageSpeedSessions[id] else { return nil }
+            let elapsed = date.timeIntervalSince(session.date)
+            let downloaded = record.downloadedBytes - session.bytes
+            guard elapsed > 0, downloaded >= 0 else { return nil }
+            return Double(downloaded) / elapsed
         }
         return speeds[id]
     }
@@ -450,6 +483,7 @@ final class DownloadListStore: ObservableObject {
         let ids = selectedDownloads
             .filter { $0.status == .added || $0.status == .paused || $0.status == .failed || $0.status == .cancelled }
             .map(\.id)
+        suppressedProgressIDs.subtract(ids)
         perform(ids: ids) { service, ids in
             try await service.resume(ids: ids)
         }
@@ -464,6 +498,7 @@ final class DownloadListStore: ObservableObject {
                 || record.status == .failed || record.status == .cancelled else {
             return
         }
+        suppressedProgressIDs.remove(id)
         perform(ids: [id]) { service, ids in
             try await service.resume(ids: ids)
         }
@@ -473,6 +508,7 @@ final class DownloadListStore: ObservableObject {
         let ids = selectedDownloads
             .filter { $0.status == .preparing || $0.status == .downloading || $0.status == .retrying }
             .map(\.id)
+        suppressProgressPresentation(for: ids)
         perform(ids: ids) { service, ids in
             try await service.pause(ids: ids)
         }
@@ -483,6 +519,7 @@ final class DownloadListStore: ObservableObject {
               record.status == .preparing || record.status == .downloading || record.status == .retrying else {
             return
         }
+        suppressProgressPresentation(for: [id])
         perform(ids: [id]) { service, ids in
             try await service.pause(ids: ids)
         }
@@ -492,6 +529,7 @@ final class DownloadListStore: ObservableObject {
         let ids = selectedDownloads
             .filter { $0.status == .failed || $0.status == .cancelled }
             .map(\.id)
+        suppressedProgressIDs.subtract(ids)
         perform(ids: ids) { service, ids in
             try await service.retry(ids: ids)
         }
@@ -501,6 +539,7 @@ final class DownloadListStore: ObservableObject {
         guard let record = record(id: id), record.status == .failed || record.status == .cancelled else {
             return
         }
+        suppressedProgressIDs.remove(id)
         perform(ids: [id]) { service, ids in
             try await service.retry(ids: ids)
         }
@@ -510,6 +549,7 @@ final class DownloadListStore: ObservableObject {
         let ids = selectedDownloads
             .filter { $0.status == .completed }
             .map(\.id)
+        suppressedProgressIDs.subtract(ids)
         perform(ids: ids) { service, ids in
             try await service.redownload(ids: ids)
         }
@@ -517,6 +557,7 @@ final class DownloadListStore: ObservableObject {
 
     func redownload(id: DownloadID) {
         guard let record = record(id: id), record.status == .completed else { return }
+        suppressedProgressIDs.remove(id)
         perform(ids: [id]) { service, ids in
             try await service.redownload(ids: ids)
         }
@@ -563,6 +604,13 @@ final class DownloadListStore: ObservableObject {
     }
 
     func stopQueue(_ queueID: DownloadID) {
+        let ids = downloads
+            .filter {
+                $0.queueID == queueID
+                    && ($0.status == .preparing || $0.status == .downloading || $0.status == .retrying)
+            }
+            .map(\.id)
+        suppressProgressPresentation(for: ids)
         perform(ids: [], allowEmpty: true) { service, _ in
             try await service.stopQueue(id: queueID)
         }
@@ -573,6 +621,7 @@ final class DownloadListStore: ObservableObject {
             .filter { $0.status == .preparing || $0.status == .downloading || $0.status == .retrying }
             .map(\.id)
         guard !ids.isEmpty else { return }
+        suppressProgressPresentation(for: ids)
         perform(ids: ids) { service, ids in
             try await service.pause(ids: ids)
         }
@@ -580,6 +629,23 @@ final class DownloadListStore: ObservableObject {
 
     func record(id: DownloadID) -> DownloadRecord? {
         downloads.first { $0.id == id }
+    }
+
+    private func suppressProgressPresentation(for ids: [DownloadID]) {
+        suppressedProgressIDs.formUnion(ids)
+        if let progressID, ids.contains(progressID) {
+            self.progressID = nil
+        }
+    }
+
+    private func shouldKeepCurrent(_ current: DownloadRecord, over incoming: DownloadRecord) -> Bool {
+        if current.revision != incoming.revision {
+            return current.revision > incoming.revision
+        }
+        if current.updatedAt != incoming.updatedAt {
+            return current.updatedAt > incoming.updatedAt
+        }
+        return current.downloadedBytes > incoming.downloadedBytes
     }
 
     private func perform(

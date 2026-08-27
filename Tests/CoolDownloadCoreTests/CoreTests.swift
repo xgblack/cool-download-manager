@@ -537,6 +537,27 @@ struct CoreTests {
         #expect(loaded.first?.name == record.name)
     }
 
+    @Test("store never overwrites a newer record with a stale progress event")
+    func storeRejectsStaleRevision() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try DownloadStore(rootURL: root)
+        var paused = makeRecord(id: 8, folder: root)
+        paused.status = .paused
+        paused.revision = 12
+        try await store.save(paused)
+
+        var stale = paused
+        stale.status = .downloading
+        stale.revision = 11
+        try await store.save(stale)
+
+        let loaded = try await store.load()
+        #expect(loaded.first?.status == .paused)
+        #expect(loaded.first?.revision == 12)
+    }
+
     @Test("part file is resumed and atomically finished")
     func partFileResume() async throws {
         let root = try makeTemporaryDirectory()
@@ -958,6 +979,36 @@ struct CoreTests {
         #expect(transport.maxObserved() == 1)
     }
 
+    @Test("pausing an active download remains paused after the response unwinds")
+    func activePauseRemainsPaused() async throws {
+        let transport = SlowTransport(delay: .milliseconds(200))
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(maxConcurrentDownloads: 1)
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/pause", suggestedName: "pause.bin"),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .downloading {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await service.pause(ids: [id])
+        try await Task.sleep(for: .milliseconds(300))
+
+        let record = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
+        #expect(record.status == .paused)
+        #expect(record.downloadedBytes == 0)
+    }
+
     @Test("queue metadata is persisted and queue start does not start other queues")
     func queueStart() async throws {
         let transport = MemoryTransport()
@@ -1201,6 +1252,113 @@ struct CoreTests {
         #expect(transport.requestCount() == 4)
         #expect(transport.recordedRequests().first?.httpMethod == "GET")
         #expect(transport.recordedRequests().first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+    }
+
+    @Test("range progress coalesces frequent updates without losing bytes")
+    func rangeProgressIsCoalesced() async throws {
+        let content = Data(repeating: 0x5a, count: 256 * 1024)
+        let transport = RangeTransport(content: content, responseChunkSize: 1024)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 4
+            )
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/coalesced.bin",
+                suggestedName: "coalesced.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        var completed: DownloadRecord?
+        while ContinuousClock.now < deadline {
+            completed = await service.snapshot().downloads.first { $0.id == id && $0.status == .completed }
+            if completed != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let record = try #require(completed)
+        #expect(record.downloadedBytes == Int64(content.count))
+        #expect(try Data(contentsOf: record.destinationURL) == content)
+        #expect(record.revision < 50)
+    }
+
+    @Test("URLSession transport permits all supported range connections")
+    func urlSessionTransportConnectionCapacity() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = 6
+        let transport = URLSessionHTTPTransport(configuration: configuration)
+
+        #expect(
+            transport.configuredMaximumConnectionsPerHost
+                >= URLSessionHTTPTransport.minimumConnectionsPerHost
+        )
+    }
+
+    @Test("URLSession transport coalesces callbacks without losing body bytes")
+    func urlSessionTransportStreamsChunks() async throws {
+        let url = URL(string: "https://transport.fixture/\(UUID().uuidString)")!
+        let content = Data((0..<(700 * 1024)).map { UInt8($0 % 251) })
+        URLSessionTransportFixtureRegistry.shared.register(
+            .body(content, callbackChunkSize: 8 * 1024),
+            for: url
+        )
+        defer { URLSessionTransportFixtureRegistry.shared.remove(url) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLSessionTransportFixture.self]
+        let transport = URLSessionHTTPTransport(configuration: configuration)
+        let response = try await transport.response(for: URLRequest(url: url))
+        defer { response.cancelBody() }
+
+        var received = Data()
+        var chunkCount = 0
+        for try await chunk in response.body {
+            received.append(chunk)
+            chunkCount += 1
+        }
+
+        #expect(received == content)
+        #expect(chunkCount <= 4)
+    }
+
+    @Test("cancelling a URLSession response wait cancels its data task")
+    func urlSessionTransportCancelsDataTask() async throws {
+        let url = URL(string: "https://transport.fixture/\(UUID().uuidString)")!
+        URLSessionTransportFixtureRegistry.shared.register(.hanging, for: url)
+        defer { URLSessionTransportFixtureRegistry.shared.remove(url) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLSessionTransportFixture.self]
+        let transport = URLSessionHTTPTransport(configuration: configuration)
+        let responseTask = Task {
+            try await transport.response(for: URLRequest(url: url))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        responseTask.cancel()
+        do {
+            _ = try await responseTask.value
+            Issue.record("cancelled response wait should throw")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline,
+              !URLSessionTransportFixtureRegistry.shared.wasStopped(url) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(URLSessionTransportFixtureRegistry.shared.wasStopped(url))
     }
 
     @Test("HTTP probe cancels a full-body fallback when Range is ignored")
@@ -1660,6 +1818,88 @@ private final class IgnoringRangeTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
+private final class URLSessionTransportFixtureRegistry: @unchecked Sendable {
+    enum Scenario: Sendable {
+        case body(Data, callbackChunkSize: Int)
+        case hanging
+    }
+
+    static let shared = URLSessionTransportFixtureRegistry()
+
+    private let lock = NSLock()
+    private var scenarios: [URL: Scenario] = [:]
+    private var stoppedURLs: Set<URL> = []
+
+    func register(_ scenario: Scenario, for url: URL) {
+        lock.withLock {
+            scenarios[url] = scenario
+            stoppedURLs.remove(url)
+        }
+    }
+
+    func scenario(for url: URL) -> Scenario? {
+        lock.withLock { scenarios[url] }
+    }
+
+    func markStopped(_ url: URL) {
+        lock.withLock { _ = stoppedURLs.insert(url) }
+    }
+
+    func wasStopped(_ url: URL) -> Bool {
+        lock.withLock { stoppedURLs.contains(url) }
+    }
+
+    func remove(_ url: URL) {
+        lock.withLock {
+            scenarios.removeValue(forKey: url)
+            stoppedURLs.remove(url)
+        }
+    }
+}
+
+private final class URLSessionTransportFixture: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "transport.fixture"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let scenario = URLSessionTransportFixtureRegistry.shared.scenario(for: url),
+              let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+
+        switch scenario {
+        case .body(let data, let callbackChunkSize):
+            var offset = 0
+            while offset < data.count {
+                let end = min(data.count, offset + callbackChunkSize)
+                client?.urlProtocol(self, didLoad: Data(data[offset..<end]))
+                offset = end
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        case .hanging:
+            client?.urlProtocol(self, didLoad: Data([0]))
+        }
+    }
+
+    override func stopLoading() {
+        guard let url = request.url else { return }
+        URLSessionTransportFixtureRegistry.shared.markStopped(url)
+    }
+}
+
 private final class FailingTransport: HTTPTransport, @unchecked Sendable {
     private let failure: URLError
     private let lock = NSLock()
@@ -1795,12 +2035,14 @@ private final class RetryTransport: HTTPTransport, @unchecked Sendable {
 
 private final class RangeTransport: HTTPTransport, @unchecked Sendable {
     private let content: Data
+    private let responseChunkSize: Int?
     private let lock = NSLock()
     private(set) var rangeRequests = 0
     private var requests: [URLRequest] = []
 
-    init(content: Data) {
+    init(content: Data, responseChunkSize: Int? = nil) {
         self.content = content
+        self.responseChunkSize = responseChunkSize
     }
 
     func response(for request: URLRequest) async throws -> HTTPTransportResponse {
@@ -1833,7 +2075,16 @@ private final class RangeTransport: HTTPTransport, @unchecked Sendable {
         }
         let bytes = Data(content[Int(start)...Int(end)])
         stream = AsyncThrowingStream { continuation in
-            continuation.yield(bytes)
+            if let responseChunkSize {
+                var offset = 0
+                while offset < bytes.count {
+                    let end = min(bytes.count, offset + responseChunkSize)
+                    continuation.yield(Data(bytes[offset..<end]))
+                    offset = end
+                }
+            } else {
+                continuation.yield(bytes)
+            }
             continuation.finish()
         }
         return HTTPTransportResponse(

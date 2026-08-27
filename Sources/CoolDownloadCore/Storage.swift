@@ -128,6 +128,12 @@ public actor DownloadStore {
     }
 
     public func save(_ record: DownloadRecord) throws {
+        // DownloadService can be re-entered while a previous save is awaiting
+        // filesystem I/O. Never let an older progress event overwrite a newer
+        // pause, retry, or completion state.
+        if let current = records[record.id], current.revision > record.revision {
+            return
+        }
         try FileManager.default.createDirectory(
             at: recordsURL,
             withIntermediateDirectories: true

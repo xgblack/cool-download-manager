@@ -206,6 +206,7 @@ public final class HLSDownloader: @unchecked Sendable {
         request.timeoutInterval = 60
         headers?.forEach { key, value in request.setValue(value, forHTTPHeaderField: key) }
         let response = try await transport.response(for: request)
+        defer { response.cancelBody() }
         guard (200...299).contains(response.statusCode) else {
             throw DownloadCoreError.httpStatus(response.statusCode)
         }

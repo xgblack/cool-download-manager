@@ -18,7 +18,10 @@ public actor DownloadService {
     private var perHostSettings: [PerHostSettingsItem] = []
     private var subscribers: [UUID: AsyncStream<DownloadEvent>.Continuation] = [:]
     private var queueEventSubscribers: [UUID: AsyncStream<DownloadQueueEvent>.Continuation] = [:]
+    private var lastProgressPersistence: [DownloadID: ContinuousClock.Instant] = [:]
     private var shuttingDown = false
+
+    private static let progressPersistenceInterval: Duration = .milliseconds(250)
 
     public init(
         store: DownloadStore,
@@ -579,6 +582,8 @@ public actor DownloadService {
             return
         }
 
+        defer { lastProgressPersistence[id] = nil }
+
         do {
             record.status = .downloading
             record.updatedAt = Date()
@@ -1049,6 +1054,10 @@ public actor DownloadService {
         record.parts[index].completed = record.parts[index].downloaded == maximum
         record.downloadedBytes = record.parts.reduce(0) { $0 + $1.downloaded }
         record.updatedAt = Date()
+        records[id] = record
+        guard shouldPersistProgress(id: id, force: record.parts[index].completed) else {
+            return
+        }
         record.revision += 1
         records[id] = record
         do {
@@ -1065,6 +1074,8 @@ public actor DownloadService {
         }
         record.downloadedBytes = bytes
         record.updatedAt = Date()
+        records[id] = record
+        guard shouldPersistProgress(id: id) else { return }
         record.revision += 1
         records[id] = record
         do {
@@ -1073,6 +1084,17 @@ public actor DownloadService {
             reportPersistenceFailure("progress", id: id, error: error)
         }
         emit(.updated(record))
+    }
+
+    private func shouldPersistProgress(id: DownloadID, force: Bool = false) -> Bool {
+        let now = ContinuousClock.now
+        if !force,
+           let lastPersistence = lastProgressPersistence[id],
+           now - lastPersistence < Self.progressPersistenceInterval {
+            return false
+        }
+        lastProgressPersistence[id] = now
+        return true
     }
 
     private func persistHLSProgress(
