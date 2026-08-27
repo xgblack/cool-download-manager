@@ -41,7 +41,7 @@ struct SettingsView: View {
             Divider()
 
             HStack(spacing: 0) {
-                if viewState.isSidebarVisible && viewState.path.isEmpty {
+                if viewState.path.isEmpty {
                     settingsSidebar
                 } else {
                     Color.clear
@@ -126,21 +126,32 @@ struct SettingsView: View {
         List(selection: $viewState.section) {
             Section {
                 ForEach(SettingsSection.allCases, id: \.self) { section in
-                    HStack(spacing: 10) {
+                    HStack(spacing: viewState.isSidebarVisible ? 10 : 0) {
                         SettingsSidebarIcon(section: section)
-                        Text(section.title)
-                            .lineLimit(1)
+                        if viewState.isSidebarVisible {
+                            Text(section.title)
+                                .lineLimit(1)
+                        }
                     }
                     .padding(.vertical, 3)
+                    .frame(
+                        maxWidth: .infinity,
+                        alignment: viewState.isSidebarVisible ? .leading : .center
+                    )
                     .tag(section)
+                    .help(section.title)
                 }
             }
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, viewState.isSidebarVisible ? 8 : 4)
         .padding(.vertical, 10)
-        .frame(width: SettingsWindowLayout.sidebarWidth)
+        .frame(
+            width: viewState.isSidebarVisible
+                ? SettingsWindowLayout.sidebarWidth
+                : SettingsWindowLayout.collapsedSidebarWidth
+        )
         .frame(maxHeight: .infinity)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
