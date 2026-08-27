@@ -136,11 +136,7 @@ struct MainView: View {
 
     private var rootContent: some View {
         VStack(spacing: 0) {
-            workspaceHeader
-            Divider()
-            commandBar
-            Divider()
-            listToolbar
+            workspaceToolbar
             Divider()
             downloadTable
             footer
@@ -288,14 +284,70 @@ struct MainView: View {
         }
     }
 
-    private var workspaceHeader: some View {
+    private var workspaceToolbar: some View {
         NativePageHeader(
             title: "下载",
-            subtitle: downloadList.filter.title + " · " + String(downloadList.visibleDownloads.count) + " 个任务",
+            subtitle: String(downloadList.visibleDownloads.count) + " 个任务",
             systemImage: "arrow.down.circle.fill",
             tint: .accentColor
         ) {
             HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("搜索名称或地址", text: $downloadList.searchText)
+                        .textFieldStyle(.plain)
+                        .frame(width: 160)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                }
+
+                Menu {
+                    ForEach(DownloadSort.allCases, id: \.self) { sort in
+                        Button {
+                            downloadList.sort = sort
+                        } label: {
+                            Label(sort.title, systemImage: downloadList.sort == sort ? "checkmark" : "")
+                        }
+                    }
+                } label: {
+                    Label("排序", systemImage: "arrow.up.arrow.down")
+                }
+                .menuStyle(.borderlessButton)
+                .help("选择列表排序")
+
+                if downloadList.hasSelection {
+                    Label("已选 " + String(downloadList.selectedIDs.count), systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                Button {
+                    downloadList.selectAllVisible()
+                } label: {
+                    Image(systemName: "checkmark.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("全选当前列表")
+                .accessibilityLabel("全选当前列表")
+
+                Button {
+                    downloadList.clearSelection()
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("清除选择")
+                .accessibilityLabel("清除选择")
+
+                Divider()
+                    .frame(height: 20)
+
                 Button {
                     coordinator.presentQueues()
                 } label: {
@@ -343,127 +395,6 @@ struct MainView: View {
                 .accessibilityLabel("设置")
             }
         }
-    }
-
-    private var commandBar: some View {
-        NativePageSurface(padding: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "link")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 30, height: 30)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-                TextField("粘贴下载地址", text: $viewState.urlText)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { submitAdd() }
-
-                TextField("文件名（可选）", text: $viewState.nameText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 190)
-
-                Button {
-                    submitAdd()
-                } label: {
-                    Label("添加并开始", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(viewState.urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Button {
-                    coordinator.presentAddDownload()
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                }
-                .buttonStyle(.borderless)
-                .help("打开完整添加下载窗口")
-                .accessibilityLabel("更多下载选项")
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private var listToolbar: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("下载列表")
-                    .font(.headline)
-                Text(listToolbarSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 16)
-
-            if downloadList.hasSelection {
-                Label("已选 " + String(downloadList.selectedIDs.count), systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(Color.accentColor)
-            }
-
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("搜索名称或地址", text: $downloadList.searchText)
-                    .textFieldStyle(.plain)
-                    .frame(width: 190)
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
-            }
-
-            Menu {
-                ForEach(DownloadSort.allCases, id: \.self) { sort in
-                    Button {
-                        downloadList.sort = sort
-                    } label: {
-                        Label(sort.title, systemImage: downloadList.sort == sort ? "checkmark" : "")
-                    }
-                }
-            } label: {
-                Label("排序", systemImage: "arrow.up.arrow.down")
-            }
-            .menuStyle(.borderlessButton)
-            .help("选择列表排序")
-
-            Button {
-                downloadList.selectAllVisible()
-            } label: {
-                Image(systemName: "checkmark.circle")
-            }
-            .buttonStyle(.borderless)
-            .help("全选当前列表")
-            .accessibilityLabel("全选当前列表")
-
-            Button {
-                downloadList.clearSelection()
-            } label: {
-                Image(systemName: "xmark.circle")
-            }
-            .buttonStyle(.borderless)
-            .help("清除选择")
-            .accessibilityLabel("清除选择")
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 11)
-        .background(.bar)
-    }
-
-    private var listToolbarSummary: String {
-        let total = downloadList.downloads.count
-        let active = downloadList.downloads.filter { isActive($0) }.count
-        return "共 " + String(total) + " 个任务 · " + String(active) + " 个进行中"
-    }
-
-    private func isActive(_ record: DownloadRecord) -> Bool {
-        record.status == .preparing || record.status == .downloading || record.status == .retrying
     }
 
     private var downloadTable: some View {
@@ -596,12 +527,6 @@ struct MainView: View {
         return "\(total) 个任务 · \(active) 个进行中 · 已选 \(store.downloadList.selectedIDs.count)"
     }
 
-    private func submitAdd() {
-        guard !viewState.urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        store.addDownload(link: viewState.urlText, name: viewState.nameText, folder: viewState.folderURL)
-        resetAddForm()
-    }
-
     private func resetAddForm() {
         viewState.urlText = ""
         viewState.nameText = ""
@@ -727,9 +652,6 @@ private struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            MainSidebarHeader(count: downloadList.downloads.count)
-            Divider()
-
             List(selection: Binding<DownloadFilter?>(
                 get: { downloadList.filter },
                 set: { downloadList.filter = $0 ?? .all }
@@ -817,31 +739,6 @@ private struct SidebarView: View {
 
     private func isActive(_ record: DownloadRecord) -> Bool {
         record.status == .preparing || record.status == .downloading || record.status == .retrying
-    }
-}
-
-private struct MainSidebarHeader: View {
-    let count: Int
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 30, height: 30)
-                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("酷的下载管理器")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("\(count) 个任务")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16)
-        .frame(height: NativePageLayout.headerHeight)
-        .background(.bar)
     }
 }
 
