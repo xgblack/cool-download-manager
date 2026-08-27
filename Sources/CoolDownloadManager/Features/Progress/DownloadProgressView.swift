@@ -45,19 +45,18 @@ struct DownloadProgressView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+            NativePageContent(maxWidth: 900, spacing: 24) {
+                NativePageSurface {
                     overview
+                }
+                NativePageSurface {
                     partSection
                 }
-                .padding(22)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Divider()
             actionBar
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 660, maxWidth: .infinity, minHeight: 440, maxHeight: .infinity)
+        .frame(minWidth: 720, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
         .onChange(of: currentRecord.status) { status in
             if status == .completed {
                 onClose()
@@ -66,34 +65,18 @@ struct DownloadProgressView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: headerIcon)
-                .font(.system(size: 25, weight: .semibold))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(headerColor)
-                .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(currentRecord.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(statusText)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            Spacer(minLength: 12)
+        NativePageHeader(
+            title: currentRecord.name,
+            subtitle: statusText,
+            systemImage: headerIcon,
+            tint: headerColor
+        ) {
             if let progress {
                 Text("\(Int((progress * 100).rounded()))%")
                     .font(.title3.monospacedDigit().weight(.semibold))
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 16)
-        .background(.bar)
     }
 
     private var overview: some View {
@@ -263,15 +246,10 @@ struct DownloadProgressView: View {
             }
         }
         .font(.caption)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-        }
     }
 
     private var actionBar: some View {
-        HStack(spacing: 10) {
+        NativePageActionBar {
             switch currentRecord.status {
             case .preparing, .downloading, .retrying:
                 Button("暂停", systemImage: "pause.fill") {
@@ -300,9 +278,6 @@ struct DownloadProgressView: View {
             }
             .keyboardShortcut(.cancelAction)
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 12)
-        .background(.bar)
     }
 
     private var sortedParts: [DownloadPart] {

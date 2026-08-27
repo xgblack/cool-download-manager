@@ -688,7 +688,7 @@ final class AppStore: ObservableObject {
                 NotificationController.shared.notifyCompletion(
                     record: record,
                     soundEnabled: settings.notificationSound,
-                    soundName: settings.successNotificationSound.isEmpty
+                    soundPath: settings.successNotificationSound.isEmpty
                         ? settings.generalNotificationSound
                         : settings.successNotificationSound
                 )
@@ -696,7 +696,7 @@ final class AppStore: ObservableObject {
                 NotificationController.shared.notifyFailure(
                     record: record,
                     soundEnabled: settings.notificationSound,
-                    soundName: settings.errorNotificationSound.isEmpty
+                    soundPath: settings.errorNotificationSound.isEmpty
                         ? settings.generalNotificationSound
                         : settings.errorNotificationSound
                 )

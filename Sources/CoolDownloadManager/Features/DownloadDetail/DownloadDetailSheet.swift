@@ -25,18 +25,24 @@ struct DownloadDetailSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("详情", selection: $viewState.tab) {
-                ForEach(DetailTab.allCases, id: \.self) { tab in
-                    Text(tab.rawValue).tag(tab)
+            NativePageHeader(
+                title: record.name,
+                subtitle: statusText,
+                systemImage: detailSystemImage,
+                tint: detailTint
+            ) {
+                Picker("详情", selection: $viewState.tab) {
+                    ForEach(DetailTab.allCases, id: \.self) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 190)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
-
             Divider()
 
-            ScrollView {
+            NativePageContent {
                 Group {
                     switch viewState.tab {
                     case .info:
@@ -45,48 +51,51 @@ struct DownloadDetailSheet: View {
                         settingsPage
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
             }
-
-            Divider()
             actionBar
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var infoPage: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 24) {
             if let total = record.totalBytes, total > 0 {
-                ProgressView(value: Double(record.downloadedBytes), total: Double(total))
-                    .progressViewStyle(.linear)
-                HStack {
-                    Text("进度")
-                    Spacer()
-                    Text("\(percent)%")
+                NativePageSurface {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("下载进度")
+                            .font(.headline)
+                        Spacer()
+                        Text("\(percent)%")
+                            .font(.title3.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: Double(record.downloadedBytes), total: Double(total))
+                        .progressViewStyle(.linear)
+                    Text("\(ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)) / \(ByteCountText.string(fromByteCount: total, formatter: byteFormatter))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
 
-            detailRow("状态", statusText)
-            detailRow("文件大小", sizeText)
-            detailRow(
-                "已下载",
-                ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)
-            )
-            detailRow("保存路径", record.destinationURL.path)
-            sourceRow
-            if let etag = record.etag {
-                detailRow("ETag（实体标签）", etag)
-            }
-            if let modified = modificationDateText {
-                detailRow("修改时间", modified)
+            NativeSettingsGroup(title: "下载信息") {
+                detailRow("状态", statusText)
+                detailRow("文件大小", sizeText)
+                detailRow(
+                    "已下载",
+                    ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)
+                )
+                detailRow("保存路径", record.destinationURL.path)
+                sourceRow
+                if let etag = record.etag {
+                    detailRow("ETag（实体标签）", etag)
+                }
+                if let modified = modificationDateText {
+                    detailRow("修改时间", modified, showsDivider: false)
+                }
             }
             if let error = record.error {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("错误详情")
-                        .font(.subheadline.weight(.semibold))
+                SettingsSectionView(title: "错误详情", description: "") {
                     Text(error)
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
@@ -97,49 +106,38 @@ struct DownloadDetailSheet: View {
 
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("任务下载设置")
-                .font(.headline)
-            LabeledContent("线程数") {
-                VStack(alignment: .trailing, spacing: 4) {
-                    TextField("留空使用全局设置", text: $viewState.threadCount)
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 190)
-                    effectLabel(threadCountEffectText)
+            NativeSettingsGroup(title: "任务下载设置") {
+                NativeSettingsRow(title: "线程数") {
+                    settingField(
+                        placeholder: "留空使用全局设置",
+                        text: $viewState.threadCount,
+                        effect: threadCountEffectText
+                    )
                 }
-            }
-            LabeledContent("速度限制") {
-                VStack(alignment: .trailing, spacing: 4) {
-                    TextField("字节/秒，留空使用全局设置", text: $viewState.speedLimit)
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 190)
-                    effectLabel(speedLimitEffectText)
+                NativeSettingsRow(title: "速度限制") {
+                    settingField(
+                        placeholder: "字节/秒，留空使用全局设置",
+                        text: $viewState.speedLimit,
+                        effect: speedLimitEffectText
+                    )
                 }
-            }
-            LabeledContent("完成窗口") {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Picker("完成窗口", selection: $viewState.completionDialogMode) {
-                        Text("使用全局设置").tag(DownloadDetailViewState.CompletionDialogMode.global)
-                        Text("显示").tag(DownloadDetailViewState.CompletionDialogMode.show)
-                        Text("不显示").tag(DownloadDetailViewState.CompletionDialogMode.hide)
+                NativeSettingsRow(title: "完成窗口", showsDivider: false) {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Picker("完成窗口", selection: $viewState.completionDialogMode) {
+                            Text("使用全局设置").tag(DownloadDetailViewState.CompletionDialogMode.global)
+                            Text("显示").tag(DownloadDetailViewState.CompletionDialogMode.show)
+                            Text("不显示").tag(DownloadDetailViewState.CompletionDialogMode.hide)
+                        }
+                        .labelsHidden()
+                        .frame(width: 190)
+                        effectLabel(completionDialogEffectText)
                     }
-                    .labelsHidden()
-                    .frame(width: 190)
-                    effectLabel(completionDialogEffectText)
                 }
             }
             if let error = viewState.errorMessage {
-                Text(error)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
-            }
-            HStack {
-                Spacer()
-                Button(viewState.isSaving ? "保存中…" : "保存下载设置") {
-                    saveTaskSettings()
-                }
-                .disabled(viewState.isSaving)
             }
         }
     }
@@ -190,7 +188,7 @@ struct DownloadDetailSheet: View {
     }
 
     private var actionBar: some View {
-        HStack {
+        NativePageActionBar {
             if canShowProgress {
                 Button("显示下载进度", systemImage: "chart.bar.xaxis") {
                     coordinator.showProgressPanel(for: record, focus: true)
@@ -227,26 +225,35 @@ struct DownloadDetailSheet: View {
                     store.startSelected()
                 }
             }
+            if viewState.tab == .settings {
+                Button(viewState.isSaving ? "保存中…" : "保存下载设置") {
+                    saveTaskSettings()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewState.isSaving)
+            }
         }
-        .padding(12)
     }
 
-    private func detailRow(_ title: String, _ value: String) -> some View {
-        LabeledContent(title) {
+    private func detailRow(_ title: String, _ value: String, showsDivider: Bool = true) -> some View {
+        NativeSettingsRow(title: title, showsDivider: showsDivider) {
             Text(value)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: 360, alignment: .trailing)
         }
     }
 
     private var sourceRow: some View {
-        LabeledContent("源地址") {
+        NativeSettingsRow(title: "源地址") {
             HStack(spacing: 6) {
                 Text(record.source.link)
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
+                    .multilineTextAlignment(.trailing)
                 Button {
                     coordinator.copy(record.source.link)
                     viewState.markLinkCopied()
@@ -259,6 +266,17 @@ struct DownloadDetailSheet: View {
                 .help(viewState.didCopyLink ? "已复制" : "复制下载链接（⇧⌘C）")
                 .accessibilityLabel(viewState.didCopyLink ? "下载链接已复制" : "复制下载链接")
             }
+            .frame(maxWidth: 360, alignment: .trailing)
+        }
+    }
+
+    private func settingField(placeholder: String, text: Binding<String>, effect: String) -> some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 220)
+            effectLabel(effect)
         }
     }
 
@@ -322,6 +340,24 @@ struct DownloadDetailSheet: View {
         case .completed: return "已完成"
         case .failed: return "失败"
         case .cancelled: return "已取消"
+        }
+    }
+
+    private var detailSystemImage: String {
+        switch record.status {
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .paused, .cancelled: return "pause.circle.fill"
+        default: return "arrow.down.circle.fill"
+        }
+    }
+
+    private var detailTint: Color {
+        switch record.status {
+        case .completed: return .green
+        case .failed: return .red
+        case .paused, .cancelled: return .orange
+        default: return .accentColor
         }
     }
 

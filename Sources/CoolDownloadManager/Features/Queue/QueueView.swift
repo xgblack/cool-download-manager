@@ -19,28 +19,7 @@ struct QueueView: View {
                 Divider()
                 queueDetails
             }
-            Divider()
-            HStack {
-                Text(summary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    guard let id = state.selectedQueueID else { return }
-                    store.stopQueue(id)
-                } label: {
-                    Label("停止队列", systemImage: "stop.fill")
-                }
-                Button {
-                    guard let id = state.selectedQueueID else { return }
-                    store.startQueue(id)
-                } label: {
-                    Label("启动队列", systemImage: "play.fill")
-                }
-                .disabled(state.selectedQueueID == nil)
-            }
-            .buttonStyle(.borderless)
-            .padding(12)
+            actionBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
@@ -130,6 +109,13 @@ struct QueueView: View {
 
     private var queueList: some View {
         VStack(spacing: 0) {
+            NativeSidebarHeader(
+                title: "队列",
+                count: store.queueModels.count,
+                systemImage: "list.bullet.rectangle",
+                tint: .blue
+            )
+            Divider()
             List(selection: queueSelection) {
                 ForEach(store.queueModels) { queue in
                     HStack(spacing: 8) {
@@ -153,6 +139,9 @@ struct QueueView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
             Divider()
             HStack {
                 Button {
@@ -174,7 +163,9 @@ struct QueueView: View {
             }
             .buttonStyle(.borderless)
             .padding(10)
+            .background(.bar)
         }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     @ViewBuilder
@@ -182,25 +173,24 @@ struct QueueView: View {
         if state.isCreatingQueue {
             newQueueEditor
         } else if let model = selectedModel {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    SettingsSectionView(title: model.name, description: model.id == 0 ? "主队列" : "队列配置和项目顺序") {
+            NativePageContent {
+                NativeSettingsGroup(title: "队列设置") {
+                    NativeSettingsRow(title: "队列名称") {
                         TextField("队列名称", text: $state.name)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 260)
                             .disabled(model.id == 0)
-                        HStack {
-                            Text("最大并发")
-                            TextField("1-32", text: Binding(
-                                get: { state.maxConcurrent },
-                                set: { state.setMaxConcurrentText($0) }
-                            ))
-                                .frame(width: 70)
-                            Stepper("", value: Binding(
-                                get: { state.maxConcurrentValue },
-                                set: { state.setMaxConcurrentValue($0) }
-                            ), in: 1...32)
-                                .labelsHidden()
-                        }
-                        Toggle("队列为空时自动停止", isOn: $state.stopQueueOnEmpty)
+                    }
+                    NativeSettingsNumberRow(
+                        "最大并发",
+                        value: Binding(
+                            get: { state.maxConcurrentValue },
+                            set: { state.setMaxConcurrentValue($0) }
+                        ),
+                        range: 1...32
+                    )
+                    NativeSettingsToggleRow("队列为空时自动停止", isOn: $state.stopQueueOnEmpty)
+                    NativeSettingsRow(title: "完成后动作", showsDivider: false) {
                         Picker("完成后动作", selection: $state.completionAction) {
                             Text("不执行动作").tag(QueueCompletionAction.none)
                             Text("关机").tag(QueueCompletionAction.shutdown)
@@ -208,34 +198,41 @@ struct QueueView: View {
                             Text("休眠").tag(QueueCompletionAction.hibernate)
                             Text("锁定屏幕").tag(QueueCompletionAction.lock)
                         }
+                        .labelsHidden()
+                        .frame(width: 180)
+                    }
+                }
 
-                        Divider()
-                        Toggle("启用调度", isOn: Binding(
+                NativeSettingsGroup(title: "调度") {
+                    NativeSettingsToggleRow(
+                        "启用调度",
+                        isOn: Binding(
                             get: { state.schedulerEnabled },
                             set: { state.setSchedulerEnabled($0) }
-                        ))
-                        if state.schedulerEnabled {
-                            Toggle("自动开始", isOn: $state.enabledStartTime)
-                            TextField("开始时间（HH:mm）", text: $state.startTime)
+                        ),
+                        showsDivider: state.schedulerEnabled
+                    )
+                    if state.schedulerEnabled {
+                        NativeSettingsToggleRow("自动开始", isOn: $state.enabledStartTime)
+                        NativeSettingsRow(title: "开始时间") {
+                            TextField("HH:mm", text: $state.startTime)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
                                 .disabled(!state.enabledStartTime)
-                            Toggle("自动停止", isOn: $state.enabledEndTime)
-                            TextField("停止时间（HH:mm）", text: $state.endTime)
+                        }
+                        NativeSettingsToggleRow("自动停止", isOn: $state.enabledEndTime)
+                        NativeSettingsRow(title: "停止时间") {
+                            TextField("HH:mm", text: $state.endTime)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
                                 .disabled(!state.enabledEndTime)
+                        }
+                        NativeSettingsRow(title: "活动日", showsDivider: false) {
                             dayPicker
                         }
-                        HStack {
-                            Spacer()
-                            Button("恢复") { state.refreshDraft(from: model) }
-                            Button("保存") { save(model) }
-                                .keyboardShortcut(.defaultAction)
-                                .disabled(!state.isDirty)
-                        }
                     }
-
-                    queueItemsSection(model)
                 }
-                .padding(22)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                queueItemsSection(model)
             }
         } else {
             ContentUnavailableFallback(title: "没有队列", message: "新建一个队列开始管理任务。")
@@ -243,27 +240,60 @@ struct QueueView: View {
     }
 
     private var newQueueEditor: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            SettingsSectionView(title: "新建队列", description: "创建后可在此页面配置并安排下载任务。") {
-                TextField("队列名称", text: $state.newQueueName)
-                    .onSubmit { createQueue() }
-                HStack {
-                    Spacer()
-                    Button("取消") {
-                        state.isCreatingQueue = false
-                    }
-                    .keyboardShortcut(.cancelAction)
-                    Button("添加") {
-                        createQueue()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(state.newQueueName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
+            NativeSettingsGroup(title: "新建队列") {
+                NativeSettingsRow(title: "队列名称", showsDivider: false) {
+                    TextField("队列名称", text: $state.newQueueName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
+                        .onSubmit { createQueue() }
                 }
             }
-            Spacer()
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var actionBar: some View {
+        NativePageActionBar {
+            if state.isCreatingQueue {
+                Spacer()
+                Button("取消") {
+                    state.isCreatingQueue = false
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("添加") {
+                    createQueue()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(state.newQueueName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } else {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let model = selectedModel, state.isEditing {
+                    Button("恢复") { state.refreshDraft(from: model) }
+                    Button("保存") { save(model) }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
+                Button {
+                    guard let id = state.selectedQueueID else { return }
+                    store.stopQueue(id)
+                } label: {
+                    Label("停止队列", systemImage: "stop.fill")
+                }
+                .disabled(state.selectedQueueID == nil)
+                Button {
+                    guard let id = state.selectedQueueID else { return }
+                    store.startQueue(id)
+                } label: {
+                    Label("启动队列", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(state.selectedQueueID == nil)
+            }
+        }
     }
 
     private func createQueue() {
@@ -275,7 +305,6 @@ struct QueueView: View {
 
     private var dayPicker: some View {
         HStack(spacing: 6) {
-            Text("活动日")
             ForEach(1...7, id: \.self) { day in
                 let selected = state.daysOfWeek.contains(day)
                 Button(dayNames[day - 1]) {
@@ -294,7 +323,7 @@ struct QueueView: View {
 
     private func queueItemsSection(_ model: DownloadQueueModel) -> some View {
         let records = model.queueItems.compactMap { store.downloadList.record(id: $0) }
-        return SettingsSectionView(title: "项目", description: "按顺序运行队列中的下载任务。") {
+        return SettingsSectionView(title: "下载任务", description: "") {
             if records.isEmpty {
                 Text("队列中没有下载任务")
                     .foregroundStyle(.secondary)
@@ -480,13 +509,10 @@ struct ContentUnavailableFallback: View {
     let message: String
 
     var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "list.bullet.rectangle")
-                .font(.system(size: 34))
-                .foregroundStyle(.secondary)
-            Text(title).font(.headline)
-            Text(message).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        NativeEmptyState(
+            systemImage: "list.bullet.rectangle",
+            title: title,
+            message: message
+        )
     }
 }

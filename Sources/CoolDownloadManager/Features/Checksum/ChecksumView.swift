@@ -17,17 +17,19 @@ struct ChecksumView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            NativePageHeader(
+                title: "验证文件完整性",
+                subtitle: "已选中 \(records.count) 个任务",
+                systemImage: "checkmark.shield",
+                tint: .green
+            ) {
                 Picker("摘要算法", selection: $state.algorithm) {
                     ForEach(FileChecksumAlgorithm.allCases, id: \.self) { algorithm in
                         Text(algorithm.rawValue).tag(algorithm)
                     }
                 }
-                .frame(width: 190)
-                Text("已选中 \(records.count) 个任务")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+                .labelsHidden()
+                .frame(width: 160)
                 Button {
                     start()
                 } label: {
@@ -36,13 +38,11 @@ struct ChecksumView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(state.isChecking || records.isEmpty)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.bar)
+
             Divider()
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
+            NativePageContent(maxWidth: 1_120, spacing: 0) {
+                NativePageSurface(padding: 0) {
                     HStack(spacing: 10) {
                         Text("文件").frame(maxWidth: .infinity, alignment: .leading)
                         Text("状态").frame(width: 100, alignment: .leading)
@@ -51,8 +51,9 @@ struct ChecksumView: View {
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .padding(12)
-                    .background(.regularMaterial)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.bar)
                     ForEach(records) { record in
                         row(record)
                         Divider()
@@ -60,8 +61,7 @@ struct ChecksumView: View {
                 }
             }
 
-            Divider()
-            HStack {
+            NativePageActionBar {
                 if let message = state.errorMessage {
                     Text(message).font(.caption).foregroundStyle(.red)
                 }
@@ -71,12 +71,9 @@ struct ChecksumView: View {
                 }
                 .keyboardShortcut(.cancelAction)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.bar)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .frame(width: 940, height: 540)
+        .frame(width: 1_000, height: 580)
         .navigationTitle("验证文件完整性")
     }
 
@@ -95,7 +92,7 @@ struct ChecksumView: View {
                 .font(.caption)
                 .foregroundStyle(state.statusColor(for: record.id))
                 .frame(width: 100, alignment: .leading)
-                    TextField("例如 SHA-256:十六进制值", text: state.expectedBinding(for: record.id))
+            TextField("例如 SHA-256:十六进制值", text: state.expectedBinding(for: record.id))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 260)
             HStack(spacing: 4) {
@@ -116,7 +113,8 @@ struct ChecksumView: View {
             }
             .frame(width: 260, alignment: .leading)
         }
-        .padding(12)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func start() {

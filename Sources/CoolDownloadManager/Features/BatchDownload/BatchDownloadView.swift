@@ -38,8 +38,7 @@ struct BatchDownloadView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+            NativePageContent(maxWidth: NativePageLayout.contentWidth) {
                     SettingsSectionView(title: "下载地址", description: "使用 * 代表连续编号，例如 photo-*.jpg。") {
                         HStack {
                             TextField("https://example.com/photo-*.jpg", text: $state.pattern)
@@ -108,25 +107,22 @@ struct BatchDownloadView: View {
                         }
                         Toggle("创建后立即开始", isOn: $state.startImmediately)
                     }
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Divider()
-            HStack {
+            NativePageActionBar {
                 Spacer()
                 Button("取消", action: onClose)
                     .keyboardShortcut(.cancelAction)
                 Button("添加 \(state.preview?.count ?? 0) 个任务") {
                     confirm()
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(state.preview == nil)
             }
-            .padding(12)
         }
-        .frame(width: 720, height: 620)
+        .frame(width: 760, height: 640)
+        .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("批量下载")
         .fileImporter(
             isPresented: $state.isFolderPickerPresented,

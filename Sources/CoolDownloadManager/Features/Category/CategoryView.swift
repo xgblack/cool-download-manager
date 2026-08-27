@@ -22,22 +22,7 @@ struct CategoryView: View {
                 Divider()
                 editor
             }
-            Divider()
-            HStack {
-                if let error = state.errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                }
-                Spacer()
-                Button("保存") {
-                    save()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!state.isDirty || state.selectedID == nil)
-            }
-            .padding(12)
+            actionBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
@@ -118,6 +103,13 @@ struct CategoryView: View {
 
     private var categoryList: some View {
         VStack(spacing: 0) {
+            NativeSidebarHeader(
+                title: "分类",
+                count: state.items.count,
+                systemImage: "folder",
+                tint: .orange
+            )
+            Divider()
             List(selection: categorySelection) {
                 ForEach(state.items, id: \.id) { category in
                     HStack(spacing: 8) {
@@ -140,6 +132,9 @@ struct CategoryView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
             Divider()
             HStack {
                 Button {
@@ -166,7 +161,9 @@ struct CategoryView: View {
             }
             .buttonStyle(.borderless)
             .padding(10)
+            .background(.bar)
         }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     private var categorySelection: Binding<DownloadID?> {
@@ -188,19 +185,32 @@ struct CategoryView: View {
     @ViewBuilder
     private var editor: some View {
         if state.selectedID != nil {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    SettingsSectionView(title: "分类配置", description: "分类可按文件扩展名和 URL 通配符自动匹配。") {
-                        TextField("名称", text: $state.name)
-                        HStack {
+            NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
+                NativeSettingsGroup(title: "基本信息") {
+                    NativeSettingsRow(title: "名称") {
+                        TextField("分类名称", text: $state.name)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 310)
+                    }
+                    NativeSettingsRow(title: "系统图标") {
+                        HStack(spacing: 10) {
                             TextField("系统图标名称", text: $state.icon)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 240)
                             Image(systemName: state.icon.isEmpty ? "folder" : state.icon)
-                                .frame(width: 24)
                                 .foregroundStyle(.secondary)
+                                .frame(width: 24)
                         }
-                        Toggle("使用分类下载目录", isOn: $state.usePath)
-                        HStack {
+                    }
+                    NativeSettingsToggleRow(
+                        "使用分类下载目录",
+                        isOn: $state.usePath
+                    )
+                    NativeSettingsRow(title: "下载目录", showsDivider: false) {
+                        HStack(spacing: 8) {
                             TextField("下载目录", text: $state.path)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 310)
                                 .disabled(!state.usePath)
                             Button {
                                 state.isFolderPickerPresented = true
@@ -210,29 +220,46 @@ struct CategoryView: View {
                             .help("选择分类目录")
                             .disabled(!state.usePath)
                         }
-                        TextField("文件扩展名（空格或逗号分隔）", text: $state.fileTypes)
-                        TextField("URL 通配符（空格或换行分隔）", text: $state.urlPatterns)
-                    }
-                    if let category = state.currentItem {
-                        Text("分类 ID：\(category.id) · 已归类 \(category.items.count) 个任务")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                NativeSettingsGroup(title: "匹配规则") {
+                    NativeSettingsRow(title: "文件扩展名") {
+                        TextField("例如 dmg zip mp4", text: $state.fileTypes)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 310)
+                    }
+                    NativeSettingsRow(title: "地址通配符", showsDivider: false) {
+                        TextField("例如 *.example.com/*", text: $state.urlPatterns)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 310)
+                    }
+                }
             }
         } else {
-            VStack(spacing: 8) {
-                Image(systemName: "folder")
-                    .font(.system(size: 32))
-                    .foregroundStyle(.secondary)
-                Text("选择一个分类")
-                    .font(.headline)
-                Text("或使用左下角加号新增")
-                    .foregroundStyle(.secondary)
+            NativeEmptyState(
+                systemImage: "folder",
+                title: "选择一个分类",
+                message: "也可以使用左下角加号新建分类"
+            )
+        }
+    }
+
+    private var actionBar: some View {
+        NativePageActionBar {
+            if let error = state.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Spacer()
+            Button("保存") {
+                save()
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!state.isDirty || state.selectedID == nil)
         }
     }
 

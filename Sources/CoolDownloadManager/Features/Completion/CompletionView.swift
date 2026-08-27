@@ -16,17 +16,22 @@ struct CompletionView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("下载信息")
-                        .font(.headline)
-                    detailRow("文件大小", value: sizeText)
-                    detailRow("保存位置", value: currentRecord.destinationURL.path, selectable: true)
+            NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
+                NativeSettingsGroup(title: "下载信息") {
+                    NativeSettingsRow(title: "文件大小") {
+                        Text(sizeText)
+                            .monospacedDigit()
+                    }
+                    NativeSettingsRow(title: "保存位置", showsDivider: false) {
+                        Text(currentRecord.destinationURL.path)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: 280, alignment: .trailing)
+                    }
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Divider()
             actionBar
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -62,7 +67,7 @@ struct CompletionView: View {
     }
 
     private var actionBar: some View {
-        HStack(spacing: 10) {
+        NativePageActionBar {
             Button("重新下载", systemImage: "arrow.clockwise") {
                 store.redownload(id: currentRecord.id)
                 onClose()
@@ -89,9 +94,6 @@ struct CompletionView: View {
             .buttonStyle(.borderedProminent)
             .disabled(currentRecord.status != .completed)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 13)
-        .background(.bar)
     }
 
     private var fileIcon: some View {
@@ -110,23 +112,4 @@ struct CompletionView: View {
         return ByteCountText.string(fromByteCount: byteCount, formatter: formatter)
     }
 
-    @ViewBuilder
-    private func detailRow(_ title: String, value: String, selectable: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(title)
-                .foregroundStyle(.secondary)
-                .frame(width: 78, alignment: .leading)
-            Group {
-                if selectable {
-                    Text(value).textSelection(.enabled)
-                } else {
-                    Text(value)
-                }
-            }
-            .lineLimit(2)
-            .truncationMode(.middle)
-        }
-        .font(.callout)
-        .padding(.vertical, 2)
-    }
 }

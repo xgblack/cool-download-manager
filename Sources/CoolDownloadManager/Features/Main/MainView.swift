@@ -168,7 +168,6 @@ struct MainView: View {
             commandBar
             Divider()
             downloadTable
-            Divider()
             footer
         }
     }
@@ -369,7 +368,7 @@ struct MainView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .background(.bar)
     }
 
@@ -444,24 +443,20 @@ struct MainView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "arrow.down.circle")
-                .font(.system(size: 36))
-                .foregroundStyle(.secondary)
-            Text("暂无下载")
-                .font(.headline)
-            Text(store.downloadList.searchText.isEmpty ? "从上方添加一个下载地址，或从剪贴板新建下载" : "没有匹配的下载任务")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        NativeEmptyState(
+            systemImage: "arrow.down.circle",
+            title: "暂无下载",
+            message: store.downloadList.searchText.isEmpty
+                ? "从上方添加下载地址，或从剪贴板新建下载"
+                : "没有匹配的下载任务"
+        ) {
             Button("新建下载") { coordinator.presentAddDownload() }
                 .keyboardShortcut(.defaultAction)
-                .padding(.top, 4)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var footer: some View {
-        HStack(spacing: 14) {
+        NativePageActionBar {
             Text(footerSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -492,9 +487,6 @@ struct MainView: View {
             .disabled(!store.downloadList.hasSelection)
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     private var footerSummary: String {

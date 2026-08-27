@@ -19,24 +19,7 @@ struct PerHostSettingsView: View {
                 Divider()
                 editor
             }
-            Divider()
-            HStack(spacing: 12) {
-                if let error = state.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-                Spacer()
-                Button(isSaving ? "保存中…" : "保存") {
-                    save()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(isSaving)
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-            .background(.bar)
+            actionBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -63,16 +46,12 @@ struct PerHostSettingsView: View {
 
     private var hostList: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("主机")
-                    .font(.headline)
-                Spacer()
-                Text("\(state.items.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 44)
+            NativeSidebarHeader(
+                title: "主机",
+                count: state.items.count,
+                systemImage: "server.rack",
+                tint: .blue
+            )
             Divider()
             List(selection: $state.selectedHost) {
                 ForEach(state.items) { item in
@@ -88,6 +67,9 @@ struct PerHostSettingsView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
             Divider()
             HStack(spacing: 12) {
                 Button {
@@ -129,107 +111,72 @@ struct PerHostSettingsView: View {
     @ViewBuilder
     private var editor: some View {
         if state.selectedHost != nil {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    Text("主机覆盖")
-                        .font(.system(size: 28, weight: .bold))
-                        .accessibilityAddTraits(.isHeader)
-
-                    NativeSettingsGroup(title: "连接") {
-                        PerHostSettingsRow(title: "主机") {
-                            TextField("example.com 或 *.example.com", text: $state.host)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        PerHostSettingsRow(title: "用户名") {
-                            TextField("可选", text: $state.username)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        PerHostSettingsRow(title: "密码") {
-                            SecureField("可选", text: $state.password)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        PerHostSettingsRow(title: "客户端标识 User-Agent", showsDivider: false) {
-                            TextField("留空使用全局设置", text: $state.userAgent)
-                                .textFieldStyle(.roundedBorder)
-                        }
+            NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
+                NativeSettingsGroup(title: "连接") {
+                    NativeSettingsFieldRow(
+                        "主机",
+                        text: $state.host,
+                        placeholder: "example.com 或 *.example.com"
+                    )
+                    NativeSettingsFieldRow(
+                        "用户名",
+                        text: $state.username,
+                        placeholder: "留空使用全局设置"
+                    )
+                    NativeSettingsRow(title: "密码") {
+                        SecureField("留空使用全局设置", text: $state.password)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 310)
                     }
-
-                    NativeSettingsGroup(title: "下载") {
-                        PerHostSettingsRow(title: "线程数") {
-                            HStack {
-                                Spacer()
-                                TextField("留空使用全局设置", text: $state.threadCount)
-                                    .textFieldStyle(.roundedBorder)
-                                    .multilineTextAlignment(.trailing)
-                                    .monospacedDigit()
-                                    .frame(width: 180)
-                            }
-                        }
-                        PerHostSettingsRow(title: "速度限制（字节/秒）", showsDivider: false) {
-                            HStack {
-                                Spacer()
-                                TextField("0 表示不限", text: $state.speedLimit)
-                                    .textFieldStyle(.roundedBorder)
-                                    .multilineTextAlignment(.trailing)
-                                    .monospacedDigit()
-                                    .frame(width: 180)
-                            }
-                        }
-                    }
-
-                    Text("精确主机优先于通配符；留空字段沿用全局设置。密码只保存在本地配置中。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    NativeSettingsFieldRow(
+                        "客户端标识",
+                        text: $state.userAgent,
+                        placeholder: "留空使用全局设置",
+                        showsDivider: false
+                    )
                 }
-                .padding(.horizontal, 32)
-                .padding(.top, 24)
-                .padding(.bottom, 40)
-                .frame(maxWidth: 720, alignment: .topLeading)
-                .frame(maxWidth: .infinity, alignment: .top)
+
+                NativeSettingsGroup(title: "下载") {
+                    NativeSettingsRow(title: "线程数") {
+                        TextField("留空使用全局设置", text: $state.threadCount)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                            .frame(width: 160)
+                    }
+                    NativeSettingsRow(title: "速度限制（字节/秒）", showsDivider: false) {
+                        TextField("留空使用全局设置", text: $state.speedLimit)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                            .frame(width: 160)
+                    }
+                }
             }
         } else {
-            VStack(spacing: 8) {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 32))
-                    .foregroundStyle(.secondary)
-                Text("选择一个主机设置")
-                    .font(.headline)
-                Text("也可以新建主机设置")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            NativeEmptyState(
+                systemImage: "server.rack",
+                title: "选择一个主机设置",
+                message: "也可以新建主机设置"
+            )
         }
     }
-}
 
-private struct PerHostSettingsRow<Content: View>: View {
-    let title: String
-    let showsDivider: Bool
-    @ViewBuilder let content: () -> Content
-
-    init(
-        title: String,
-        showsDivider: Bool = true,
-        @ViewBuilder content: @escaping () -> Content
-    ) {
-        self.title = title
-        self.showsDivider = showsDivider
-        self.content = content
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .overlay(alignment: .bottom) {
-            if showsDivider {
-                Divider().padding(.leading, 14)
+    private var actionBar: some View {
+        NativePageActionBar {
+            if let error = state.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
             }
+            Spacer()
+            Button(isSaving ? "保存中…" : "保存") {
+                save()
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(isSaving)
         }
     }
 }

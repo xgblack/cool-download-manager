@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 private enum SettingsLayout {
     static let contentWidth: CGFloat = 780
@@ -224,7 +225,7 @@ struct NetworkSettingsPage: View {
 
             NativeSettingsGroup(title: "连接") {
                 NativeSettingsFieldRow(
-                    "客户端标识 User-Agent",
+                    "客户端标识",
                     text: state.binding(\.userAgent),
                     placeholder: "留空使用默认值"
                 )
@@ -295,6 +296,7 @@ struct NetworkSettingsPage: View {
 
 struct NotificationSettingsPage: View {
     @ObservedObject var state: SettingsViewState
+    @State private var selectedSoundField: NotificationSoundField?
 
     var body: some View {
         SettingsPage {
@@ -305,21 +307,36 @@ struct NotificationSettingsPage: View {
                     showsDivider: state.model.notificationSound
                 )
                 if state.model.notificationSound {
-                    NativeSettingsFieldRow(
-                        "普通通知声音",
-                        text: state.binding(\.generalNotificationSound),
-                        placeholder: "系统声音名称"
+                    NotificationSoundFileRow(
+                        "默认通知声音",
+                        path: state.binding(\.generalNotificationSound),
+                        onChoose: { selectedSoundField = .general },
+                        onPreview: {
+                            NotificationController.shared.preview(
+                                soundPath: state.model.generalNotificationSound
+                            )
+                        }
                     )
-                    NativeSettingsFieldRow(
-                        "错误通知声音",
-                        text: state.binding(\.errorNotificationSound),
-                        placeholder: "系统声音名称"
+                    NotificationSoundFileRow(
+                        "下载失败声音",
+                        path: state.binding(\.errorNotificationSound),
+                        onChoose: { selectedSoundField = .failure },
+                        onPreview: {
+                            NotificationController.shared.preview(
+                                soundPath: state.model.errorNotificationSound
+                            )
+                        }
                     )
-                    NativeSettingsFieldRow(
-                        "完成通知声音",
-                        text: state.binding(\.successNotificationSound),
-                        placeholder: "系统声音名称",
-                        showsDivider: false
+                    NotificationSoundFileRow(
+                        "下载完成声音",
+                        path: state.binding(\.successNotificationSound),
+                        showsDivider: false,
+                        onChoose: { selectedSoundField = .completion },
+                        onPreview: {
+                            NotificationController.shared.preview(
+                                soundPath: state.model.successNotificationSound
+                            )
+                        }
                     )
                 }
             }
@@ -354,6 +371,33 @@ struct NotificationSettingsPage: View {
                 }
             }
         }
+        .fileImporter(
+            isPresented: Binding(
+                get: { selectedSoundField != nil },
+                set: { if !$0 { selectedSoundField = nil } }
+            ),
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            defer { selectedSoundField = nil }
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            switch selectedSoundField {
+            case .general:
+                state.model.generalNotificationSound = url.path
+            case .failure:
+                state.model.errorNotificationSound = url.path
+            case .completion:
+                state.model.successNotificationSound = url.path
+            case nil:
+                break
+            }
+        }
+    }
+
+    private enum NotificationSoundField {
+        case general
+        case failure
+        case completion
     }
 }
 
@@ -527,6 +571,72 @@ struct NativeSettingsFieldRow: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 310)
         }
+    }
+}
+
+struct NotificationSoundFileRow: View {
+    let title: String
+    @Binding var path: String
+    let showsDivider: Bool
+    let onChoose: () -> Void
+    let onPreview: () -> Void
+
+    init(
+        _ title: String,
+        path: Binding<String>,
+        showsDivider: Bool = true,
+        onChoose: @escaping () -> Void,
+        onPreview: @escaping () -> Void
+    ) {
+        self.title = title
+        _path = path
+        self.showsDivider = showsDivider
+        self.onChoose = onChoose
+        self.onPreview = onPreview
+    }
+
+    var body: some View {
+        NativeSettingsRow(title: title, showsDivider: showsDivider) {
+            HStack(spacing: 8) {
+                Button(action: onPreview) {
+                    Image(systemName: "speaker.wave.2")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .help("预览声音")
+                .accessibilityLabel("预览\(title)")
+
+                Text(displayName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(path.isEmpty ? .secondary : .primary)
+                    .frame(width: 220, alignment: .leading)
+                    .help(path.isEmpty ? "使用系统默认声音" : path)
+
+                Button(action: onChoose) {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(.borderless)
+                .help("选择声音文件")
+                .accessibilityLabel("选择\(title)")
+
+                if !path.isEmpty {
+                    Button {
+                        path = ""
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("恢复系统默认声音")
+                    .accessibilityLabel("清除\(title)")
+                }
+            }
+        }
+    }
+
+    private var displayName: String {
+        guard !path.isEmpty else { return "使用系统默认声音" }
+        return URL(fileURLWithPath: path).lastPathComponent
     }
 }
 
