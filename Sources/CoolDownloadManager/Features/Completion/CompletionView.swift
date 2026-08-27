@@ -14,65 +14,84 @@ struct CompletionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            header
+            Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    HStack(alignment: .top, spacing: 14) {
-                        fileIcon
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("下载完成", systemImage: "checkmark.circle.fill")
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.green)
-                            Text(currentRecord.name)
-                                .font(.headline)
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                                .textSelection(.enabled)
-                        }
-                    }
-
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        detailRow("大小", value: sizeText)
-                        detailRow("保存位置", value: currentRecord.destinationURL.path, selectable: true)
-                    }
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("下载信息")
+                        .font(.headline)
+                    detailRow("文件大小", value: sizeText)
+                    detailRow("保存位置", value: currentRecord.destinationURL.path, selectable: true)
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-
             Divider()
-            HStack(spacing: 10) {
-                Button("打开文件", systemImage: "arrow.up.right.square") {
-                    coordinator.openFile(currentRecord)
-                    onClose()
-                }
-                .disabled(currentRecord.status != .completed)
-
-                Button("显示位置", systemImage: "folder") {
-                    coordinator.revealFile(currentRecord)
-                    onClose()
-                }
-                .disabled(currentRecord.status != .completed)
-
-                Spacer()
-
-                Button("重新下载", systemImage: "arrow.clockwise") {
-                    store.redownload(id: currentRecord.id)
-                    onClose()
-                }
-                .disabled(currentRecord.status != .completed)
-
-                Button("完成") {
-                    onClose()
-                }
-                .keyboardShortcut(.cancelAction)
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
+            actionBar
         }
-        .frame(minWidth: 560, maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 580, maxWidth: .infinity, minHeight: 340, maxHeight: .infinity)
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack(alignment: .bottomTrailing) {
+                fileIcon
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .green)
+                    .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(2))
+                    .offset(x: 4, y: 4)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Text("下载完成")
+                    .font(.title2.weight(.semibold))
+                Text(currentRecord.name)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 16)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+        .background(.bar)
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 10) {
+            Button("重新下载", systemImage: "arrow.clockwise") {
+                store.redownload(id: currentRecord.id)
+                onClose()
+            }
+            .disabled(currentRecord.status != .completed)
+
+            Spacer()
+
+            Button("完成") {
+                onClose()
+            }
+            .keyboardShortcut(.cancelAction)
+
+            Button("显示位置", systemImage: "folder") {
+                coordinator.revealFile(currentRecord)
+                onClose()
+            }
+            .disabled(currentRecord.status != .completed)
+
+            Button("打开文件", systemImage: "arrow.up.right.square") {
+                coordinator.openFile(currentRecord)
+                onClose()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(currentRecord.status != .completed)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
+        .background(.bar)
     }
 
     private var fileIcon: some View {
@@ -80,7 +99,7 @@ struct CompletionView: View {
         return Image(nsImage: image)
             .resizable()
             .interpolation(.high)
-            .frame(width: 48, height: 48)
+            .frame(width: 56, height: 56)
             .accessibilityHidden(true)
     }
 
@@ -96,7 +115,7 @@ struct CompletionView: View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(title)
                 .foregroundStyle(.secondary)
-                .frame(width: 74, alignment: .leading)
+                .frame(width: 78, alignment: .leading)
             Group {
                 if selectable {
                     Text(value).textSelection(.enabled)
@@ -108,5 +127,6 @@ struct CompletionView: View {
             .truncationMode(.middle)
         }
         .font(.callout)
+        .padding(.vertical, 2)
     }
 }

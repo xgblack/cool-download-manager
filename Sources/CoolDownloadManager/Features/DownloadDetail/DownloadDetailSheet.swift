@@ -5,13 +5,13 @@ struct DownloadDetailSheet: View {
     private let initialRecord: DownloadRecord
     @ObservedObject var store: DownloadListStore
     @ObservedObject var coordinator: AppCoordinator
-    @ObservedObject private var viewState: DownloadDetailViewState
+    @StateObject private var viewState: DownloadDetailViewState
 
     init(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator) {
         self.initialRecord = record
         self.store = store
         self.coordinator = coordinator
-        _viewState = ObservedObject(wrappedValue: DownloadDetailViewState(record: record))
+        _viewState = StateObject(wrappedValue: DownloadDetailViewState(record: record))
     }
 
     private var record: DownloadRecord {
@@ -20,8 +20,7 @@ struct DownloadDetailSheet: View {
 
     enum DetailTab: String, CaseIterable {
         case info = "信息"
-        case settings = "速度与设置"
-        case completion = "完成后动作"
+        case settings = "下载设置"
     }
 
     var body: some View {
@@ -44,8 +43,6 @@ struct DownloadDetailSheet: View {
                         infoPage
                     case .settings:
                         settingsPage
-                    case .completion:
-                        completionPage
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -79,12 +76,12 @@ struct DownloadDetailSheet: View {
                 ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)
             )
             detailRow("保存路径", record.destinationURL.path)
-            detailRow("源地址", record.source.link)
+            sourceRow
             if let etag = record.etag {
-            detailRow("ETag（实体标签）", etag)
+                detailRow("ETag（实体标签）", etag)
             }
-            if let modified = record.lastModified {
-            detailRow("Last-Modified（修改时间）", modified)
+            if let modified = modificationDateText {
+                detailRow("修改时间", modified)
             }
             if let error = record.error {
                 VStack(alignment: .leading, spacing: 4) {
@@ -100,19 +97,38 @@ struct DownloadDetailSheet: View {
 
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("任务级下载设置")
+            Text("任务下载设置")
                 .font(.headline)
-            Text("留空的数值会继承全局设置；保存后下次开始或重试任务时生效。")
-                .foregroundStyle(.secondary)
             LabeledContent("线程数") {
-                TextField("留空使用全局", text: $viewState.threadCount)
-                    .frame(width: 150)
+                VStack(alignment: .trailing, spacing: 4) {
+                    TextField("留空使用全局设置", text: $viewState.threadCount)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 190)
+                    effectLabel(threadCountEffectText)
+                }
             }
             LabeledContent("速度限制") {
-                TextField("字节/秒，留空使用全局", text: $viewState.speedLimit)
-                    .frame(width: 190)
+                VStack(alignment: .trailing, spacing: 4) {
+                    TextField("字节/秒，留空使用全局设置", text: $viewState.speedLimit)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 190)
+                    effectLabel(speedLimitEffectText)
+                }
             }
-            Toggle("显示分段信息", isOn: $viewState.showPartInfo)
+            LabeledContent("完成窗口") {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Picker("完成窗口", selection: $viewState.completionDialogMode) {
+                        Text("使用全局设置").tag(DownloadDetailViewState.CompletionDialogMode.global)
+                        Text("显示").tag(DownloadDetailViewState.CompletionDialogMode.show)
+                        Text("不显示").tag(DownloadDetailViewState.CompletionDialogMode.hide)
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                    effectLabel(completionDialogEffectText)
+                }
+            }
             if let error = viewState.errorMessage {
                 Text(error)
                     .font(.caption)
@@ -125,40 +141,6 @@ struct DownloadDetailSheet: View {
                 }
                 .disabled(viewState.isSaving)
             }
-        }
-    }
-
-    private var completionPage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("完成后动作")
-                .font(.headline)
-            Picker("电源动作", selection: $viewState.completionAction) {
-                Text("不执行动作").tag(QueueCompletionAction.none)
-                Text("关机").tag(QueueCompletionAction.shutdown)
-                Text("睡眠").tag(QueueCompletionAction.sleep)
-                Text("休眠").tag(QueueCompletionAction.hibernate)
-                Text("锁定屏幕").tag(QueueCompletionAction.lock)
-            }
-            Picker("完成窗口", selection: $viewState.completionDialogMode) {
-                Text("使用全局设置").tag(DownloadDetailViewState.CompletionDialogMode.global)
-                Text("显示").tag(DownloadDetailViewState.CompletionDialogMode.show)
-                Text("不显示").tag(DownloadDetailViewState.CompletionDialogMode.hide)
-            }
-            if let error = viewState.errorMessage {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            HStack {
-                Spacer()
-                Button(viewState.isSaving ? "保存中…" : "保存完成设置") {
-                    saveTaskSettings()
-                }
-                .disabled(viewState.isSaving)
-            }
-            Text("电源动作会在完成事件中记录；执行前需要 macOS 权限和用户确认。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -192,9 +174,7 @@ struct DownloadDetailSheet: View {
         let settings = DownloadTaskSettings(
             threadCount: threadCount,
             speedLimit: speedLimit,
-            completionAction: viewState.completionAction,
-            showCompletionDialog: showCompletionDialog,
-            showPartInfo: viewState.showPartInfo
+            showCompletionDialog: showCompletionDialog
         )
         viewState.isSaving = true
         viewState.errorMessage = nil
@@ -211,6 +191,11 @@ struct DownloadDetailSheet: View {
 
     private var actionBar: some View {
         HStack {
+            if canShowProgress {
+                Button("显示下载进度", systemImage: "chart.bar.xaxis") {
+                    coordinator.showProgressPanel(for: record, focus: true)
+                }
+            }
             if record.status == .completed {
                 Button("打开文件", systemImage: "arrow.up.right.square") {
                     coordinator.openFile(record)
@@ -255,6 +240,78 @@ struct DownloadDetailSheet: View {
         }
     }
 
+    private var sourceRow: some View {
+        LabeledContent("源地址") {
+            HStack(spacing: 6) {
+                Text(record.source.link)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Button {
+                    coordinator.copy(record.source.link)
+                    viewState.markLinkCopied()
+                } label: {
+                    Image(systemName: viewState.didCopyLink ? "checkmark" : "doc.on.doc")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                .help(viewState.didCopyLink ? "已复制" : "复制下载链接（⇧⌘C）")
+                .accessibilityLabel(viewState.didCopyLink ? "下载链接已复制" : "复制下载链接")
+            }
+        }
+    }
+
+    private func effectLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private var threadCountEffectText: String {
+        if !record.parts.isEmpty || record.status == .completed {
+            return "重新下载时生效"
+        }
+        switch record.status {
+        case .added, .paused, .failed, .cancelled:
+            return "下次开始时生效"
+        case .preparing, .downloading, .retrying:
+            return "尚未创建分片时本次生效"
+        case .completed:
+            return "重新下载时生效"
+        }
+    }
+
+    private var speedLimitEffectText: String {
+        switch record.status {
+        case .preparing, .downloading, .retrying:
+            return "保存后立即生效"
+        case .completed:
+            return "重新下载时生效"
+        case .added, .paused, .failed, .cancelled:
+            return "下次开始时生效"
+        }
+    }
+
+    private var completionDialogEffectText: String {
+        record.status == .completed ? "重新下载完成时生效" : "任务完成时生效"
+    }
+
+    private var modificationDateText: String? {
+        guard let rawValue = record.lastModified else { return nil }
+        guard let date = record.lastModifiedDate else { return rawValue }
+        return DownloadDetailDateText.string(from: date)
+    }
+
+    private var canShowProgress: Bool {
+        switch record.status {
+        case .preparing, .downloading, .paused, .retrying:
+            return true
+        case .added, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
     private var statusText: String {
         switch record.status {
         case .added: return "已添加"
@@ -284,13 +341,16 @@ struct DownloadDetailSheet: View {
         return formatter
     }
 
-    private var iconName: String {
-        switch record.status {
-        case .completed: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        case .paused: return "pause.circle.fill"
-        default: return "arrow.down.circle.fill"
-        }
+}
+
+enum DownloadDetailDateText {
+    static func string(from date: Date, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy年M月d日 HH:mm:ss"
+        return formatter.string(from: date)
     }
 }
 
@@ -306,22 +366,31 @@ private final class DownloadDetailViewState: ObservableObject {
 
     @Published var threadCount: String
     @Published var speedLimit: String
-    @Published var completionAction: QueueCompletionAction
     @Published var completionDialogMode: CompletionDialogMode
-    @Published var showPartInfo: Bool
+    @Published var didCopyLink = false
     @Published var isSaving = false
     @Published var errorMessage: String?
+    private var copyFeedbackRevision = 0
 
     init(record: DownloadRecord) {
         let settings = record.taskSettings ?? DownloadTaskSettings()
         threadCount = settings.threadCount.map(String.init) ?? ""
         speedLimit = settings.speedLimit.map(String.init) ?? ""
-        completionAction = settings.completionAction
         if let show = settings.showCompletionDialog {
             completionDialogMode = show ? .show : .hide
         } else {
             completionDialogMode = .global
         }
-        showPartInfo = settings.showPartInfo
+    }
+
+    func markLinkCopied() {
+        copyFeedbackRevision += 1
+        let revision = copyFeedbackRevision
+        didCopyLink = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let self, self.copyFeedbackRevision == revision else { return }
+            self.didCopyLink = false
+        }
     }
 }

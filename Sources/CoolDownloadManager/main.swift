@@ -208,6 +208,7 @@ struct CoolDownloadManagerApp: App {
                     }
                     window.minSize = NSSize(width: 790, height: 560)
                     window.toolbarStyle = .unified
+                    window.titlebarSeparatorStyle = .line
                 }
             }
         }

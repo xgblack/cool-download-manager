@@ -42,8 +42,8 @@ public enum ChecksumError: Error, LocalizedError, Sendable, Equatable {
         switch self {
         case .fileNotFound(let url): return "文件不存在：\(url.path)"
         case .notRegularFile(let url): return "路径不是普通文件：\(url.path)"
-        case .cancelled: return "校验已取消"
-        case .invalidExpectedChecksum: return "校验值格式无效"
+        case .cancelled: return "完整性验证已取消"
+        case .invalidExpectedChecksum: return "预期摘要格式无效"
         }
     }
 }

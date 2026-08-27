@@ -87,9 +87,7 @@ struct CoreTests {
         let settings = DownloadTaskSettings(
             threadCount: 2,
             speedLimit: 128,
-            completionAction: .lock,
-            showCompletionDialog: false,
-            showPartInfo: true
+            showCompletionDialog: false
         )
         _ = try await service.updateTaskSettings(id: id, settings: settings)
         #expect(await service.snapshot().downloads.first?.taskSettings == settings)
@@ -103,6 +101,46 @@ struct CoreTests {
         } catch let error as DownloadCoreError {
             #expect(error == .invalidTaskSettings("任务线程数必须在 1 到 64 之间"))
         }
+    }
+
+    @Test("running task applies speed-limit changes immediately")
+    func runningTaskSpeedLimitChange() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = SlowTransport(delay: .milliseconds(200))
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(speedLimit: 1)
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/live-limit.bin"),
+            folder: root.path,
+            start: true
+        ))
+
+        let requestDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < requestDeadline, transport.maxObserved() == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(transport.maxObserved() == 1)
+
+        _ = try await service.updateTaskSettings(
+            id: id,
+            settings: DownloadTaskSettings(speedLimit: 0)
+        )
+
+        let completionDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < completionDeadline {
+            if await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        await service.shutdown()
     }
 
     @Test("per-host headers and credentials override global request defaults")

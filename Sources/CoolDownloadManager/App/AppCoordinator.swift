@@ -310,6 +310,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             existing: progressPanel,
             title: "下载进度",
             size: NSSize(width: 720, height: 520),
+            floatsAboveNormalWindows: false,
             content: content
         )
         progressPanel = panel
@@ -339,7 +340,8 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         let panel = panel(
             existing: completionPanel,
             title: "下载完成",
-            size: NSSize(width: 580, height: 330),
+            size: NSSize(width: 600, height: 360),
+            floatsAboveNormalWindows: true,
             content: content
         )
         completionPanel = panel
@@ -350,6 +352,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         existing: NSPanel?,
         title: String,
         size: NSSize,
+        floatsAboveNormalWindows: Bool,
         content: Content
     ) -> NSPanel {
         let panel = existing ?? NSPanel(
@@ -359,8 +362,8 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             defer: false
         )
         panel.title = title
-        panel.isFloatingPanel = true
-        panel.level = .floating
+        panel.isFloatingPanel = floatsAboveNormalWindows
+        panel.level = floatsAboveNormalWindows ? .floating : .normal
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
@@ -371,15 +374,17 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     }
 
     private func present(_ panel: NSPanel, focus: Bool) {
-        if panel.isVisible {
+        if !panel.isVisible {
+            panel.center()
+        }
+        if focus {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        } else if panel.isFloatingPanel {
             panel.orderFrontRegardless()
         } else {
-            panel.center()
-            panel.orderFrontRegardless()
+            panel.orderFront(nil)
         }
-        guard focus else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
     }
 
     private func hideProgressPanel() {

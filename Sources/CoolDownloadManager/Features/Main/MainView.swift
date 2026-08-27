@@ -18,7 +18,11 @@ struct MainView: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(store: store, downloadList: downloadList, coordinator: coordinator)
-                .frame(minWidth: 170, idealWidth: viewState.sidebarWidth, maxWidth: 280)
+                .navigationSplitViewColumnWidth(
+                    min: 170,
+                    ideal: viewState.sidebarWidth,
+                    max: 280
+                )
         } detail: {
             NavigationStack(path: $coordinator.mainPath) {
                 rootContent
@@ -58,6 +62,7 @@ struct MainView: View {
             .frame(minWidth: 700, minHeight: 480)
         }
         .navigationSplitViewStyle(.balanced)
+        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $coordinator.mainSheet) { sheet in
             sheetView(sheet)
         }
@@ -321,6 +326,7 @@ struct MainView: View {
                 } label: {
                     Label("添加并开始", systemImage: "plus.circle.fill")
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(viewState.urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button {
@@ -364,6 +370,7 @@ struct MainView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+        .background(.bar)
     }
 
     private var downloadTable: some View {
@@ -381,6 +388,9 @@ struct MainView: View {
                                 onSelect: { store.downloadList.toggleSelection(record.id) },
                                 onOpen: { open(record) },
                                 onOpenDetail: { coordinator.openDetail(for: record.id) },
+                                onShowProgress: {
+                                    coordinator.showProgressPanel(for: record, focus: true)
+                                },
                                 onStart: { selectAndStart(record) },
                                 onPause: { selectAndPause(record) },
                                 onRetry: { selectAndRetry(record) },
@@ -408,7 +418,7 @@ struct MainView: View {
                         }
                     }
                 }
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(Color(nsColor: .windowBackgroundColor))
             }
         }
     }
@@ -484,6 +494,7 @@ struct MainView: View {
         .buttonStyle(.borderless)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+        .background(.bar)
     }
 
     private var footerSummary: String {
@@ -675,6 +686,7 @@ private struct DownloadTableRow: View {
     let onSelect: () -> Void
     let onOpen: () -> Void
     let onOpenDetail: () -> Void
+    let onShowProgress: () -> Void
     let onStart: () -> Void
     let onPause: () -> Void
     let onRetry: () -> Void
@@ -756,12 +768,15 @@ private struct DownloadTableRow: View {
         .contentShape(Rectangle())
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+        .background(isSelected ? Color.accentColor.opacity(0.13) : Color.clear)
         .onTapGesture(count: 2, perform: onOpen)
         .contextMenu {
             Button("打开文件", systemImage: "arrow.up.right.square") { onOpen() }
                 .disabled(record.status != .completed)
             Button("查看详情", systemImage: "info.circle") { onOpenDetail() }
+            if canShowProgress {
+                Button("显示下载进度", systemImage: "chart.bar.xaxis", action: onShowProgress)
+            }
             Divider()
             switch record.status {
             case .preparing, .downloading, .retrying:
@@ -787,7 +802,7 @@ private struct DownloadTableRow: View {
                     }
                 }
             }
-            Button("文件校验和", systemImage: "checkmark.shield", action: onChecksum)
+            Button("验证文件完整性", systemImage: "checkmark.shield", action: onChecksum)
                 .disabled(record.status != .completed)
             Divider()
             Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
@@ -810,6 +825,15 @@ private struct DownloadTableRow: View {
     private var percent: Int? {
         guard let total = record.totalBytes, total > 0 else { return nil }
         return Int((Double(record.downloadedBytes) / Double(total) * 100).rounded())
+    }
+
+    private var canShowProgress: Bool {
+        switch record.status {
+        case .preparing, .downloading, .paused, .retrying:
+            return true
+        case .added, .completed, .failed, .cancelled:
+            return false
+        }
     }
 
     private var sizeText: String {

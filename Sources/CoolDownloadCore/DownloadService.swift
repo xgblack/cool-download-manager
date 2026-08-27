@@ -9,6 +9,7 @@ public actor DownloadService {
     private var retryPolicy: DownloadRetryPolicy
     private var records: [DownloadID: DownloadRecord] = [:]
     private var tasks: [DownloadID: Task<Void, Never>] = [:]
+    private var activeRateLimiters: [DownloadID: DownloadRateLimiter] = [:]
     private var activeIDs: Set<DownloadID> = []
     private var queuedIDs: [DownloadID] = []
     private var queueConcurrencyLimits: [DownloadID: Int] = [:]
@@ -93,9 +94,9 @@ public actor DownloadService {
         perHostSettings = settings
     }
 
-    /// Persists per-task overrides. Running work keeps its current network
-    /// operation; the new values are used on the next start/retry so changing
-    /// a detail form cannot race an in-flight writer.
+    /// Persists per-task overrides. Active jobs adopt speed-limit changes
+    /// immediately; connection-count changes apply when a new part layout is
+    /// created so an in-flight writer is never repartitioned.
     @discardableResult
     public func updateTaskSettings(
         id: DownloadID,
@@ -110,6 +111,9 @@ public actor DownloadService {
         record.revision += 1
         records[id] = record
         try await store.save(record)
+        if let rateLimiter = activeRateLimiters[id] {
+            await rateLimiter.updateLimit(bytesPerSecond: effectiveSpeedLimit(record))
+        }
         emit(.updated(record))
         return record
     }
@@ -599,7 +603,10 @@ public actor DownloadService {
                 emit(.updated(record))
             }
 
-            let rateLimiter = DownloadRateLimiter(bytesPerSecond: effectiveSpeedLimit(record))
+            let latestRecord = records[id] ?? record
+            let rateLimiter = DownloadRateLimiter(bytesPerSecond: effectiveSpeedLimit(latestRecord))
+            activeRateLimiters[id] = rateLimiter
+            defer { activeRateLimiters[id] = nil }
             let (totalBytes, reportedTotal, etag, lastModified, serverFileName) = try await downloadWithRetry(
                 id: id,
                 source: effectiveSource(record.source),

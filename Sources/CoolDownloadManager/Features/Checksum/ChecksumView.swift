@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import CoolDownloadCore
 
@@ -5,19 +6,19 @@ struct ChecksumView: View {
     let records: [DownloadRecord]
     let service: DownloadService?
     let onClose: () -> Void
-    @ObservedObject private var state: ChecksumViewState
+    @StateObject private var state: ChecksumViewState
 
     init(records: [DownloadRecord], service: DownloadService?, onClose: @escaping () -> Void) {
         self.records = records
         self.service = service
         self.onClose = onClose
-        _state = ObservedObject(wrappedValue: ChecksumViewState(records: records))
+        _state = StateObject(wrappedValue: ChecksumViewState(records: records))
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Picker("算法", selection: $state.algorithm) {
+                Picker("摘要算法", selection: $state.algorithm) {
                     ForEach(FileChecksumAlgorithm.allCases, id: \.self) { algorithm in
                         Text(algorithm.rawValue).tag(algorithm)
                     }
@@ -30,11 +31,14 @@ struct ChecksumView: View {
                 Button {
                     start()
                 } label: {
-                    Label(state.isChecking ? "校验中…" : "开始校验", systemImage: "play.fill")
+                    Label(state.isChecking ? "正在验证…" : "开始验证", systemImage: "checkmark.shield")
                 }
+                .buttonStyle(.borderedProminent)
                 .disabled(state.isChecking || records.isEmpty)
             }
-            .padding(12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.bar)
             Divider()
 
             ScrollView {
@@ -42,13 +46,13 @@ struct ChecksumView: View {
                     HStack(spacing: 10) {
                         Text("文件").frame(maxWidth: .infinity, alignment: .leading)
                         Text("状态").frame(width: 100, alignment: .leading)
-                        Text("预期值（可选）").frame(width: 260, alignment: .leading)
-                        Text("计算值").frame(width: 260, alignment: .leading)
+                        Text("预期摘要（可选）").frame(width: 260, alignment: .leading)
+                        Text("计算摘要").frame(width: 260, alignment: .leading)
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(12)
-                    .background(.bar)
+                    .background(.regularMaterial)
                     ForEach(records) { record in
                         row(record)
                         Divider()
@@ -62,11 +66,18 @@ struct ChecksumView: View {
                     Text(message).font(.caption).foregroundStyle(.red)
                 }
                 Spacer()
+                Button("关闭") {
+                    onClose()
+                }
+                .keyboardShortcut(.cancelAction)
             }
-            .padding(12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.bar)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .frame(width: 940, height: 540)
-        .navigationTitle("文件校验和")
+        .navigationTitle("验证文件完整性")
     }
 
     private func row(_ record: DownloadRecord) -> some View {
@@ -100,7 +111,7 @@ struct ChecksumView: View {
                         Image(systemName: "doc.on.doc")
                     }
                     .buttonStyle(.borderless)
-                    .help("复制校验值")
+                    .help("复制计算摘要")
                 }
             }
             .frame(width: 260, alignment: .leading)
@@ -123,7 +134,7 @@ struct ChecksumView: View {
                     state.setStatus(record.id, "未完成", color: .orange)
                     continue
                 }
-                state.setStatus(record.id, "校验中", color: .accentColor)
+                state.setStatus(record.id, "计算中", color: .accentColor)
                 do {
                     let expectedText = state.expected[record.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let expected = expectedText.isEmpty ? nil : FileChecksum(string: expectedText)
@@ -138,7 +149,7 @@ struct ChecksumView: View {
                     if let expected {
                         state.setStatus(record.id, expected == calculated ? "匹配" : "不匹配", color: expected == calculated ? .green : .red)
                     } else {
-                        state.setStatus(record.id, "已完成", color: .green)
+                        state.setStatus(record.id, "已计算", color: .green)
                     }
                     let checksumToSave = expectedText.isEmpty ? nil : expected
                     try await service.updateChecksum(id: record.id, checksum: checksumToSave)

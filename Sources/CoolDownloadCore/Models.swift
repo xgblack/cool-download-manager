@@ -120,23 +120,17 @@ public struct DownloadTaskSettings: Codable, Sendable, Equatable {
     public var threadCount: Int?
     /// `nil` inherits the global limit; zero means unlimited.
     public var speedLimit: Int64?
-    public var completionAction: QueueCompletionAction
     /// `nil` inherits the global completion-dialog preference.
     public var showCompletionDialog: Bool?
-    public var showPartInfo: Bool
 
     public init(
         threadCount: Int? = nil,
         speedLimit: Int64? = nil,
-        completionAction: QueueCompletionAction = .none,
-        showCompletionDialog: Bool? = nil,
-        showPartInfo: Bool = false
+        showCompletionDialog: Bool? = nil
     ) {
         self.threadCount = threadCount
         self.speedLimit = speedLimit
-        self.completionAction = completionAction
         self.showCompletionDialog = showCompletionDialog
-        self.showPartInfo = showPartInfo
     }
 
     public func validated() throws -> Self {
@@ -168,7 +162,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var error: String?
     /// Optional expected checksum in the historical `ALGORITHM:hex` format.
     public var fileChecksum: String?
-    /// Per-task overrides and completion behavior. Absent for legacy records.
+    /// Per-task download and completion-dialog overrides.
     public var taskSettings: DownloadTaskSettings?
     /// The deterministic temporary filename used for this task. `nil` uses
     /// the default `.dl-{id}.cooldm.part` path.
@@ -224,6 +218,10 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var incompleteURL: URL {
         URL(fileURLWithPath: folder, isDirectory: true)
             .appendingPathComponent(incompleteFileName ?? ".dl-\(id).cooldm.part")
+    }
+
+    public var lastModifiedDate: Date? {
+        lastModified.flatMap(HTTPDateParser.date(from:))
     }
 }
 

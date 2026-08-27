@@ -35,7 +35,7 @@ struct SettingsView: View {
                 }
             }
             .listStyle(.sidebar)
-            .frame(minWidth: 190)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 190, max: 240)
         } detail: {
             NavigationStack(path: $viewState.path) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -75,9 +75,13 @@ struct SettingsView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
                     .background(.bar)
+                    .overlay(alignment: .top) {
+                        Divider()
+                    }
                 }
             }
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 790, minHeight: 560)
         .preferredColorScheme(preferredColorScheme)
         .background {
@@ -510,7 +514,7 @@ struct SettingsSectionView<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.title2.weight(.semibold))
+                .font(.headline)
             Text(description)
                 .font(.footnote)
                 .foregroundStyle(.secondary)

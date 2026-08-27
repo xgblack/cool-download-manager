@@ -56,6 +56,7 @@ struct DownloadProgressView: View {
             Divider()
             actionBar
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 660, maxWidth: .infinity, minHeight: 440, maxHeight: .infinity)
         .onChange(of: currentRecord.status) { status in
             if status == .completed {
@@ -68,6 +69,7 @@ struct DownloadProgressView: View {
         HStack(spacing: 12) {
             Image(systemName: headerIcon)
                 .font(.system(size: 25, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(headerColor)
                 .frame(width: 34, height: 34)
 
@@ -91,6 +93,7 @@ struct DownloadProgressView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 16)
+        .background(.bar)
     }
 
     private var overview: some View {
@@ -113,12 +116,19 @@ struct DownloadProgressView: View {
                     .progressViewStyle(.linear)
             }
 
-            HStack(spacing: 20) {
+            HStack(spacing: 0) {
                 metric("速度", value: speedText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Divider().frame(height: 34)
                 metric("剩余时间", value: remainingText ?? "--")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 18)
+                Divider().frame(height: 34)
                 metric("分片", value: "\(currentRecord.parts.count)")
-                Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 18)
             }
+            .padding(.vertical, 3)
 
             Text(currentRecord.source.link)
                 .font(.caption)
@@ -181,10 +191,10 @@ struct DownloadProgressView: View {
                     )
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .frame(height: 12)
-        .background(Color.secondary.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+        .background(Color.secondary.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
         .accessibilityLabel("各分片总体进度")
     }
 
@@ -253,9 +263,9 @@ struct DownloadProgressView: View {
             }
         }
         .font(.caption)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay {
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
         }
     }
@@ -280,7 +290,6 @@ struct DownloadProgressView: View {
             }
 
             Button("查看详情", systemImage: "info.circle") {
-                onClose()
                 coordinator.openDetail(for: currentRecord.id)
             }
             .disabled(store.record(id: currentRecord.id) == nil)
@@ -291,9 +300,9 @@ struct DownloadProgressView: View {
             }
             .keyboardShortcut(.cancelAction)
         }
-        .buttonStyle(.borderless)
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
+        .background(.bar)
     }
 
     private var sortedParts: [DownloadPart] {
