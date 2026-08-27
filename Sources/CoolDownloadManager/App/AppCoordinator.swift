@@ -52,8 +52,11 @@ final class AppCoordinator: NSObject, ObservableObject {
     private var menuBarController: MenuBarController?
     private let utilityPanels = UtilityPanelController()
     private weak var mainWindow: NSWindow?
+    private weak var settingsWindow: NSWindow?
     private var openMainWindowAction: (() -> Void)?
+    private var openSettingsWindowAction: (() -> Void)?
     private var focusMainWindowWhenRegistered = false
+    private var focusSettingsWindowWhenRegistered = false
     private var queuedBrowserRequests: [AddDownloadsRequest] = []
 
     init(store: AppStore) {
@@ -100,6 +103,10 @@ final class AppCoordinator: NSObject, ObservableObject {
         openMainWindowAction = action
     }
 
+    func configureSettingsWindowOpener(_ action: @escaping () -> Void) {
+        openSettingsWindowAction = action
+    }
+
     func registerMainWindow(_ window: NSWindow?) {
         guard let window else { return }
         mainWindow = window
@@ -125,6 +132,59 @@ final class AppCoordinator: NSObject, ObservableObject {
             return
         }
         focusMainWindow(window)
+    }
+
+    func registerSettingsWindow(_ window: NSWindow?) {
+        guard let window else { return }
+        settingsWindow = window
+        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.settings-window")
+        window.title = "下载管理器"
+        // Keep the title bar native. Extending a custom SwiftUI surface below
+        // the traffic lights makes the left sidebar depend on safe-area and
+        // vibrancy behavior that varies between macOS releases. A standard
+        // title bar gives the window one continuous separator and leaves the
+        // settings content responsible only for its own layout.
+        window.styleMask.remove(.fullSizeContentView)
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
+        window.toolbarStyle = .automatic
+        window.titlebarSeparatorStyle = .automatic
+        window.isMovableByWindowBackground = false
+        window.backgroundColor = .windowBackgroundColor
+        window.minSize = NSSize(width: 920, height: 640)
+        if focusSettingsWindowWhenRegistered {
+            focusSettingsWindowWhenRegistered = false
+            focusSettingsWindow(window)
+        }
+    }
+
+    private func resolvedSettingsWindow() -> NSWindow? {
+        if let settingsWindow, settingsWindow.windowNumber != 0 {
+            return settingsWindow
+        }
+        settingsWindow = nil
+        return NSApp.windows.first { window in
+            window.identifier?.rawValue == "com.cooldownloadmanager.settings-window"
+        }
+    }
+
+    private func focusSettingsWindow(_ window: NSWindow? = nil) {
+        guard let window = window ?? resolvedSettingsWindow() else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    func showSettingsWindow() {
+        guard let window = resolvedSettingsWindow() else {
+            focusSettingsWindowWhenRegistered = true
+            openSettingsWindowAction?()
+            DispatchQueue.main.async { [weak self] in
+                self?.focusSettingsWindow()
+            }
+            return
+        }
+        focusSettingsWindow(window)
     }
 
     private func resolvedMainWindow() -> NSWindow? {
@@ -178,9 +238,8 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 
     func presentSettings() {
-        // SwiftUI's Settings scene installs the standard macOS action.
         settingsDestination = .section(.general)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        showSettingsWindow()
     }
 
     func presentQueues() {
@@ -195,7 +254,7 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func presentPerHostSettings() {
         settingsDestination = .perHost
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        showSettingsWindow()
     }
 
     func presentCategories() {

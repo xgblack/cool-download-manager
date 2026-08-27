@@ -458,19 +458,21 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func savePerHostSettings(_ items: [PerHostSettingsItem]) {
+    @discardableResult
+    func savePerHostSettings(_ items: [PerHostSettingsItem]) async -> Bool {
         guard let perHostSettingsStore else {
             errorMessage = "主机设置存储尚未准备好"
-            return
+            return false
         }
-        Task { @MainActor [weak self] in
-            do {
-                let saved = try await perHostSettingsStore.save(items)
-                self?.perHostSettings = saved
-                await self?.service?.updatePerHostSettings(saved)
-            } catch {
-                self?.errorMessage = error.localizedDescription
-            }
+        do {
+            let saved = try await perHostSettingsStore.save(items)
+            perHostSettings = saved
+            await service?.updatePerHostSettings(saved)
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 

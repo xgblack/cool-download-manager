@@ -3,23 +3,25 @@ import AppKit
 import UniformTypeIdentifiers
 import CoolDownloadCore
 
-/// Native macOS preferences surface. The `Settings` scene supplies the
-/// standard window chrome; this view only owns the preference content.
+enum SettingsWindowLayout {
+    static let sidebarWidth: CGFloat = 224
+    static let collapsedSidebarWidth: CGFloat = 54
+    static let headerHeight: CGFloat = 58
+    static let actionBarHeight: CGFloat = 60
+}
+
+/// The settings window uses one explicit chrome grid below the native title bar.
+/// Keeping the rail, header and content in the same HStack prevents the
+/// separator from drifting when the sidebar is hidden or a child page opens.
 struct SettingsView: View {
     @ObservedObject var store: AppStore
     @ObservedObject var coordinator: AppCoordinator
-    let onOpenPerHostSettings: () -> Void
     @StateObject private var viewState: SettingsViewState
     @StateObject private var windowGuard = SettingsWindowGuard()
 
-    init(
-        store: AppStore,
-        coordinator: AppCoordinator,
-        onOpenPerHostSettings: @escaping () -> Void = {}
-    ) {
+    init(store: AppStore, coordinator: AppCoordinator) {
         self.store = store
         self.coordinator = coordinator
-        self.onOpenPerHostSettings = onOpenPerHostSettings
         _viewState = StateObject(wrappedValue: SettingsViewState(
             model: store.settings,
             perHostItems: store.perHostSettings
@@ -27,71 +29,53 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $viewState.columnVisibility) {
-            List(selection: $viewState.section) {
-                ForEach(SettingsSection.allCases, id: \.self) { section in
-                    Label(section.title, systemImage: section.systemImage)
-                        .tag(section)
+        VStack(spacing: 0) {
+            SettingsWindowHeader(
+                section: viewState.section,
+                isSidebarVisible: viewState.isSidebarVisible,
+                isDetailPage: !viewState.path.isEmpty,
+                onToggleSidebar: toggleSidebar,
+                onBack: closePerHostSettings
+            )
+
+            Divider()
+
+            HStack(spacing: 0) {
+                if viewState.isSidebarVisible && viewState.path.isEmpty {
+                    settingsSidebar
+                } else {
+                    Color.clear
+                        .frame(width: SettingsWindowLayout.collapsedSidebarWidth)
                 }
+
+                Divider()
+
+                detailContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 190, ideal: 190, max: 240)
-        } detail: {
-            NavigationStack(path: $viewState.path) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(viewState.section.title)
-                        .font(.title2.weight(.semibold))
-                        .padding(.horizontal, 24)
-                        .padding(.top, 22)
-                        .padding(.bottom, 4)
-                    Form {
-                        sectionContent
-                    }
-                    .formStyle(.grouped)
-                    .frame(maxWidth: 760, alignment: .leading)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .navigationDestination(for: SettingsRoute.self) { route in
-                    switch route {
-                    case .perHost:
-                        PerHostSettingsView(store: store, state: viewState.perHostState)
-                            .navigationTitle("每主机设置")
-                    }
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if viewState.path.isEmpty {
-                    HStack(spacing: 12) {
-                        Spacer()
-                        Button("恢复默认") {
-                            viewState.model = AppSettingsModel.defaults()
-                        }
-                        Button(viewState.isSaving ? "保存中…" : "保存") {
-                            save()
-                        }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(viewState.isSaving)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(.bar)
-                    .overlay(alignment: .top) {
-                        Divider()
-                    }
-                }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if viewState.path.isEmpty {
+                SettingsActionBar(
+                    isSaving: viewState.isSaving,
+                    onReset: resetToDefaults,
+                    onSave: save
+                )
             }
         }
-        .navigationSplitViewStyle(.balanced)
-        .frame(minWidth: 790, minHeight: 560)
+        .frame(minWidth: 920, minHeight: 640)
+        .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(preferredColorScheme)
         .background {
             WindowAccessor { window in
                 windowGuard.attach(window, isDirty: {
                     viewState.isDirty
                 }, discard: {
-                    viewState.markSaved(store.settings, perHostItems: store.perHostSettings)
-                }
-                )
+                    viewState.markAllSaved(
+                        model: store.settings,
+                        perHostItems: store.perHostSettings
+                    )
+                })
             }
         }
         .fileImporter(
@@ -113,220 +97,117 @@ struct SettingsView: View {
         }
         .onChange(of: store.settings) { updated in
             guard !viewState.isDirty, !viewState.isSaving else { return }
-            viewState.markSaved(updated, perHostItems: store.perHostSettings)
+            viewState.markModelSaved(updated)
         }
         .onChange(of: store.perHostSettings) { updated in
             guard !viewState.perHostState.isDirty else { return }
-            viewState.perHostState.replaceItems(updated)
+            viewState.markPerHostSaved(updated)
         }
         .onAppear {
             store.refreshAutoStartStatus()
             if !viewState.isDirty {
-                viewState.markSaved(store.settings, perHostItems: store.perHostSettings)
+                viewState.markAllSaved(
+                    model: store.settings,
+                    perHostItems: store.perHostSettings
+                )
             }
-            if coordinator.settingsDestination == .perHost {
-                viewState.path = [.perHost]
-            }
+            apply(coordinator.settingsDestination)
         }
         .onChange(of: coordinator.settingsDestination) { destination in
-            switch destination {
-            case .perHost:
-                viewState.section = .network
-                DispatchQueue.main.async {
-                    viewState.path = [.perHost]
+            apply(destination)
+        }
+        .onChange(of: viewState.section) { section in
+            guard viewState.path.isEmpty else { return }
+            coordinator.settingsDestination = .section(section)
+        }
+    }
+
+    private var settingsSidebar: some View {
+        List(selection: $viewState.section) {
+            Section {
+                ForEach(SettingsSection.allCases, id: \.self) { section in
+                    HStack(spacing: 10) {
+                        SettingsSidebarIcon(section: section)
+                        Text(section.title)
+                            .lineLimit(1)
+                    }
+                    .padding(.vertical, 3)
+                    .tag(section)
                 }
-            case .section(let section):
-                viewState.section = section
-                viewState.path = []
             }
         }
-        .onChange(of: viewState.section) { _ in
-            guard !viewState.path.isEmpty else { return }
-            viewState.path = []
-            coordinator.settingsDestination = .section(viewState.section)
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 10)
+        .frame(width: SettingsWindowLayout.sidebarWidth)
+        .frame(maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        if viewState.path.isEmpty {
+            settingsPage
+        } else {
+            PerHostSettingsView(store: store, state: viewState.perHostState)
         }
     }
 
     @ViewBuilder
-    private var sectionContent: some View {
+    private var settingsPage: some View {
         switch viewState.section {
         case .general:
-            generalSection
+            GeneralSettingsPage(store: store, state: viewState)
         case .downloads:
-            downloadsSection
+            DownloadSettingsPage(state: viewState) {
+                viewState.isFolderPickerPresented = true
+            }
         case .network:
-            networkSection
+            NetworkSettingsPage(state: viewState, onOpenPerHostSettings: openPerHostSettings)
+        case .notifications:
+            NotificationSettingsPage(state: viewState)
         case .advanced:
-            advancedSection
+            AdvancedSettingsPage(state: viewState)
         }
     }
 
-    private var generalSection: some View {
-        Group {
-            Section {
-                Picker("外观", selection: binding(\.theme)) {
-                    Text("跟随系统").tag("system")
-                    Text("浅色").tag("light")
-                    Text("深色").tag("dark")
-                }
-                HStack {
-                    Text("界面缩放")
-                    Slider(value: doubleBinding(\.uiScale, defaultValue: 1), in: 0.75...2, step: 0.05)
-                    Text(String(format: "%.0f%%", (viewState.model.uiScale ?? 1) * 100))
-                        .monospacedDigit()
-                        .frame(width: 48, alignment: .trailing)
-                }
-            } header: {
-                Text("外观")
-            }
-
-            Section {
-                Toggle("合并标题栏和顶部工具栏", isOn: binding(\.mergeTopBarWithTitleBar))
-                Toggle("显示工具栏图标标签", isOn: binding(\.showIconLabels))
-                Toggle("使用相对日期时间", isOn: binding(\.useRelativeDateTime))
-            } header: {
-                Text("窗口")
-            }
-
-            Section("单位") {
-                Picker("文件大小", selection: binding(\.sizeUnit)) {
-                    Text("二进制（KiB、MiB）").tag("BinaryBytes")
-                    Text("十进制（kB、MB）").tag("DecimalBytes")
-                }
-                Picker("传输速度", selection: binding(\.speedUnit)) {
-                    Text("二进制（MiB/s）").tag("BinaryBytes")
-                    Text("十进制（MB/s）").tag("DecimalBytes")
-                }
-                Toggle("使用平均速度", isOn: binding(\.useAverageSpeed))
-            }
-
-            Section {
-                Toggle("启用通知声音", isOn: binding(\.notificationSound))
-                if viewState.model.notificationSound {
-                    TextField("普通通知声音文件名", text: binding(\.generalNotificationSound))
-                    TextField("错误通知声音文件名", text: binding(\.errorNotificationSound))
-                    TextField("完成通知声音文件名", text: binding(\.successNotificationSound))
-                }
-                Toggle("显示下载进度窗口", isOn: binding(\.showDownloadProgressDialog))
-                if viewState.model.showDownloadProgressDialog {
-                    Toggle("下载开始时自动聚焦", isOn: binding(\.focusDownloadProgressDialogOnStart))
-                }
-                Toggle("显示下载完成窗口", isOn: binding(\.showDownloadCompletionDialog))
-                if viewState.model.showDownloadCompletionDialog {
-                    Toggle("下载完成时自动聚焦", isOn: binding(\.focusDownloadCompletionDialogOnFinish))
-                }
-            } header: {
-                Text("通知与弹窗")
-            }
-
-            Section {
-                Toggle("开机启动", isOn: binding(\.autoStartOnBoot))
-                LabeledContent("登录项状态") {
-                    Text(store.autoStartStatusTitle)
-                        .foregroundStyle(store.autoStartStatus == .enabled ? .green : .secondary)
-                }
-            } header: {
-                Text("系统")
-            }
+    private func toggleSidebar() {
+        guard viewState.path.isEmpty else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            viewState.isSidebarVisible.toggle()
         }
     }
 
-    private var downloadsSection: some View {
-        Group {
-            Section {
-                HStack {
-                    TextField("默认下载目录", text: binding(\.defaultDownloadFolder))
-                    Button("选择…", systemImage: "folder") {
-                        viewState.isFolderPickerPresented = true
-                    }
-                }
-                Toggle("默认使用分类", isOn: binding(\.useCategoryByDefault))
-            } header: {
-                Text("保存位置")
-            }
+    private func openPerHostSettings() {
+        coordinator.settingsDestination = .perHost
+        viewState.section = .network
+        viewState.path = [.perHost]
+        viewState.isSidebarVisible = false
+    }
 
-            Section("调度") {
-                numberStepperRow(
-                    "分段线程数",
-                    value: binding(\.threadCount),
-                    range: 1...64
-                )
-                numberStepperRow(
-                    "最大并发下载数（0 表示不限）",
-                    value: binding(\.maxConcurrentDownloads),
-                    range: 0...256
-                )
-                numberStepperRow(
-                    "最大重试次数",
-                    value: binding(\.maxDownloadRetryCount),
-                    range: 0...100
-                )
-                numberStepperRow(
-                    "全局速度限制（字节/秒，0 表示不限）",
-                    value: binding(\.speedLimit),
-                    range: 0...Int64.max,
-                    fieldWidth: 140
-                )
-                Toggle("动态创建分段", isOn: binding(\.dynamicPartCreation))
-            }
+    private func closePerHostSettings() {
+        viewState.path = []
+        viewState.section = .network
+        viewState.isSidebarVisible = true
+        coordinator.settingsDestination = .section(.network)
+    }
 
-            Section("文件与恢复") {
-                Toggle("给未完成文件追加扩展名", isOn: binding(\.appendExtensionToIncompleteDownloads))
-                Toggle("使用稀疏文件分配", isOn: binding(\.useSparseFileAllocation))
-                Toggle("取消下载时删除临时文件", isOn: binding(\.deletePartialFileOnDownloadCancellation))
-                Toggle("使用服务器 Last-Modified 时间", isOn: binding(\.useServerLastModifiedTime))
-            }
+    private func apply(_ destination: SettingsDestination) {
+        switch destination {
+        case .perHost:
+            viewState.section = .network
+            viewState.path = [.perHost]
+            viewState.isSidebarVisible = false
+        case .section(let section):
+            viewState.section = section
+            viewState.path = []
+            viewState.isSidebarVisible = true
         }
     }
 
-    private var networkSection: some View {
-        Group {
-            Section {
-                Picker("代理模式", selection: binding(\.proxyMode)) {
-                    Text("系统代理").tag("system")
-                    Text("直连").tag("direct")
-                    Text("手动代理").tag("manual")
-                    Text("PAC").tag("pac")
-                }
-                if viewState.model.proxyMode == "manual" {
-                    TextField("代理主机", text: binding(\.proxyHost))
-                    TextField("代理端口", value: binding(\.proxyPort), format: .number)
-                        .frame(width: 100)
-                    TextField("代理用户名", text: binding(\.proxyUsername))
-                    SecureField("代理密码", text: binding(\.proxyPassword))
-                } else if viewState.model.proxyMode == "pac" {
-                    TextField("PAC 地址", text: binding(\.proxyPACURL))
-                }
-            } header: {
-                Text("代理")
-            }
-
-            Section {
-                TextField("客户端标识 User-Agent", text: binding(\.userAgent))
-                Toggle("忽略 SSL 证书错误", isOn: binding(\.ignoreSSLCertificates))
-            } header: {
-                Text("连接")
-            }
-
-            Section("每主机设置") {
-                Button("管理每主机连接和限速…", systemImage: "server.rack") {
-                    coordinator.settingsDestination = .perHost
-                    viewState.path = [.perHost]
-                    onOpenPerHostSettings()
-                }
-            }
-        }
-    }
-
-    private var advancedSection: some View {
-        Group {
-            Section {
-                Toggle("跟踪磁盘上被删除的文件", isOn: binding(\.trackDeletedFilesOnDisk))
-            } header: {
-                Text("文件一致性")
-            }
-
-        }
+    private func resetToDefaults() {
+        viewState.model = AppSettingsModel.defaults()
     }
 
     private func save() {
@@ -335,7 +216,7 @@ struct SettingsView: View {
         Task { @MainActor in
             let success = await store.saveSettings(viewState.model)
             if success {
-                viewState.markSaved(store.settings, perHostItems: store.perHostSettings)
+                viewState.markModelSaved(store.settings)
             } else {
                 viewState.errorMessage = store.errorMessage ?? "设置保存失败"
             }
@@ -343,72 +224,8 @@ struct SettingsView: View {
         }
     }
 
-    private func binding<T>(_ keyPath: WritableKeyPath<AppSettingsModel, T>) -> Binding<T> {
-        Binding(
-            get: { viewState.model[keyPath: keyPath] },
-            set: { viewState.model[keyPath: keyPath] = $0 }
-        )
-    }
-
-    private func doubleBinding(_ keyPath: WritableKeyPath<AppSettingsModel, Double?>, defaultValue: Double) -> Binding<Double> {
-        Binding(
-            get: { viewState.model[keyPath: keyPath] ?? defaultValue },
-            set: { viewState.model[keyPath: keyPath] = $0 }
-        )
-    }
-
-    private func numberStepperRow(
-        _ title: String,
-        value: Binding<Int>,
-        range: ClosedRange<Int>,
-        fieldWidth: CGFloat = 96
-    ) -> some View {
-        HStack(spacing: 12) {
-            Text(title)
-            Spacer(minLength: 16)
-            HStack(spacing: 8) {
-                TextField("", value: value, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .font(.body.monospacedDigit())
-                    .frame(width: fieldWidth, height: 26)
-                    .accessibilityLabel(Text(title))
-                Stepper("", value: value, in: range, step: 1)
-                    .labelsHidden()
-                    .controlSize(.regular)
-                    .frame(width: 28, height: 26)
-                    .accessibilityLabel(Text("调整\(title)"))
-            }
-        }
-    }
-
-    private func numberStepperRow(
-        _ title: String,
-        value: Binding<Int64>,
-        range: ClosedRange<Int64>,
-        fieldWidth: CGFloat
-    ) -> some View {
-        HStack(spacing: 12) {
-            Text(title)
-            Spacer(minLength: 16)
-            HStack(spacing: 8) {
-                TextField("", value: value, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .font(.body.monospacedDigit())
-                    .frame(width: fieldWidth, height: 26)
-                    .accessibilityLabel(Text(title))
-                Stepper("", value: value, in: range, step: 1)
-                    .labelsHidden()
-                    .controlSize(.regular)
-                    .frame(width: 28, height: 26)
-                    .accessibilityLabel(Text("调整\(title)"))
-            }
-        }
-    }
-
     private var preferredColorScheme: ColorScheme? {
-        switch store.settings.theme.lowercased() {
+        switch viewState.model.theme.lowercased() {
         case "dark": return .dark
         case "light": return .light
         default: return nil
@@ -420,6 +237,7 @@ enum SettingsSection: String, CaseIterable, Hashable {
     case general
     case downloads
     case network
+    case notifications
     case advanced
 
     var title: String {
@@ -427,6 +245,7 @@ enum SettingsSection: String, CaseIterable, Hashable {
         case .general: return "通用"
         case .downloads: return "下载"
         case .network: return "网络"
+        case .notifications: return "通知"
         case .advanced: return "高级"
         }
     }
@@ -436,8 +255,92 @@ enum SettingsSection: String, CaseIterable, Hashable {
         case .general: return "gearshape"
         case .downloads: return "arrow.down.circle"
         case .network: return "network"
+        case .notifications: return "bell"
         case .advanced: return "slider.horizontal.3"
         }
+    }
+
+    var tint: Color {
+        switch self {
+        case .general: return .secondary
+        case .downloads: return .blue
+        case .network: return .green
+        case .notifications: return .orange
+        case .advanced: return .purple
+        }
+    }
+}
+
+private struct SettingsWindowHeader: View {
+    let section: SettingsSection
+    let isSidebarVisible: Bool
+    let isDetailPage: Bool
+    let onToggleSidebar: () -> Void
+    let onBack: () -> Void
+
+    private var leftRailWidth: CGFloat {
+        isSidebarVisible && !isDetailPage
+            ? SettingsWindowLayout.sidebarWidth
+            : SettingsWindowLayout.collapsedSidebarWidth
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 9) {
+                if isDetailPage {
+                    Button(action: onBack) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("返回网络设置")
+                } else {
+                    Button(action: onToggleSidebar) {
+                        Image(systemName: isSidebarVisible ? "sidebar.left" : "sidebar.right")
+                            .font(.system(size: 15, weight: .medium))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(isSidebarVisible ? "隐藏侧栏" : "显示侧栏")
+
+                    if isSidebarVisible {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text("设置")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 13)
+            .frame(width: leftRailWidth, height: SettingsWindowLayout.headerHeight)
+
+            Divider()
+
+            HStack(spacing: 11) {
+                Image(systemName: isDetailPage ? "server.rack" : section.systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isDetailPage ? .teal : section.tint)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        (isDetailPage ? Color.teal : section.tint).opacity(0.14),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+
+                Text(isDetailPage ? "每主机设置" : section.title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(height: SettingsWindowLayout.headerHeight)
+        .background(.bar)
     }
 }
 
@@ -446,7 +349,7 @@ final class SettingsViewState: ObservableObject {
     @Published var model: AppSettingsModel
     @Published var section: SettingsSection = .general
     @Published var path: [SettingsRoute] = []
-    @Published var columnVisibility: NavigationSplitViewVisibility = .all
+    @Published var isSidebarVisible = true
     @Published var isFolderPickerPresented = false
     @Published var isSaving = false
     @Published var errorMessage: String?
@@ -459,18 +362,68 @@ final class SettingsViewState: ObservableObject {
         self.perHostState = PerHostSettingsViewState(items: perHostItems)
     }
 
-    var isDirty: Bool { model != savedModel || perHostState.isDirty }
+    var isDirty: Bool {
+        model != savedModel || perHostState.isDirty
+    }
 
-    func markSaved(_ model: AppSettingsModel, perHostItems: [PerHostSettingsItem]) {
+    func binding<Value>(_ keyPath: WritableKeyPath<AppSettingsModel, Value>) -> Binding<Value> {
+        Binding(
+            get: { self.model[keyPath: keyPath] },
+            set: { self.model[keyPath: keyPath] = $0 }
+        )
+    }
+
+    func optionalDoubleBinding(
+        _ keyPath: WritableKeyPath<AppSettingsModel, Double?>,
+        defaultValue: Double
+    ) -> Binding<Double> {
+        Binding(
+            get: { self.model[keyPath: keyPath] ?? defaultValue },
+            set: { self.model[keyPath: keyPath] = min(max($0, 0.75), 2) }
+        )
+    }
+
+    func intBinding(
+        _ keyPath: WritableKeyPath<AppSettingsModel, Int>,
+        range: ClosedRange<Int>
+    ) -> Binding<Int> {
+        Binding(
+            get: { self.model[keyPath: keyPath] },
+            set: { self.model[keyPath: keyPath] = min(max($0, range.lowerBound), range.upperBound) }
+        )
+    }
+
+    func int64Binding(
+        _ keyPath: WritableKeyPath<AppSettingsModel, Int64>,
+        range: ClosedRange<Int64>
+    ) -> Binding<Int64> {
+        Binding(
+            get: { self.model[keyPath: keyPath] },
+            set: { self.model[keyPath: keyPath] = min(max($0, range.lowerBound), range.upperBound) }
+        )
+    }
+
+    func regenerateAPIKey() {
+        model.apiAuthKey = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    func markModelSaved(_ model: AppSettingsModel) {
         self.model = model
         savedModel = model
-        perHostState.replaceItems(perHostItems)
+    }
+
+    func markPerHostSaved(_ items: [PerHostSettingsItem]) {
+        perHostState.replaceItems(items)
+    }
+
+    func markAllSaved(model: AppSettingsModel, perHostItems: [PerHostSettingsItem]) {
+        markModelSaved(model)
+        markPerHostSaved(perHostItems)
     }
 }
 
 @MainActor
 private final class SettingsWindowGuard: NSObject, ObservableObject, NSWindowDelegate {
-    private weak var window: NSWindow?
     private var dirty: () -> Bool = { false }
     private var discard: () -> Void = {}
 
@@ -480,7 +433,6 @@ private final class SettingsWindowGuard: NSObject, ObservableObject, NSWindowDel
         discard: @escaping () -> Void
     ) {
         guard let window else { return }
-        self.window = window
         self.dirty = isDirty
         self.discard = discard
         if window.delegate !== self {
@@ -501,24 +453,5 @@ private final class SettingsWindowGuard: NSObject, ObservableObject, NSWindowDel
             discard()
         }
         return shouldClose
-    }
-}
-
-/// Shared heading used by the secondary per-host editor while the primary
-/// settings surface uses native `Form` sections.
-struct SettingsSectionView<Content: View>: View {
-    let title: String
-    let description: String
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-            Text(description)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            content()
-        }
     }
 }
