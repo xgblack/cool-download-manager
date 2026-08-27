@@ -7,6 +7,7 @@ OUTPUT_DIR="$ROOT_DIR/dist"
 DERIVED_DATA_DIR="$ROOT_DIR/.build/XcodePackageData"
 SIGNING_IDENTITY="${CDM_SIGNING_IDENTITY:--}"
 VERSION="${CDM_VERSION:-0.1.0}"
+DMG_BACKGROUND_FILE="$ROOT_DIR/packaging/macos/DMGBackground.png"
 MAKE_ZIP=0
 MAKE_DMG=0
 SKIP_BUILD=0
@@ -26,7 +27,7 @@ Options:
   --signing-identity <identity>    codesign identity; '-' means ad hoc
   --no-sign                        Leave the bundle unsigned
   --zip                            Also create a zip archive
-  --dmg                            Also create a compressed DMG
+  --dmg                            Also create a drag-to-Applications DMG
   --skip-build                     Reuse existing Xcode products
   -h, --help                       Show this help
 
@@ -100,6 +101,17 @@ case "$CONFIGURATION" in
         exit 64
         ;;
 esac
+
+if [[ "$MAKE_DMG" -eq 1 ]]; then
+    if ! command -v create-dmg >/dev/null 2>&1; then
+        echo "create-dmg is required for DMG packaging. Install it with: brew install create-dmg" >&2
+        exit 1
+    fi
+    if [[ ! -f "$DMG_BACKGROUND_FILE" ]]; then
+        echo "Missing DMG background: $DMG_BACKGROUND_FILE" >&2
+        exit 1
+    fi
+fi
 
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
     if [[ -n "${CDM_DEVELOPER_DIR:-}" ]]; then
@@ -182,14 +194,30 @@ fi
 
 if [[ "$MAKE_DMG" -eq 1 ]]; then
     DMG_PATH="$OUTPUT_DIR/酷的下载管理器-macOS-$ARCH.dmg"
-    rm -f "$DMG_PATH"
+    DMG_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cooldm-dmg.XXXXXX")"
+    trap 'rm -rf "$DMG_STAGE_DIR"' EXIT
+
+    ditto "$APP_DIR" "$DMG_STAGE_DIR/$APP_NAME"
     echo "==> Creating $DMG_PATH"
-    hdiutil create \
-        -volname "酷的下载管理器" \
-        -srcfolder "$APP_DIR" \
-        -ov \
-        -format UDZO \
-        "$DMG_PATH"
+    create-dmg \
+        --volname "酷的下载管理器" \
+        --background "$DMG_BACKGROUND_FILE" \
+        --window-pos 200 120 \
+        --window-size 720 420 \
+        --text-size 14 \
+        --icon-size 112 \
+        --icon "$APP_NAME" 170 220 \
+        --hide-extension "$APP_NAME" \
+        --app-drop-link-name "应用程序" \
+        --app-drop-link 550 220 \
+        --format UDZO \
+        --no-internet-enable \
+        --overwrite \
+        "$DMG_PATH" \
+        "$DMG_STAGE_DIR"
+
+    rm -rf "$DMG_STAGE_DIR"
+    trap - EXIT
 fi
 
 echo "==> App bundle: $APP_DIR"

@@ -90,9 +90,12 @@ CoolDownloadManagerCLI
 ## Package A macOS App
 
 Use the checked-in packaging script for a local `.app` and optional archives.
-It automatically selects `/Applications/Xcode-beta.app` when present:
+It automatically selects `/Applications/Xcode-beta.app` when present. DMG
+packaging uses `create-dmg` to produce the standard drag-to-Applications Finder
+window, so install that tool once before requesting a DMG:
 
 ```sh
+brew install create-dmg
 ./scripts/package-macos.sh --dmg --zip
 ```
 

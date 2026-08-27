@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" viewBox="0 0 720 420" fill="none">
+  <title>酷的下载管理器安装背景</title>
+  <desc>提示用户将应用拖到应用程序文件夹的 Finder 背景。</desc>
+
+  <rect width="720" height="420" fill="#F6F8FA"/>
+  <rect width="720" height="96" fill="#FFFFFF"/>
+  <path d="M0 95.5H720" stroke="#DDE3E8"/>
+
+  <text
+    x="360"
+    y="58"
+    fill="#172536"
+    font-family="PingFang SC, Helvetica Neue, sans-serif"
+    font-size="20"
+    font-weight="600"
+    text-anchor="middle"
+  >拖到“应用程序”中完成安装</text>
+
+  <path d="M292 220H424" stroke="#238F8A" stroke-width="10" stroke-linecap="round"/>
+  <path d="M405 199L428 220L405 241" stroke="#238F8A" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

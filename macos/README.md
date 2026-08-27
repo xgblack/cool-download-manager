@@ -35,12 +35,14 @@ parity remain release-phase work. They are tracked in the Swift rewrite plan und
 Create a local app bundle or DMG from the repository root:
 
 ```sh
+brew install create-dmg
 ./scripts/package-macos.sh --dmg --zip
 ```
 
 The script uses `Xcode-beta` when it is installed in `/Applications`, creates
 an ad-hoc signed development bundle by default, and writes artifacts under
-`dist/`. A Developer ID identity can be supplied with
+`dist/`. The DMG opens as a Finder window with the app, an Applications folder
+link, and a drag arrow. A Developer ID identity can be supplied with
 `--signing-identity` for a distribution build.
 
 For local integration smoke tests, the app keeps the legacy default of an unauthenticated loopback API on port `15151`. Set `CDM_API_KEY` to require `X-Api-Key`, or `CDM_HTTP_PORT` to use another loopback port. These environment overrides are temporary until the native settings screen owns the same values.
