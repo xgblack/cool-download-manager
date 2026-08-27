@@ -112,7 +112,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         mainWindow = window
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.main-window")
         window.title = "酷的下载管理器"
-        window.minSize = NSSize(width: 1_040, height: 640)
+        window.minSize = NSSize(width: 1_200, height: 640)
         applyWindowSettings()
         if focusMainWindowWhenRegistered {
             focusMainWindowWhenRegistered = false

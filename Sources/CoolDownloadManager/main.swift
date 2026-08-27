@@ -87,6 +87,7 @@ struct CoolDownloadManagerApp: App {
                     }
                 }
         }
+        .defaultSize(width: 1_280, height: 760)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("新建下载") {
