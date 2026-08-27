@@ -1,6 +1,13 @@
 import SwiftUI
 import CoolDownloadCore
 
+func emptyPartsMessage(for record: DownloadRecord) -> String {
+    guard record.status == .failed else {
+        return "等待服务器返回分片信息"
+    }
+    return record.error.map { "失败：\($0)" } ?? "下载失败"
+}
+
 /// Native macOS progress surface for one download.
 ///
 /// The original client keeps the aggregate progress and the individual
@@ -148,9 +155,9 @@ struct DownloadProgressView: View {
             }
 
             if currentRecord.parts.isEmpty {
-                Text("等待服务器返回分片信息")
+                Text(emptyPartsMessage(for: currentRecord))
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(currentRecord.status == .failed ? .red : .secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 12)
             } else {

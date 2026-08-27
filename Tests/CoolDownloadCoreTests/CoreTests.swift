@@ -1198,7 +1198,25 @@ struct CoreTests {
         #expect(record.parts.count == 3)
         #expect(record.parts.allSatisfy { $0.completed })
         #expect(try Data(contentsOf: record.destinationURL) == content)
-        #expect(transport.requestCount() == 3)
+        #expect(transport.requestCount() == 4)
+        #expect(transport.recordedRequests().first?.httpMethod == "GET")
+        #expect(transport.recordedRequests().first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+    }
+
+    @Test("HTTP probe cancels a full-body fallback when Range is ignored")
+    func rangeProbeCancelsIgnoredRangeBody() async throws {
+        let transport = IgnoringRangeTransport(totalBytes: 6_114_656_256)
+        let downloader = HTTPDownloader(transport: transport)
+
+        let metadata = try await downloader.probe(source: DownloadSource(
+            kind: .http,
+            link: "https://fixture.invalid/large.iso"
+        ))
+
+        #expect(metadata.totalBytes == 6_114_656_256)
+        #expect(!metadata.supportsRanges)
+        #expect(transport.requestCount() == 1)
+        #expect(transport.wasBodyCancelled())
     }
 
     @Test("HLS downloader selects a variant and concatenates media segments")
@@ -1356,6 +1374,82 @@ struct CoreTests {
         #expect(try Data(contentsOf: record.incompleteURL) == Data(repeating: 0, count: 4) + Data("456789".utf8))
     }
 
+    @Test("HTTP probe preserves GET for method-bound signed URLs")
+    func signedURLProbeUsesRangeGET() async throws {
+        let transport = MemoryTransport()
+        transport.handler = { request in
+            guard request.httpMethod == "GET",
+                  request.value(forHTTPHeaderField: "Range") == "bytes=0-0" else {
+                return MemoryTransport.reply(status: 403, headers: [:], body: Data())
+            }
+            return MemoryTransport.reply(
+                status: 206,
+                headers: [
+                    "Content-Range": "bytes 0-0/32",
+                    "Content-Length": "1",
+                    "ETag": "\"signed-v1\""
+                ],
+                body: Data([0])
+            )
+        }
+        let downloader = HTTPDownloader(transport: transport)
+
+        let metadata = try await downloader.probe(source: DownloadSource(
+            kind: .http,
+            link: "https://fixture.invalid/file.bin?signature=get-only"
+        ))
+
+        #expect(metadata.totalBytes == 32)
+        #expect(metadata.supportsRanges)
+        #expect(metadata.etag == "\"signed-v1\"")
+        let requests = transport.recordedRequests()
+        #expect(requests.count == 1)
+        #expect(requests.first?.httpMethod == "GET")
+        #expect(requests.first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+    }
+
+    @Test("HTTP probe surfaces a signed URL 403 without retrying")
+    func signedURLProbeDoesNotRetryForbidden() async throws {
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(status: 403, headers: [:], body: Data())
+        }
+        let downloader = HTTPDownloader(transport: transport)
+
+        do {
+            _ = try await downloader.probe(source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/file.bin?signature=forbidden"
+            ))
+            Issue.record("a forbidden response should fail")
+        } catch let error as DownloadCoreError {
+            #expect(error == .httpStatus(403))
+        }
+
+        let requests = transport.recordedRequests()
+        #expect(requests.count == 1)
+        #expect(requests.first?.httpMethod == "GET")
+        #expect(requests.first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+    }
+
+    @Test("HTTP probe propagates transport failures without retrying")
+    func probeDoesNotRetryTransportFailure() async throws {
+        let transport = FailingTransport(error: URLError(.timedOut))
+        let downloader = HTTPDownloader(transport: transport)
+
+        do {
+            _ = try await downloader.probe(source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/file.bin"
+            ))
+            Issue.record("a transport failure should be propagated")
+        } catch let error as URLError {
+            #expect(error.code == .timedOut)
+        }
+
+        #expect(transport.requestCount() == 1)
+    }
+
     @Test("part file preparation preserves resume bytes while extending allocation")
     func partFilePreparationPreservesResumeBytes() async throws {
         let root = try makeTemporaryDirectory()
@@ -1506,9 +1600,12 @@ private final class MemoryTransport: HTTPTransport, @unchecked Sendable {
         let body: Data
     }
 
+    private let lock = NSLock()
+    private var requests: [URLRequest] = []
     var handler: (@Sendable (URLRequest) -> Reply)?
 
     func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        lock.withLock { requests.append(request) }
         guard let reply = handler?(request) else {
             throw URLError(.unknown)
         }
@@ -1521,6 +1618,64 @@ private final class MemoryTransport: HTTPTransport, @unchecked Sendable {
 
     static func reply(status: Int, headers: [String: String], body: Data) -> Reply {
         Reply(status: status, headers: headers, body: body)
+    }
+
+    func recordedRequests() -> [URLRequest] {
+        lock.withLock { requests }
+    }
+}
+
+private final class IgnoringRangeTransport: HTTPTransport, @unchecked Sendable {
+    private let totalBytes: Int64
+    private let lock = NSLock()
+    private var requests = 0
+    private var bodyCancelled = false
+
+    init(totalBytes: Int64) {
+        self.totalBytes = totalBytes
+    }
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        lock.withLock { requests += 1 }
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.yield(Data([0]))
+            continuation.finish()
+        }
+        return HTTPTransportResponse(
+            statusCode: 200,
+            headers: ["Content-Length": String(totalBytes)],
+            body: stream,
+            cancelBody: { [weak self] in
+                self?.lock.withLock { self?.bodyCancelled = true }
+            }
+        )
+    }
+
+    func requestCount() -> Int {
+        lock.withLock { requests }
+    }
+
+    func wasBodyCancelled() -> Bool {
+        lock.withLock { bodyCancelled }
+    }
+}
+
+private final class FailingTransport: HTTPTransport, @unchecked Sendable {
+    private let failure: URLError
+    private let lock = NSLock()
+    private var requests = 0
+
+    init(error: URLError) {
+        self.failure = error
+    }
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        lock.withLock { requests += 1 }
+        throw failure
+    }
+
+    func requestCount() -> Int {
+        lock.withLock { requests }
     }
 }
 
@@ -1642,12 +1797,14 @@ private final class RangeTransport: HTTPTransport, @unchecked Sendable {
     private let content: Data
     private let lock = NSLock()
     private(set) var rangeRequests = 0
+    private var requests: [URLRequest] = []
 
     init(content: Data) {
         self.content = content
     }
 
     func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        lock.withLock { requests.append(request) }
         let stream: AsyncThrowingStream<Data, Error>
         if request.httpMethod == "HEAD" {
             stream = AsyncThrowingStream { continuation in
@@ -1694,6 +1851,10 @@ private final class RangeTransport: HTTPTransport, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return rangeRequests
+    }
+
+    func recordedRequests() -> [URLRequest] {
+        lock.withLock { requests }
     }
 
     private func parseRange(_ value: String) -> (Int64, Int64)? {

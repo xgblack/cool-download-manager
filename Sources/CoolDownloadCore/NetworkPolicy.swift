@@ -141,25 +141,29 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
         guard let response = rawResponse as? HTTPURLResponse else {
             throw DownloadCoreError.responseMismatch("响应不是 HTTP")
         }
-        let body = AsyncThrowingStream<Data, Error> { continuation in
-            Task {
-                do {
-                    var buffer = Data()
-                    buffer.reserveCapacity(64 * 1024)
-                    for try await byte in bytes {
-                        buffer.append(byte)
-                        if buffer.count >= 64 * 1024 {
-                            continuation.yield(buffer)
-                            buffer.removeAll(keepingCapacity: true)
-                        }
-                    }
-                    if !buffer.isEmpty {
+        let (body, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let producerTask = Task {
+            do {
+                var buffer = Data()
+                buffer.reserveCapacity(64 * 1024)
+                for try await byte in bytes {
+                    buffer.append(byte)
+                    if buffer.count >= 64 * 1024 {
                         continuation.yield(buffer)
+                        buffer.removeAll(keepingCapacity: true)
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                if !buffer.isEmpty {
+                    continuation.yield(buffer)
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        continuation.onTermination = { @Sendable termination in
+            if case .cancelled = termination {
+                producerTask.cancel()
             }
         }
         return HTTPTransportResponse(
@@ -167,7 +171,8 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
             headers: response.allHeaderFields.reduce(into: [String: String]()) { result, entry in
                 result[String(describing: entry.key)] = String(describing: entry.value)
             },
-            body: body
+            body: body,
+            cancelBody: { producerTask.cancel() }
         )
     }
 

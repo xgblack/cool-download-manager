@@ -54,15 +54,26 @@ public struct HTTPTransportResponse: Sendable {
     public let statusCode: Int
     public let headers: [String: String]
     public let body: AsyncThrowingStream<Data, Error>
+    private let cancelBodyHandler: @Sendable () -> Void
 
-    public init(statusCode: Int, headers: [String: String], body: AsyncThrowingStream<Data, Error>) {
+    public init(
+        statusCode: Int,
+        headers: [String: String],
+        body: AsyncThrowingStream<Data, Error>,
+        cancelBody: @escaping @Sendable () -> Void = {}
+    ) {
         self.statusCode = statusCode
         self.headers = headers
         self.body = body
+        self.cancelBodyHandler = cancelBody
     }
 
     public func header(_ name: String) -> String? {
         headers.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
+    }
+
+    public func cancelBody() {
+        cancelBodyHandler()
     }
 }
 
@@ -90,91 +101,33 @@ public final class HTTPDownloader: @unchecked Sendable {
 
     public func probe(source: DownloadSource) async throws -> HTTPResourceMetadata {
         let url = try validatedURL(source.link)
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 30
-        applyHeaders(source.headers, to: &request)
-
-        let response = try await transport.response(for: request)
-        let statusCode = response.statusCode
-        guard (200...299).contains(statusCode) || statusCode == 405 || statusCode == 501 else {
-            throw DownloadCoreError.httpStatus(statusCode)
+        do {
+            return try await probeRange(source: source, url: url)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as DownloadCoreError {
+            switch error {
+            case .responseMismatch:
+                // A non-conforming range response can still have a usable
+                // ordinary GET representation.
+                return try await probeSingleConnection(source: source, url: url)
+            case .httpStatus(let status) where status == 405 || status == 416 || status == 501:
+                // These statuses mean the range form is unavailable. Retry
+                // the metadata request without a Range header.
+                return try await probeSingleConnection(source: source, url: url)
+            default:
+                throw error
+            }
+        } catch {
+            try Task.checkCancellation()
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                throw CancellationError()
+            }
+            // Transport failures are not evidence that Range is unsupported.
+            // Propagate them instead of issuing a second request that can
+            // duplicate a timeout or hide the original network error.
+            throw error
         }
-        let length = try Self.validatedContentLength(response.header("Content-Length"))
-        let acceptsRanges = response.header("Accept-Ranges")?
-            .split(separator: ",")
-            .contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("bytes") == .orderedSame } == true
-        let etag = response.header("ETag")
-        let lastModified = response.header("Last-Modified")
-        let fileName = DownloadFileNameResolver.fromContentDisposition(
-            response.header("Content-Disposition")
-        )
-        _ = try await drain(response.body)
-
-        if statusCode != 405 && statusCode != 501,
-           length != nil,
-           acceptsRanges {
-            return HTTPResourceMetadata(
-                totalBytes: length,
-                supportsRanges: true,
-                etag: etag,
-                lastModified: lastModified,
-                fileName: fileName
-            )
-        }
-
-        if statusCode != 405 && statusCode != 501, let length {
-            // A known-length HEAD response without an explicit byte-range
-            // capability is safer to treat as single-connection than to
-            // issue a GET probe that could stream the entire file.
-            return HTTPResourceMetadata(
-                totalBytes: length,
-                supportsRanges: false,
-                etag: etag,
-                lastModified: lastModified,
-                fileName: fileName
-            )
-        }
-
-        // Some servers omit Accept-Ranges or reject HEAD. A one-byte range
-        // probe is the authoritative fallback for parallel downloads.
-        var rangeRequest = URLRequest(url: url)
-        rangeRequest.httpMethod = "GET"
-        rangeRequest.timeoutInterval = 30
-        applyHeaders(source.headers, to: &rangeRequest)
-        rangeRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        let rangeResponse = try await transport.response(for: rangeRequest)
-        let rangeETag = rangeResponse.header("ETag") ?? etag
-        let rangeLastModified = rangeResponse.header("Last-Modified") ?? lastModified
-        let rangeFileName = DownloadFileNameResolver.fromContentDisposition(
-            rangeResponse.header("Content-Disposition")
-        ) ?? fileName
-        let rangeContentLength = try Self.validatedContentLength(rangeResponse.header("Content-Length"))
-        let rangeBodyLength = try await drain(rangeResponse.body)
-        if rangeResponse.statusCode == 206,
-           let contentRange = rangeResponse.header("Content-Range"),
-           let parsed = Self.parseContentRange(contentRange),
-           parsed.start == 0,
-           parsed.end == 0,
-           let total = parsed.total,
-           rangeBodyLength == 1,
-           rangeContentLength.map({ $0 == 1 }) ?? true {
-            return HTTPResourceMetadata(
-                totalBytes: total,
-                supportsRanges: true,
-                etag: rangeETag,
-                lastModified: rangeLastModified,
-                fileName: rangeFileName
-            )
-        }
-        let fallbackLength = rangeContentLength ?? length
-        return HTTPResourceMetadata(
-            totalBytes: fallbackLength,
-            supportsRanges: false,
-            etag: rangeETag,
-            lastModified: rangeLastModified,
-            fileName: rangeFileName
-        )
     }
 
     public func download(
@@ -200,6 +153,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
 
         let response = try await transport.response(for: request)
+        defer { response.cancelBody() }
         let statusCode = response.statusCode
         guard (200...299).contains(statusCode) else {
             throw DownloadCoreError.httpStatus(statusCode)
@@ -241,7 +195,7 @@ public final class HTTPDownloader: @unchecked Sendable {
             if let total = parsedRange.total {
                 let minimumTotal = parsedRange.end.map({ $0 + 1 }) ?? parsedRange.start
                 guard total >= minimumTotal else {
-                throw DownloadCoreError.responseMismatch("Content-Range 总大小小于起始位置")
+                    throw DownloadCoreError.responseMismatch("Content-Range 总大小小于起始位置")
                 }
                 contentRangeTotal = total
             }
@@ -342,6 +296,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
 
         let response = try await transport.response(for: request)
+        defer { response.cancelBody() }
         guard response.statusCode == 206 else {
             if response.statusCode == 200 {
                 throw DownloadCoreError.resumeNotSupported
@@ -416,6 +371,83 @@ public final class HTTPDownloader: @unchecked Sendable {
         headers?.forEach { key, value in
             request.setValue(value, forHTTPHeaderField: key)
         }
+    }
+
+    private func probeRange(source: DownloadSource, url: URL) async throws -> HTTPResourceMetadata {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        applyHeaders(source.headers, to: &request)
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+
+        let response = try await transport.response(for: request)
+        defer { response.cancelBody() }
+        guard (200...299).contains(response.statusCode) else {
+            throw DownloadCoreError.httpStatus(response.statusCode)
+        }
+
+        let etag = response.header("ETag")
+        let lastModified = response.header("Last-Modified")
+        let fileName = DownloadFileNameResolver.fromContentDisposition(
+            response.header("Content-Disposition")
+        )
+        let contentLength = try Self.validatedContentLength(response.header("Content-Length"))
+
+        if response.statusCode == 206 {
+            guard let contentRange = response.header("Content-Range"),
+                  let parsed = Self.parseContentRange(contentRange),
+                  parsed.start == 0,
+                  parsed.end == 0,
+                  let total = parsed.total else {
+                throw DownloadCoreError.responseMismatch(
+                    "Range 探测响应未包含有效的 Content-Range"
+                )
+            }
+            guard contentLength.map({ $0 == 1 }) ?? true else {
+                throw DownloadCoreError.responseMismatch("Range 探测响应长度不是 1 字节")
+            }
+            let bodyLength = try await drain(response.body)
+            guard bodyLength == 1 else {
+                throw DownloadCoreError.responseMismatch("Range 探测实际接收 \(bodyLength) 字节，应为 1 字节")
+            }
+            return HTTPResourceMetadata(
+                totalBytes: total,
+                supportsRanges: true,
+                etag: etag,
+                lastModified: lastModified,
+                fileName: fileName
+            )
+        }
+
+        return HTTPResourceMetadata(
+            totalBytes: contentLength,
+            supportsRanges: false,
+            etag: etag,
+            lastModified: lastModified,
+            fileName: fileName
+        )
+    }
+
+    private func probeSingleConnection(source: DownloadSource, url: URL) async throws -> HTTPResourceMetadata {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        applyHeaders(source.headers, to: &request)
+
+        let response = try await transport.response(for: request)
+        defer { response.cancelBody() }
+        guard (200...299).contains(response.statusCode) else {
+            throw DownloadCoreError.httpStatus(response.statusCode)
+        }
+        return HTTPResourceMetadata(
+            totalBytes: try Self.validatedContentLength(response.header("Content-Length")),
+            supportsRanges: false,
+            etag: response.header("ETag"),
+            lastModified: response.header("Last-Modified"),
+            fileName: DownloadFileNameResolver.fromContentDisposition(
+                response.header("Content-Disposition")
+            )
+        )
     }
 
     private func validateValidators(
