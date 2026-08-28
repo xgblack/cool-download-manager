@@ -65,6 +65,101 @@ struct CoreTests {
         }
     }
 
+    @Test("host performance keys normalize URL identity without retaining URL details")
+    func hostPerformanceKeyNormalization() {
+        let key = HostPerformanceKey(
+            link: "HTTPS://Example.COM:8443/files/archive.zip?signature=secret#fragment"
+        )
+        #expect(key == HostPerformanceKey(scheme: "https", host: "example.com", port: 8443))
+        #expect(key?.storageKey == "https|example.com|8443")
+        #expect(HostPerformanceKey(link: "ftp://example.com/file") == nil)
+        #expect(HostPerformanceKey(link: "https://example.com/") == HostPerformanceKey(
+            scheme: "https",
+            host: "example.com",
+            port: 443
+        ))
+    }
+
+    @Test("host performance store expires, bounds and persists aggregate records")
+    func hostPerformanceStoreLifecycle() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 10_000)
+        let store = try HostPerformanceStore(
+            dataRoot: root,
+            ttl: 60,
+            maximumRecords: 2,
+            now: { now }
+        )
+        let first = try #require(HostPerformanceKey(scheme: "https", host: "one.example"))
+        let second = try #require(HostPerformanceKey(scheme: "https", host: "two.example"))
+        let third = try #require(HostPerformanceKey(scheme: "https", host: "three.example"))
+        _ = try await store.save([
+            HostPerformanceRecord(
+                key: first,
+                updatedAt: now.addingTimeInterval(-120),
+                preferredConnectionLimit: 8,
+                smoothedGoodputBytesPerSecond: 1
+            ),
+            HostPerformanceRecord(
+                key: second,
+                updatedAt: now.addingTimeInterval(-1),
+                preferredConnectionLimit: 2,
+                smoothedGoodputBytesPerSecond: 2
+            ),
+            HostPerformanceRecord(
+                key: third,
+                updatedAt: now,
+                preferredConnectionLimit: 4,
+                smoothedGoodputBytesPerSecond: 4
+            )
+        ])
+
+        let records = try await store.all()
+        #expect(records.count == 2)
+        #expect(Set(records.map(\.key)) == [second, third])
+        let raw = try String(contentsOf: store.settingsURL, encoding: .utf8)
+        #expect(!raw.contains("archive.zip"))
+        #expect(!raw.contains("signature=secret"))
+        #expect(raw.contains("one.example") == false)
+
+        let reopened = try HostPerformanceStore(
+            dataRoot: root,
+            ttl: 60,
+            maximumRecords: 2,
+            now: { now }
+        )
+        #expect(try await reopened.record(for: "https://two.example/path?token=private")?.preferredConnectionLimit == 2)
+        #expect(try await reopened.record(for: "https://one.example/path") == nil)
+
+        let updated = try await reopened.observe(
+            key: second,
+            succeeded: true,
+            preferredConnectionLimit: 3,
+            goodputBytesPerSecond: 6
+        )
+        #expect(updated.successCount == 1)
+        #expect(updated.preferredConnectionLimit == 3)
+        #expect(updated.smoothedGoodputBytesPerSecond == 3)
+        _ = try await reopened.observe(key: second, succeeded: false)
+        #expect(try await reopened.record(for: second)?.failureCount == 1)
+    }
+
+    @Test("download rate limiters share an aggregate global budget")
+    func aggregateGlobalRateLimit() async throws {
+        let global = DownloadRateLimiter(bytesPerSecond: 10_000)
+        let first = DownloadRateLimiter(bytesPerSecond: 0, parent: global)
+        let second = DownloadRateLimiter(bytesPerSecond: 0, parent: global)
+        let startedAt = ContinuousClock.now
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await first.consume(1_000) }
+            group.addTask { try await second.consume(1_000) }
+            try await group.waitForAll()
+        }
+        let elapsed = ContinuousClock.now - startedAt
+        #expect(elapsed >= .milliseconds(150))
+    }
+
     @Test("task settings persist and validate independently of global settings")
     func taskSettingsRoundTrip() async throws {
         let root = try makeTemporaryDirectory()
@@ -103,7 +198,7 @@ struct CoreTests {
         }
     }
 
-    @Test("running task applies speed-limit changes immediately")
+    @Test("running task applies local speed-limit changes without bypassing global limit")
     func runningTaskSpeedLimitChange() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -132,7 +227,13 @@ struct CoreTests {
             settings: DownloadTaskSettings(speedLimit: 0)
         )
 
-        let completionDeadline = ContinuousClock.now + .seconds(1)
+        // Clearing the local cap must not disable the shared application cap.
+        // The two-byte fixture therefore remains in flight for roughly two
+        // seconds at the configured one-byte-per-second global limit.
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed)
+
+        let completionDeadline = ContinuousClock.now + .seconds(3)
         while ContinuousClock.now < completionDeadline {
             if await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed {
                 break
@@ -140,6 +241,67 @@ struct CoreTests {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        await service.shutdown()
+    }
+
+    @Test("simultaneous tasks share one global speed budget")
+    func simultaneousTasksShareGlobalSpeedBudget() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(
+                status: 200,
+                headers: ["Content-Length": "4"],
+                body: Data("test".utf8)
+            )
+        }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 2,
+                speedLimit: 4
+            )
+        )
+        try await service.boot()
+        let startedAt = ContinuousClock.now
+        let firstID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/global-limit-a.bin",
+                suggestedName: "global-limit-a.bin"
+            ),
+            start: true
+        ))
+        let secondID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/global-limit-b.bin",
+                suggestedName: "global-limit-b.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(6)
+        while ContinuousClock.now < deadline {
+            let records = await service.snapshot().downloads
+            if records.count == 2,
+               records.allSatisfy({
+                   [firstID, secondID].contains($0.id) && $0.status == .completed
+               }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let elapsed = ContinuousClock.now - startedAt
+        #expect(await service.snapshot().downloads.allSatisfy { $0.status == .completed })
+        // Eight total bytes at an aggregate four-byte/second cap cannot finish
+        // in the roughly one second that two independent task limiters would
+        // require.
+        #expect(elapsed >= .milliseconds(1_400))
         await service.shutdown()
     }
 
@@ -438,6 +600,16 @@ struct CoreTests {
         #expect(settings.maxConcurrentDownloads == 3)
         #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/CoolDM"))
         #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))
+    }
+
+    @Test("scheduler resource budgets normalize to usable minimums")
+    func schedulerResourceBudgetNormalization() {
+        let configuration = DownloadSchedulerConfiguration(
+            maxConcurrentRetries: 0,
+            maxOpenFileDescriptors: 0
+        )
+        #expect(configuration.maxConcurrentRetries == 1)
+        #expect(configuration.maxOpenFileDescriptors == 2)
     }
 
     @Test("settings save round trips and preserves unknown fields")
@@ -1122,6 +1294,62 @@ struct CoreTests {
         #expect(transport.requestCount() == 3)
     }
 
+    @Test("concurrent transient failures release FD and retry reservations")
+    func concurrentTransientFailuresRecoverWithinBudgets() async throws {
+        let transport = RetryTransport(failuresBeforeSuccess: 4)
+        let metrics = DownloadMetricsCollector()
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 4,
+                maxConcurrentRetries: 1,
+                maxOpenFileDescriptors: 8
+            ),
+            retryPolicy: DownloadRetryPolicy(maxAttempts: 5, delay: .milliseconds(1)),
+            metrics: metrics
+        )
+        try await service.boot()
+
+        var ids: [DownloadID] = []
+        for index in 0..<4 {
+            ids.append(try await service.add(AddDownloadRequest(
+                source: DownloadSource(
+                    kind: .http,
+                    link: "https://fixture.invalid/retry-pressure-" + String(index),
+                    suggestedName: "retry-pressure-" + String(index) + ".bin"
+                ),
+                start: true
+            )))
+        }
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            let records = await service.snapshot().downloads
+            if records.count == ids.count,
+               records.allSatisfy({ ids.contains($0.id) && $0.status == .completed }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let records = await service.snapshot().downloads.filter { ids.contains($0.id) }
+        #expect(records.count == ids.count)
+        #expect(records.allSatisfy { $0.status == .completed })
+        for record in records {
+            #expect(try Data(contentsOf: record.destinationURL) == Data("ok".utf8))
+        }
+        #expect(transport.requestCount() == 8)
+        let retryCount = metrics.snapshot().reduce(into: 0) { count, event in
+            if case .retryScheduled = event { count += 1 }
+        }
+        #expect(retryCount == 4)
+        await service.shutdown()
+    }
+
     @Test("removing an active task waits for cancellation before deleting its record")
     func removeActiveTask() async throws {
         let transport = SlowTransport(delay: .milliseconds(100))
@@ -1212,7 +1440,7 @@ struct CoreTests {
         #expect(try Data(contentsOf: second.destinationURL) == Data("ok".utf8))
     }
 
-    @Test("download service uses configured parallel ranges and persists parts")
+    @Test("range workers consume more persisted work items than active connections")
     func serviceParallelRanges() async throws {
         let content = Data("0123456789abcdefghijklmnop".utf8)
         let transport = RangeTransport(content: content)
@@ -1248,12 +1476,400 @@ struct CoreTests {
         }
         let record = try #require(completed)
         #expect(record.totalBytes == Int64(content.count))
-        #expect(record.parts.count == 3)
+        #expect(record.parts.count == 12)
         #expect(record.parts.allSatisfy { $0.completed })
+        #expect(record.parts.allSatisfy { part in
+            guard let end = part.to else { return false }
+            return end - part.from + 1 <= 3
+        })
         #expect(try Data(contentsOf: record.destinationURL) == content)
-        #expect(transport.requestCount() == 4)
+        #expect(transport.requestCount() == 13)
         #expect(transport.recordedRequests().first?.httpMethod == "GET")
         #expect(transport.recordedRequests().first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+        await service.shutdown()
+    }
+
+    @Test("successful range downloads update the host performance cache")
+    func serviceUpdatesHostPerformance() async throws {
+        let content = Data("0123456789abcdefghijklmnop".utf8)
+        let transport = RangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1
+            ),
+            hostPerformanceStore: performanceStore
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://Example.test/files/private.bin?token=do-not-store",
+                suggestedName: "private.bin"
+            ),
+            folder: root.path,
+            start: true
+        ))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        let key = try #require(HostPerformanceKey(scheme: "https", host: "example.test"))
+        let record = try #require(try await performanceStore.record(for: key))
+        #expect(record.successCount == 1)
+        #expect(record.preferredConnectionLimit >= 1 && record.preferredConnectionLimit <= 2)
+        #expect(record.smoothedGoodputBytesPerSecond ?? 0 > 0)
+        let raw = try String(contentsOf: performanceStore.settingsURL, encoding: .utf8)
+        #expect(!raw.contains("private.bin"))
+        #expect(!raw.contains("do-not-store"))
+        await service.shutdown()
+    }
+
+    @Test("learned host profile is capped by the global per-task connection setting")
+    func learnedHostProfileRespectsGlobalConnectionCeiling() async throws {
+        let content = Data(repeating: 0x41, count: 128)
+        let transport = ConcurrentRangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let key = try #require(HostPerformanceKey(scheme: "https", host: "profile.invalid"))
+        _ = try await performanceStore.save([
+            HostPerformanceRecord(
+                key: key,
+                preferredConnectionLimit: 4,
+                smoothedGoodputBytesPerSecond: 1
+            )
+        ])
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1
+            ),
+            hostPerformanceStore: performanceStore
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://profile.invalid/capped.bin",
+                suggestedName: "capped.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        #expect(transport.maxObserved() == 2)
+        await service.shutdown()
+    }
+
+    @Test("learned host profile is an initial stage, not a permanent ceiling")
+    func learnedHostProfileCanProbeAbovePreviousStage() async throws {
+        let content = Data(repeating: 0x45, count: 128)
+        let transport = ConcurrentRangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let key = try #require(HostPerformanceKey(scheme: "https", host: "profile-probe.invalid"))
+        _ = try await performanceStore.save([
+            HostPerformanceRecord(
+                key: key,
+                preferredConnectionLimit: 1,
+                smoothedGoodputBytesPerSecond: 1
+            )
+        ])
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 4,
+                minimumPartSize: 1
+            ),
+            hostPerformanceStore: performanceStore
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://profile-probe.invalid/file.bin",
+                suggestedName: "file.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        // A profile of one may be used for the first request, but the
+        // configured ceiling of four must remain discoverable.
+        #expect(transport.maxObserved() > 1)
+        await service.shutdown()
+    }
+
+    @Test("explicit task thread count takes precedence over a learned host profile")
+    func explicitTaskThreadCountTakesPrecedenceOverProfile() async throws {
+        let content = Data(repeating: 0x42, count: 128)
+        let transport = ConcurrentRangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let key = try #require(HostPerformanceKey(scheme: "https", host: "task-override.invalid"))
+        _ = try await performanceStore.save([
+            HostPerformanceRecord(key: key, preferredConnectionLimit: 1)
+        ])
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 4,
+                minimumPartSize: 1
+            ),
+            hostPerformanceStore: performanceStore
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://task-override.invalid/file.bin",
+                suggestedName: "file.bin"
+            ),
+            start: true,
+            taskSettings: DownloadTaskSettings(threadCount: 3)
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        #expect(transport.maxObserved() == 3)
+        await service.shutdown()
+    }
+
+    @Test("explicit host thread count takes precedence over a learned host profile")
+    func explicitHostThreadCountTakesPrecedenceOverProfile() async throws {
+        let content = Data(repeating: 0x43, count: 128)
+        let transport = ConcurrentRangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let key = try #require(HostPerformanceKey(scheme: "https", host: "host-override.invalid"))
+        _ = try await performanceStore.save([
+            HostPerformanceRecord(key: key, preferredConnectionLimit: 1)
+        ])
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 4,
+                minimumPartSize: 1
+            ),
+            hostPerformanceStore: performanceStore
+        )
+        try await service.boot()
+        await service.updatePerHostSettings([
+            PerHostSettingsItem(host: "host-override.invalid", threadCount: 3)
+        ])
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://host-override.invalid/file.bin",
+                suggestedName: "file.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        #expect(transport.maxObserved() == 3)
+        await service.shutdown()
+    }
+
+    @Test("disabling HTTP ranges preserves one ordinary connection")
+    func disablingHTTPRangesPreservesOneConnection() async throws {
+        let content = Data("range-disabled".utf8)
+        let transport = RangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 4,
+                dynamicPartCreation: false,
+                minimumPartSize: 1
+            )
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/ranges-disabled.bin",
+                suggestedName: "ranges-disabled.bin"
+            ),
+            start: true,
+            taskSettings: DownloadTaskSettings(threadCount: 4)
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let record = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
+        #expect(record.status == .completed)
+        #expect(record.parts.isEmpty)
+        #expect(transport.recordedRequests().count == 1)
+        #expect(transport.recordedRequests().allSatisfy {
+            $0.value(forHTTPHeaderField: "Range") == nil
+        })
+        #expect(try Data(contentsOf: record.destinationURL) == content)
+        await service.shutdown()
+    }
+
+    @Test("disabling HTTP ranges preserves Range recovery for existing parts")
+    func disablingHTTPRangesPreservesExistingPartRecovery() async throws {
+        let content = Data("abcdefgh".utf8)
+        let transport = RangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let source = DownloadSource(
+            kind: .http,
+            link: "https://fixture.invalid/existing-parts.bin",
+            suggestedName: "existing-parts.bin"
+        )
+        let record = DownloadRecord(
+            id: 1,
+            source: source,
+            folder: root.path,
+            name: "existing-parts.bin",
+            status: .paused,
+            downloadedBytes: 4,
+            totalBytes: 8,
+            etag: "\"v1\"",
+            parts: [
+                DownloadPart(id: 0, from: 0, to: 3, downloaded: 4, completed: true),
+                DownloadPart(id: 1, from: 4, to: 7)
+            ]
+        )
+        try await store.save(record)
+        do {
+            let writer = try PartFileWriter(record: record)
+            try await writer.prepare(length: 8, sparse: true)
+            try await writer.write(Data("abcd".utf8), at: 0)
+        }
+
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 4,
+                dynamicPartCreation: false,
+                minimumPartSize: 1
+            )
+        )
+        try await service.boot()
+        try await service.resume(ids: [record.id])
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == record.id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let completed = try #require(
+            await service.snapshot().downloads.first(where: { $0.id == record.id })
+        )
+        #expect(completed.status == .completed)
+        #expect(completed.parts.allSatisfy { $0.completed })
+        #expect(transport.recordedRequests().contains {
+            $0.value(forHTTPHeaderField: "Range") == "bytes=4-7"
+        })
+        #expect(try Data(contentsOf: completed.destinationURL) == content)
+        await service.shutdown()
+    }
+
+    @Test("cancelling a range task does not add a host failure observation")
+    func cancelledRangeTaskDoesNotPolluteHostProfile() async throws {
+        let content = Data(repeating: 0x44, count: 128)
+        let transport = ConcurrentRangeTransport(
+            content: content,
+            responseDelay: .milliseconds(500)
+        )
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1
+            ),
+            hostPerformanceStore: performanceStore
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://cancel-profile.invalid/file.bin",
+                suggestedName: "file.bin"
+            ),
+            start: true
+        ))
+
+        let requestDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < requestDeadline, transport.maxObserved() == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(transport.maxObserved() > 0)
+        try await service.pause(ids: [id])
+
+        let record = try #require(
+            await service.snapshot().downloads.first(where: { $0.id == id })
+        )
+        #expect(record.status == .paused)
+        let key = try #require(
+            HostPerformanceKey(scheme: "https", host: "cancel-profile.invalid")
+        )
+        #expect(try await performanceStore.record(for: key) == nil)
         await service.shutdown()
     }
 
@@ -1379,6 +1995,387 @@ struct CoreTests {
         #expect(await budget.usage().active == 0)
     }
 
+    @Test("retry budget rotates waiting tasks and releases cancelled waiters")
+    func retryBudgetFairnessAndCancellation() async throws {
+        let budget = HTTPRetryBudget(limit: 1)
+        let first = try await budget.acquire(taskID: 1)
+        let taskA = Task { try await budget.acquire(taskID: 1) }
+        let taskB = Task { try await budget.acquire(taskID: 2) }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, await budget.usage().waiting < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().waiting == 2)
+
+        await budget.release(first)
+        let second = try await taskB.value
+        #expect(await budget.usage().active == 1)
+        await budget.release(second)
+
+        let third = try await taskA.value
+        await budget.release(third)
+
+        let held = try await budget.acquire(taskID: 3)
+        let cancelled = Task { try await budget.acquire(taskID: 4) }
+        let waitingDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < waitingDeadline, await budget.usage().waiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        cancelled.cancel()
+        do {
+            _ = try await cancelled.value
+            Issue.record("cancelled retry waiter should not receive a lease")
+        } catch is CancellationError {
+            // Expected: cancellation removes the parked retry continuation.
+        }
+        #expect(await budget.usage().waiting == 0)
+        await budget.release(held)
+        #expect(await budget.usage().active == 0)
+    }
+
+    @Test("file descriptor budget rotates waiters and releases cancelled reservations")
+    func fileDescriptorBudgetFairnessAndCancellation() async throws {
+        let budget = HTTPFileDescriptorBudget(limit: 1)
+        let first = try await budget.acquire(taskID: 1)
+        let taskA = Task { try await budget.acquire(taskID: 1) }
+        let taskB = Task { try await budget.acquire(taskID: 2) }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, await budget.usage().waiting < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().waiting == 2)
+
+        await budget.release(first)
+        let second = try await taskB.value
+        #expect(await budget.usage().activeUnits == 1)
+        await budget.release(second)
+        let third = try await taskA.value
+        await budget.release(third)
+
+        let held = try await budget.acquire(taskID: 3)
+        let cancelled = Task { try await budget.acquire(taskID: 4) }
+        let waitingDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < waitingDeadline, await budget.usage().waiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        cancelled.cancel()
+        do {
+            _ = try await cancelled.value
+            Issue.record("cancelled FD waiter should not receive a reservation")
+        } catch is CancellationError {
+            // Expected: cancellation removes the parked FD continuation.
+        }
+        #expect(await budget.usage().waiting == 0)
+        await budget.release(held)
+        #expect(await budget.usage().activeUnits == 0)
+    }
+
+    @Test("file descriptor lease scope releases before returning")
+    func fileDescriptorLeaseScopeReleasesSynchronously() async throws {
+        let budget = HTTPFileDescriptorBudget(limit: 1)
+        let activeDuringOperation = try await withHTTPFileDescriptorLease(
+            budget: budget,
+            downloadID: 1
+        ) {
+            await budget.usage().activeUnits
+        }
+        #expect(activeDuringOperation == 1)
+        #expect(await budget.usage().activeUnits == 0)
+
+        do {
+            _ = try await withHTTPFileDescriptorLease(
+                budget: budget,
+                downloadID: 2
+            ) { () -> Int in
+                throw DownloadCoreError.cancelled
+            }
+            Issue.record("a throwing operation should propagate its error")
+        } catch let error as DownloadCoreError {
+            #expect(error == .cancelled)
+        }
+        #expect(await budget.usage().activeUnits == 0)
+    }
+
+    @Test("file descriptor budget prevents a second task from opening a request")
+    func serviceFileDescriptorBudgetCapsRequests() async throws {
+        let transport = SlowTransport(delay: .milliseconds(100))
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 2,
+                maxOpenFileDescriptors: 2
+            )
+        )
+        try await service.boot()
+        let first = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/fd-a", suggestedName: "fd-a.bin"),
+            start: true
+        ))
+        let second = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/fd-b", suggestedName: "fd-b.bin"),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            let records = await service.snapshot().downloads
+            if records.count == 2, records.allSatisfy({ $0.status == .completed }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.allSatisfy { $0.status == .completed })
+        #expect(transport.maxObserved() == 1)
+        #expect(await service.snapshot().downloads.contains { $0.id == first })
+        #expect(await service.snapshot().downloads.contains { $0.id == second })
+        await service.shutdown()
+    }
+
+    @Test("file descriptor budget admits range tasks without deadlocking")
+    func rangeTasksRespectSmallFileDescriptorBudget() async throws {
+        let content = Data(repeating: 0x6A, count: 64)
+        let transport = ConcurrentRangeTransport(content: content, responseDelay: .milliseconds(50))
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 2,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1,
+                maxTotalConnections: 4,
+                maxOpenFileDescriptors: 2
+            )
+        )
+        try await service.boot()
+        for index in 0..<2 {
+            _ = try await service.add(AddDownloadRequest(
+                source: DownloadSource(
+                    kind: .http,
+                    link: "https://fixture.invalid/fd-range-\(index).bin",
+                    suggestedName: "fd-range-\(index).bin"
+                ),
+                start: true
+            ))
+        }
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            if await service.snapshot().downloads.allSatisfy({ $0.status == .completed }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.allSatisfy { $0.status == .completed })
+        #expect(transport.maxObserved() == 1)
+        await service.shutdown()
+    }
+
+    @Test("lowering the file descriptor budget pauses excess range tasks")
+    func loweringFileDescriptorBudgetPausesExcessRangeTasks() async throws {
+        let content = Data(repeating: 0x6B, count: 32)
+        let transport = ConcurrentRangeTransport(
+            content: content,
+            responseDelay: .milliseconds(300)
+        )
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initialConfiguration = DownloadSchedulerConfiguration(
+            maxConcurrentDownloads: 3,
+            maxConnectionsPerDownload: 2,
+            minimumPartSize: 1,
+            maxTotalConnections: 6,
+            maxOpenFileDescriptors: 6
+        )
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: initialConfiguration
+        )
+        try await service.boot()
+
+        var ids: [DownloadID] = []
+        for index in 0..<3 {
+            ids.append(try await service.add(AddDownloadRequest(
+                source: DownloadSource(
+                    kind: .http,
+                    link: "https://fixture.invalid/fd-lower-" + String(index) + ".bin",
+                    suggestedName: "fd-lower-" + String(index) + ".bin"
+                ),
+                start: true
+            )))
+        }
+
+        let activeDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < activeDeadline {
+            let records = await service.snapshot().downloads
+            if records.filter({ ids.contains($0.id) && $0.status == .downloading }).count == 3,
+               transport.maxObserved() > 0 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.filter {
+            ids.contains($0.id) && $0.status == .downloading
+        }.count == 3)
+
+        await service.updateConfiguration(
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 3,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1,
+                maxTotalConnections: 6,
+                maxOpenFileDescriptors: 2
+            )
+        )
+
+        let pauseDeadline = ContinuousClock.now + .seconds(3)
+        var pausedIDs: [DownloadID] = []
+        while ContinuousClock.now < pauseDeadline {
+            pausedIDs = await service.snapshot().downloads
+                .filter { ids.contains($0.id) && $0.status == .paused }
+                .map(\.id)
+            if pausedIDs.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(pausedIDs.count == 2)
+
+        await service.updateConfiguration(
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 3,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1,
+                maxTotalConnections: 6,
+                maxOpenFileDescriptors: 6
+            )
+        )
+        try await service.resume(ids: pausedIDs)
+
+        let completionDeadline = ContinuousClock.now + .seconds(20)
+        while ContinuousClock.now < completionDeadline {
+            let records = await service.snapshot().downloads
+            if records.filter({ ids.contains($0.id) }).allSatisfy({ $0.status == .completed }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(await service.snapshot().downloads.filter { ids.contains($0.id) }
+            .allSatisfy { $0.status == .completed })
+        for record in await service.snapshot().downloads where ids.contains(record.id) {
+            #expect(try Data(contentsOf: record.destinationURL) == content)
+        }
+        await service.shutdown()
+    }
+
+    @Test("multiple range tasks rotate the global lease before reusing one task")
+    func serviceRangeBudgetRotatesAcrossTasks() async throws {
+        let content = Data(repeating: 0x5A, count: 64)
+        let transport = ConcurrentRangeTransport(content: content, responseDelay: .milliseconds(100))
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 3,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1,
+                maxTotalConnections: 1
+            )
+        )
+        try await service.boot()
+        let first = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/fair-1.bin", suggestedName: "fair-1.bin"),
+            start: true
+        ))
+        let firstRequestDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < firstRequestDeadline,
+              transport.rangeRequestOwners().isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(!transport.rangeRequestOwners().isEmpty)
+
+        let second = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/fair-2.bin", suggestedName: "fair-2.bin"),
+            start: true
+        ))
+        let third = try await service.add(AddDownloadRequest(
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/fair-3.bin", suggestedName: "fair-3.bin"),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(20)
+        while ContinuousClock.now < deadline {
+            let records = await service.snapshot().downloads
+            if records.count == 3, records.allSatisfy({ $0.status == .completed }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.allSatisfy { $0.status == .completed })
+        let owners = transport.rangeRequestOwners()
+        #expect(Set(owners.prefix(3)) == Set([first, second, third].compactMap { Int($0) }))
+        await service.shutdown()
+    }
+
+    @Test("response buffer budget releases capacity after a body drains")
+    func responseBufferBudgetReleasesAfterBodyDrains() async throws {
+        let body = Data(repeating: 0x41, count: 700 * 1024)
+        let firstURL = URL(string: "https://transport.fixture/response-budget-1")!
+        let secondURL = URL(string: "https://transport.fixture/response-budget-2")!
+        let registry = URLSessionTransportFixtureRegistry.shared
+        registry.register(.body(body, callbackChunkSize: 8 * 1024), for: firstURL)
+        registry.register(.body(body, callbackChunkSize: 8 * 1024), for: secondURL)
+        defer {
+            registry.remove(firstURL)
+            registry.remove(secondURL)
+        }
+
+        let budget = HTTPResponseBufferBudget(capacity: URLSessionHTTPTransport.responseBufferReservation)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLSessionTransportFixture.self]
+        let transport = URLSessionHTTPTransport(
+            configuration: configuration,
+            responseBufferBudget: budget
+        )
+
+        let first = try await transport.response(for: URLRequest(url: firstURL))
+        let secondTask = Task {
+            try await transport.response(for: URLRequest(url: secondURL))
+        }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, await budget.usage().waiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().waiting == 1)
+
+        var received = Data()
+        for try await chunk in first.body {
+            received.append(chunk)
+        }
+        #expect(received == body)
+
+        let second = try await secondTask.value
+        #expect(await budget.usage().waiting == 0)
+        second.cancelBody()
+        let releaseDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < releaseDeadline, await budget.usage().activeBytes > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().activeBytes == 0)
+    }
+
     @Test("lowering the range budget waits for active leases to drain")
     func loweringRangeBudgetWaitsForActiveLeases() async throws {
         let budget = HTTPRangeConnectionBudget(limit: 2)
@@ -1405,6 +2402,189 @@ struct CoreTests {
         #expect(afterSecondRelease.active == 1)
         #expect(afterSecondRelease.waiting == 0)
         await budget.release(promotedLease)
+    }
+
+    @Test("range budget rotates waiting tasks instead of allowing one task to monopolize")
+    func rangeBudgetRotatesWaitingTasks() async throws {
+        let budget = HTTPRangeConnectionBudget(limit: 1)
+        let first = try await budget.acquire(taskID: 1)
+        let taskA = Task { try await budget.acquire(taskID: 1) }
+        let taskB = Task { try await budget.acquire(taskID: 2) }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, await budget.usage().waiting < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().waiting == 2)
+
+        await budget.release(first)
+        let second = try await taskB.value
+        #expect(await budget.usage().active == 1)
+        await budget.release(second)
+
+        let third = try await taskA.value
+        #expect(await budget.usage().active == 1)
+        await budget.release(third)
+        #expect(await budget.usage().active == 0)
+    }
+
+    @Test("range work queue reports drain only after all in-flight work completes")
+    func rangeWorkQueueDrainBoundary() async {
+        let queue = HTTPRangeWorkQueue(parts: [
+            DownloadPart(id: 0, from: 0, to: 3),
+            DownloadPart(id: 1, from: 4, to: 7)
+        ])
+        #expect(await queue.pendingCount() == 2)
+        #expect(!(await queue.isDrained()))
+
+        let first = await queue.claim()
+        #expect(first?.partID == 0)
+        #expect(await queue.remainingCount() == 2)
+        await queue.complete(partID: 0)
+        #expect(await queue.remainingCount() == 1)
+        #expect(!(await queue.isDrained()))
+
+        let second = await queue.claim()
+        #expect(second?.partID == 1)
+        await queue.complete(partID: 1)
+        #expect(await queue.remainingCount() == 0)
+        #expect(await queue.isDrained())
+    }
+
+    @Test("adaptive range controller backs off after failure and stops parked workers")
+    func adaptiveRangeConcurrencyFailureAndStop() async {
+        let controller = HTTPRangeConcurrencyController(maximum: 4)
+        let increase = await controller.reportCompletion(
+            workerIndex: 0,
+            bytes: 100,
+            elapsed: .seconds(1),
+            remainingWork: 8
+        )
+        #expect(increase?.currentLimit == 2)
+
+        let failure = await controller.reportFailure()
+        #expect(failure?.reason == .failure)
+        #expect(failure?.previousLimit == 2)
+        #expect(failure?.currentLimit == 1)
+        #expect(await controller.currentLimit() == 1)
+
+        let parkedWorker = Task {
+            await controller.waitForPermit(workerIndex: 1)
+        }
+        await Task.yield()
+        await controller.stop()
+        #expect(await parkedWorker.value == false)
+        #expect(await controller.reportFailure() == nil)
+    }
+
+    @Test("range concurrency accepts useful stages and rejects insufficient gain")
+    func adaptiveRangeConcurrencyStages() async {
+        let controller = HTTPRangeConcurrencyController(maximum: 8)
+        #expect(await controller.currentLimit() == 1)
+
+        let firstUpdate = await controller.reportCompletion(
+            workerIndex: 0,
+            bytes: 100,
+            elapsed: .seconds(1),
+            remainingWork: 16
+        )
+        #expect(firstUpdate?.reason == .increased)
+        #expect(firstUpdate?.currentLimit == 2)
+
+        #expect(await controller.reportCompletion(
+            workerIndex: 0,
+            bytes: 100,
+            elapsed: .seconds(1),
+            remainingWork: 15
+        ) == nil)
+        let secondUpdate = await controller.reportCompletion(
+            workerIndex: 1,
+            bytes: 100,
+            elapsed: .seconds(1),
+            remainingWork: 14
+        )
+        #expect(secondUpdate?.reason == .increased)
+        #expect(secondUpdate?.currentLimit == 4)
+
+        for workerIndex in 0..<3 {
+            #expect(await controller.reportCompletion(
+                workerIndex: workerIndex,
+                bytes: 10,
+                elapsed: .seconds(1),
+                remainingWork: 10
+            ) == nil)
+        }
+        let rejectedUpdate = await controller.reportCompletion(
+            workerIndex: 3,
+            bytes: 10,
+            elapsed: .seconds(1),
+            remainingWork: 9
+        )
+        #expect(rejectedUpdate?.reason == .insufficientGain)
+        #expect(rejectedUpdate?.currentLimit == 2)
+        #expect(await controller.currentLimit() == 2)
+        #expect(await controller.observation().stableLimit == 2)
+        await controller.stop()
+    }
+
+    @Test("adaptive range controller rejects a latency regression despite higher goodput")
+    func adaptiveRangeConcurrencyLatencyGuard() async {
+        let controller = HTTPRangeConcurrencyController(maximum: 4)
+        _ = await controller.reportCompletion(
+            workerIndex: 0,
+            bytes: 100,
+            elapsed: .seconds(1),
+            remainingWork: 8
+        )
+        #expect(await controller.currentLimit() == 2)
+
+        #expect(await controller.reportCompletion(
+            workerIndex: 0,
+            bytes: 250,
+            elapsed: .milliseconds(2_100),
+            remainingWork: 6
+        ) == nil)
+        let update = await controller.reportCompletion(
+            workerIndex: 1,
+            bytes: 250,
+            elapsed: .milliseconds(2_100),
+            remainingWork: 5
+        )
+        #expect(update?.reason == .latency)
+        #expect(update?.currentLimit == 1)
+        #expect(await controller.currentLimit() == 1)
+        await controller.stop()
+    }
+
+    @Test("adaptive range controller ignores permanent HTTP failures")
+    func adaptiveRangeConcurrencyPermanentFailure() async {
+        let controller = HTTPRangeConcurrencyController(maximum: 4)
+        _ = await controller.reportCompletion(
+            workerIndex: 0,
+            bytes: 100,
+            elapsed: .seconds(1),
+            remainingWork: 8
+        )
+        #expect(await controller.currentLimit() == 2)
+        #expect(await controller.reportFailure(statusCode: 404) == nil)
+        #expect(await controller.currentLimit() == 2)
+
+        let transient = await controller.reportFailure(statusCode: 503)
+        #expect(transient?.reason == .failure)
+        #expect(transient?.currentLimit == 1)
+        await controller.stop()
+    }
+
+    @Test("cancelled adaptive range waiters are resumed without a permit")
+    func cancelledAdaptiveRangeWaiter() async {
+        let controller = HTTPRangeConcurrencyController(maximum: 2)
+        let waiter = Task {
+            await controller.waitForPermit(workerIndex: 1)
+        }
+        await Task.yield()
+        waiter.cancel()
+        #expect(await waiter.value == false)
+        await controller.stop()
     }
 
     @Test("download metrics capture task stream checkpoint and event boundaries")
@@ -1504,11 +2684,19 @@ struct CoreTests {
             guard case .eventPublished(let id, _, _, _) = event else { return nil }
             return id
         })
+        let checkpointPhaseIDs = Set(events.compactMap { event -> DownloadID? in
+            guard case .checkpointPhase(let id, .recordEncode, _, let bytes) = event,
+                  bytes > 0 else {
+                return nil
+            }
+            return id
+        })
 
         #expect(startedIDs.isSuperset(of: [ordinaryID, rangeID]))
         #expect(finishedIDs.isSuperset(of: [ordinaryID, rangeID]))
         #expect(firstByteIDs.isSuperset(of: [ordinaryID, rangeID]))
         #expect(checkpointIDs.isSuperset(of: [ordinaryID, rangeID]))
+        #expect(checkpointPhaseIDs.isSuperset(of: [ordinaryID, rangeID]))
         #expect(publishedIDs.isSuperset(of: [ordinaryID, rangeID]))
         #expect(events.contains { event in
             guard case .httpRequestFinished(let id, _, let kind, let statusCode, let bytes, _) = event else {
@@ -1570,6 +2758,132 @@ struct CoreTests {
         #expect(try Data(contentsOf: record.destinationURL) == content)
         #expect(record.revision < 50)
         await service.shutdown()
+    }
+
+    @Test("URLSession request lifecycle tolerates missing and reordered metrics callbacks")
+    func urlSessionRequestLifecycleCallbacks() {
+        // A normal HTTP response must stay registered after completion when
+        // metrics have not arrived yet; the later metrics callback removes it.
+        var completionFirst = URLSessionRequestLifecycle()
+        completionFirst.markResponse()
+        let completionFirstRemoval = completionFirst.markComplete()
+        #expect(!completionFirstRemoval)
+        #expect(completionFirst.didCollectMetrics == false)
+        let completionFirstMetricsRemoval = completionFirst.markMetrics()
+        #expect(completionFirstMetricsRemoval)
+
+        // A completed response whose metrics callback never arrives can be
+        // expired after the delegate grace period without touching an active
+        // body stream.
+        var missingMetrics = URLSessionRequestLifecycle()
+        missingMetrics.markResponse()
+        let missingMetricsCompletionRemoval = missingMetrics.markComplete()
+        #expect(!missingMetricsCompletionRemoval)
+        let missingMetricsExpired = missingMetrics.expireMetrics()
+        #expect(missingMetricsExpired)
+        let missingMetricsExpiredAgain = missingMetrics.expireMetrics()
+        #expect(!missingMetricsExpiredAgain)
+
+        // The inverse order is also valid on URLSession implementations.
+        var metricsFirst = URLSessionRequestLifecycle()
+        metricsFirst.markResponse()
+        let metricsFirstRemoval = metricsFirst.markMetrics()
+        #expect(!metricsFirstRemoval)
+        let metricsFirstCompletionRemoval = metricsFirst.markComplete()
+        #expect(metricsFirstCompletionRemoval)
+
+        // A failed task without an HTTP response has no body context to keep.
+        var missingResponse = URLSessionRequestLifecycle()
+        let missingResponseRemoval = missingResponse.markComplete()
+        #expect(missingResponseRemoval)
+
+        var activeResponse = URLSessionRequestLifecycle()
+        activeResponse.markResponse()
+        let activeResponseExpired = activeResponse.expireMetrics()
+        #expect(!activeResponseExpired)
+    }
+
+    @Test("late protocol metrics observers can be removed without duplicate events")
+    func lateProtocolMetricsObservers() {
+        let responseMetrics = HTTPTransportResponseMetrics()
+        let collector = DownloadMetricsCollector()
+        let requestID = UUID()
+        let observerID = responseMetrics.observe { snapshot in
+            collector.record(.httpRequestProtocol(
+                downloadID: nil,
+                requestID: requestID,
+                kind: .ordinaryGet,
+                networkProtocolName: snapshot.networkProtocolName,
+                reusedConnection: snapshot.reusedConnection
+            ))
+        }
+
+        responseMetrics.update(networkProtocolName: "h2", reusedConnection: true)
+        #expect(collector.snapshot().count == 1)
+        #expect(responseMetrics.snapshot().networkProtocolName == "h2")
+
+        responseMetrics.removeObserver(observerID)
+        responseMetrics.update(networkProtocolName: "http/1.1", reusedConnection: false)
+        #expect(collector.snapshot().count == 1)
+    }
+
+    @Test("URLSession transport preserves protocol metrics through a streamed download")
+    func urlSessionTransportPreservesProtocolMetrics() async throws {
+        let url = URL(string: "https://transport.fixture/\(UUID().uuidString)")!
+        let content = Data("metrics-body".utf8)
+        URLSessionTransportFixtureRegistry.shared.register(
+            .body(content, callbackChunkSize: 4),
+            for: url
+        )
+        defer { URLSessionTransportFixtureRegistry.shared.remove(url) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [URLSessionTransportFixture.self]
+        let metrics = DownloadMetricsCollector()
+        let downloader = HTTPDownloader(configuration: configuration, metrics: metrics)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = makeRecord(
+            id: 30,
+            folder: root,
+            source: DownloadSource(kind: .http, link: url.absoluteString)
+        )
+        let writer = try PartFileWriter(record: record)
+        let result = try await downloader.download(
+            source: record.source,
+            offset: 0,
+            writer: writer
+        )
+        #expect(result.bytesWritten == Int64(content.count))
+        try await writer.finish()
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        var events = metrics.snapshot()
+        while ContinuousClock.now < deadline {
+            if events.contains(where: { event in
+                guard case .httpRequestProtocol(_, _, .ordinaryGet, _, let reusedConnection) = event else {
+                    return false
+                }
+                return reusedConnection != nil
+            }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+            events = metrics.snapshot()
+        }
+
+        #expect(events.contains { event in
+            guard case .httpRequestProtocol(_, _, .ordinaryGet, _, let reusedConnection) = event else {
+                return false
+            }
+            return reusedConnection != nil
+        })
+        #expect(events.contains { event in
+            guard case .httpRequestFinished(_, _, .ordinaryGet, 200, let bytes, _) = event else {
+                return false
+            }
+            return bytes == Int64(content.count)
+        })
     }
 
     @Test("URLSession transport permits all supported range connections")
@@ -1860,6 +3174,7 @@ struct CoreTests {
         #expect(requests.count == 1)
         #expect(requests.first?.httpMethod == "GET")
         #expect(requests.first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+        #expect(requests.first?.value(forHTTPHeaderField: "Accept-Encoding") == "identity")
     }
 
     @Test("HTTP probe surfaces a signed URL 403 without retrying")
@@ -2029,6 +3344,25 @@ struct CoreTests {
         updated.parts = []
         try await store.save(updated)
         #expect(!FileManager.default.fileExists(atPath: partsURL.path))
+    }
+
+    @Test("modern records persist range parts inline without a redundant sidecar")
+    func modernRangePartsAvoidSidecar() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        var record = makeRecord(id: 9, folder: root)
+        record.totalBytes = 8
+        record.parts = [
+            DownloadPart(id: 0, from: 0, to: 3, downloaded: 4, completed: true),
+            DownloadPart(id: 1, from: 4, to: 7, downloaded: 0, completed: false)
+        ]
+        try await store.save(record)
+
+        let partsURL = root.appendingPathComponent("config/download_db/parts/9.json")
+        #expect(!FileManager.default.fileExists(atPath: partsURL.path))
+        let loaded = try await store.load()
+        #expect(loaded.first?.parts == record.parts)
     }
 
     private func makeRecord(
@@ -2428,12 +3762,15 @@ private final class RangeTransport: HTTPTransport, @unchecked Sendable {
 
 private final class ConcurrentRangeTransport: HTTPTransport, @unchecked Sendable {
     private let content: Data
+    private let responseDelay: Duration
     private let lock = NSLock()
     private var active = 0
     private var maximum = 0
+    private var owners: [Int] = []
 
-    init(content: Data) {
+    init(content: Data, responseDelay: Duration = .milliseconds(25)) {
         self.content = content
+        self.responseDelay = responseDelay
     }
 
     func response(for request: URLRequest) async throws -> HTTPTransportResponse {
@@ -2478,13 +3815,17 @@ private final class ConcurrentRangeTransport: HTTPTransport, @unchecked Sendable
             return makeRangeResponse(start: start, end: end, body: stream)
         }
 
+        if let owner = request.url?.path.split(separator: "-").last,
+           let ownerID = Int(owner.trimmingCharacters(in: CharacterSet(charactersIn: ".bin/"))) {
+            lock.withLock { owners.append(ownerID) }
+        }
         incrementActive()
         let owner = self
         let stream = AsyncThrowingStream<Data, Error> { continuation in
             Task { [owner] in
                 defer { owner.decrementActive() }
                 do {
-                    try await Task.sleep(for: .milliseconds(25))
+                    try await Task.sleep(for: owner.responseDelay)
                     try Task.checkCancellation()
                     continuation.yield(bytes)
                     continuation.finish()
@@ -2498,6 +3839,10 @@ private final class ConcurrentRangeTransport: HTTPTransport, @unchecked Sendable
 
     func maxObserved() -> Int {
         lock.withLock { maximum }
+    }
+
+    func rangeRequestOwners() -> [Int] {
+        lock.withLock { owners }
     }
 
     private func makeRangeResponse(

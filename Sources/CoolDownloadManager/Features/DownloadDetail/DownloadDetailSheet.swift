@@ -109,17 +109,19 @@ struct DownloadDetailSheet: View {
             NativeSettingsGroup(title: "任务下载设置") {
                 NativeSettingsRow(title: "线程数") {
                     settingField(
-                        placeholder: "留空使用全局设置",
+                        placeholder: "空=继承主机/全局上限",
                         text: $viewState.threadCount,
                         effect: threadCountEffectText
                     )
+                    .help("显式任务值是连接上限；空值按主机覆盖或全局上限选择，自动任务仍会参考学习画像作为起始档位")
                 }
                 NativeSettingsRow(title: "速度限制") {
                     settingField(
-                        placeholder: "字节/秒，留空使用全局设置",
+                        placeholder: "字节/秒（空=继承，0=本地不限）",
                         text: $viewState.speedLimit,
                         effect: speedLimitEffectText
                     )
+                    .help("空值继承主机或全局设置；0 只取消任务本地上限，全局上限仍生效")
                 }
                 NativeSettingsRow(title: "完成窗口", showsDivider: false) {
                     VStack(alignment: .trailing, spacing: 4) {

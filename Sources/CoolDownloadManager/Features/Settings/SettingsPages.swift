@@ -129,10 +129,11 @@ struct DownloadSettingsPage: View {
 
             NativeSettingsGroup(title: "调度") {
                 NativeSettingsNumberRow(
-                    "分片连接上限",
+                    "默认分片连接数",
                     value: state.intBinding(\.threadCount, range: 1...64),
                     range: 1...64
                 )
+                .help("无任务或主机覆盖时使用的默认连接数；实际 Range 请求仍受全局 lease 预算限制")
                 NativeSettingsNumberRow(
                     "最大并发下载数",
                     value: state.intBinding(\.maxConcurrentDownloads, range: 0...256),
@@ -149,11 +150,13 @@ struct DownloadSettingsPage: View {
                     range: 0...Int64.max,
                     suffix: "字节/秒"
                 )
+                .help("0 表示不设置全局上限；任务和主机限速只能进一步收紧")
                 NativeSettingsToggleRow(
                     "启用 HTTP 分片",
                     isOn: state.binding(\.dynamicPartCreation),
                     showsDivider: false
                 )
+                .help("仅影响尚未创建分片的新任务；已有分片任务仍使用 Range 恢复")
             }
 
             NativeSettingsGroup(title: "文件处理") {

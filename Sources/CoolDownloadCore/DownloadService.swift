@@ -1,5 +1,15 @@
 import Foundation
 
+private struct HTTPRangeWorkerResult: Sendable {
+    let lastResult: HTTPDownloadResult?
+    let bytesWritten: Int64
+}
+
+private struct HTTPRangeRequestResult: Sendable {
+    let result: HTTPDownloadResult
+    let elapsed: Duration
+}
+
 public actor DownloadService {
     private let store: DownloadStore
     private var downloader: HTTPDownloader
@@ -8,6 +18,10 @@ public actor DownloadService {
     private var schedulerConfiguration: DownloadSchedulerConfiguration
     private var retryPolicy: DownloadRetryPolicy
     private let rangeConnectionBudget: HTTPRangeConnectionBudget
+    private let retryBudget: HTTPRetryBudget
+    private let fileDescriptorBudget: HTTPFileDescriptorBudget
+    private let globalRateLimiter: DownloadRateLimiter
+    private let hostPerformanceStore: HostPerformanceStore?
     private let metrics: any DownloadMetricsSink
     private let metricsEnabled: Bool
     private var records: [DownloadID: DownloadRecord] = [:]
@@ -19,6 +33,7 @@ public actor DownloadService {
     private var queuePolicies: [DownloadID: DownloadQueuePolicy] = [:]
     private var activeQueueIDs: Set<DownloadID> = []
     private var perHostSettings: [PerHostSettingsItem] = []
+    private var hostPerformance: [HostPerformanceKey: HostPerformanceRecord] = [:]
     private var subscribers: [UUID: AsyncStream<DownloadEvent>.Continuation] = [:]
     private var queueEventSubscribers: [UUID: AsyncStream<DownloadQueueEvent>.Continuation] = [:]
     private var lastProgressPersistence: [DownloadID: ContinuousClock.Instant] = [:]
@@ -27,7 +42,9 @@ public actor DownloadService {
     private var shuttingDown = false
 
     private static let progressPersistenceInterval: Duration = .seconds(2)
-    private static let progressPersistenceByteInterval: Int64 = 8 * 1024 * 1024
+    // Avoid turning fast local or multi-gigabit transfers into an fsync loop.
+    // The time limit and state-transition flushes still bound stale progress.
+    private static let progressPersistenceByteInterval: Int64 = 64 * 1024 * 1024
     private static let progressEventInterval: Duration = .milliseconds(250)
 
     public init(
@@ -37,7 +54,8 @@ public actor DownloadService {
         defaultFolder: URL,
         schedulerConfiguration: DownloadSchedulerConfiguration = .init(),
         retryPolicy: DownloadRetryPolicy = .init(),
-        metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
+        metrics: any DownloadMetricsSink = NoopDownloadMetricsSink(),
+        hostPerformanceStore: HostPerformanceStore? = nil
     ) {
         self.store = store
         self.downloader = downloader
@@ -50,6 +68,16 @@ public actor DownloadService {
         self.rangeConnectionBudget = HTTPRangeConnectionBudget(
             limit: schedulerConfiguration.maxTotalConnections
         )
+        self.retryBudget = HTTPRetryBudget(
+            limit: schedulerConfiguration.maxConcurrentRetries
+        )
+        self.fileDescriptorBudget = HTTPFileDescriptorBudget(
+            limit: schedulerConfiguration.maxOpenFileDescriptors
+        )
+        self.globalRateLimiter = DownloadRateLimiter(
+            bytesPerSecond: schedulerConfiguration.speedLimit
+        )
+        self.hostPerformanceStore = hostPerformanceStore
     }
 
     public func boot() async throws {
@@ -76,10 +104,28 @@ public actor DownloadService {
             }
         }
         records = loaded
+        if let hostPerformanceStore {
+            do {
+                let entries = try await hostPerformanceStore.load()
+                hostPerformance = Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0) })
+            } catch {
+                // Performance hints are disposable cache data. A corrupt or
+                // locked cache must not prevent the core from starting.
+                hostPerformance.removeAll(keepingCapacity: true)
+                fputs(
+                    "CoolDownloadCore: unable to load host performance cache: \(error)\n",
+                    stderr
+                )
+            }
+        } else {
+            hostPerformance.removeAll(keepingCapacity: true)
+        }
     }
 
     /// Applies settings that affect future scheduling and new destinations.
-    /// Active jobs are left intact; queued jobs are re-evaluated immediately.
+    /// Active jobs are normally left intact; lowering the FD budget can pause
+    /// the newest excess jobs so every remaining task retains one part-file
+    /// reservation and one request reservation without deadlocking.
     public func updateConfiguration(
         schedulerConfiguration: DownloadSchedulerConfiguration? = nil,
         retryPolicy: DownloadRetryPolicy? = nil,
@@ -88,7 +134,14 @@ public actor DownloadService {
     ) async {
         if let schedulerConfiguration {
             self.schedulerConfiguration = schedulerConfiguration
+            // Update the FD budget before re-evaluating task admission. The
+            // shrink step cancels excess jobs while their existing leases can
+            // still be released deterministically.
+            await fileDescriptorBudget.updateLimit(schedulerConfiguration.maxOpenFileDescriptors)
+            await enforceFileDescriptorTaskLimit()
             await rangeConnectionBudget.updateLimit(schedulerConfiguration.maxTotalConnections)
+            await retryBudget.updateLimit(schedulerConfiguration.maxConcurrentRetries)
+            await globalRateLimiter.updateLimit(bytesPerSecond: schedulerConfiguration.speedLimit)
         }
         if let retryPolicy {
             self.retryPolicy = retryPolicy
@@ -108,8 +161,15 @@ public actor DownloadService {
     /// Replaces the host override table used for subsequently started jobs.
     /// Active URLSession tasks retain the headers and credentials with which
     /// they were created; changing this table therefore cannot race a writer.
-    public func updatePerHostSettings(_ settings: [PerHostSettingsItem]) {
+    public func updatePerHostSettings(_ settings: [PerHostSettingsItem]) async {
         perHostSettings = settings
+        for (id, rateLimiter) in activeRateLimiters {
+            guard let record = records[id] else { continue }
+            await rateLimiter.update(
+                bytesPerSecond: effectiveLocalSpeedLimit(record),
+                parent: globalRateLimiter
+            )
+        }
     }
 
     /// Persists per-task overrides. Active jobs adopt speed-limit changes
@@ -130,7 +190,10 @@ public actor DownloadService {
         records[id] = record
         try await store.save(record)
         if let rateLimiter = activeRateLimiters[id] {
-            await rateLimiter.updateLimit(bytesPerSecond: effectiveSpeedLimit(record))
+            await rateLimiter.update(
+                bytesPerSecond: effectiveLocalSpeedLimit(record),
+                parent: globalRateLimiter
+            )
         }
         emit(.updated(record))
         return record
@@ -547,7 +610,7 @@ public actor DownloadService {
     }
 
     private func launchQueuedDownloads() {
-        while activeIDs.count < schedulerConfiguration.maxConcurrentDownloads,
+        while activeIDs.count < effectiveConcurrentDownloadLimit,
               !queuedIDs.isEmpty {
             guard let queueIndex = queuedIDs.firstIndex(where: canLaunch) else { break }
             let id = queuedIDs.remove(at: queueIndex)
@@ -559,13 +622,70 @@ public actor DownloadService {
     }
 
     private func canLaunch(_ id: DownloadID) -> Bool {
-        guard activeIDs.count < schedulerConfiguration.maxConcurrentDownloads else { return false }
+        guard activeIDs.count < effectiveConcurrentDownloadLimit else { return false }
         guard let queueID = records[id]?.queueID,
               let queueLimit = queueConcurrencyLimits[queueID] else { return true }
         let activeInQueue = activeIDs.reduce(into: 0) { count, activeID in
             if records[activeID]?.queueID == queueID { count += 1 }
         }
         return activeInQueue < queueLimit
+    }
+
+    /// An active task keeps one reservation for its part-file handle and needs
+    /// another one before it can issue its first HTTP request. Keep enough FD
+    /// headroom for every admitted task so a small runtime budget cannot make
+    /// all workers wait on the same exhausted pool.
+    private var effectiveConcurrentDownloadLimit: Int {
+        let configured = schedulerConfiguration.maxConcurrentDownloads
+        let byFileDescriptors = max(1, schedulerConfiguration.maxOpenFileDescriptors / 2)
+        return min(configured, byFileDescriptors)
+    }
+
+    /// A running task reserves one FD for its part file before it can issue a
+    /// request that reserves another one. If the runtime budget is lowered
+    /// below the current admission limit, pause the newest tasks first. The
+    /// in-memory state is changed and the task is cancelled before yielding so
+    /// a completion callback cannot race the resource-safety decision.
+    private func enforceFileDescriptorTaskLimit() async {
+        let excessCount = activeIDs.count - effectiveConcurrentDownloadLimit
+        guard excessCount > 0 else { return }
+
+        let candidates = activeIDs
+            .sorted(by: >)
+            .filter { id in
+                guard let record = records[id] else { return false }
+                switch record.status {
+                case .preparing, .downloading, .retrying:
+                    return tasks[id] != nil
+                default:
+                    return false
+                }
+            }
+
+        for id in candidates.prefix(excessCount) {
+            guard var record = records[id],
+                  let task = tasks[id],
+                  record.status == .preparing
+                    || record.status == .downloading
+                    || record.status == .retrying else {
+                continue
+            }
+            queuedIDs.removeAll { $0 == id }
+            record.status = .paused
+            record.error = nil
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            task.cancel()
+            await task.value
+            do {
+                try await store.save(record)
+            } catch {
+                reportPersistenceFailure("FD budget pause", id: id, error: error)
+            }
+            emit(.updated(record))
+        }
+        launchQueuedDownloads()
     }
 
     private func reconcileQueue(_ queueID: DownloadID) {
@@ -634,99 +754,16 @@ public actor DownloadService {
             try await store.save(record)
             emit(.updated(record))
 
-            let writer = try PartFileWriter(record: record)
-            let diskLength: Int64
-            if record.source.kind == .http, !record.parts.isEmpty {
-                diskLength = try contiguousPartBytes(record.parts)
-            } else {
-                diskLength = try await writer.length()
-            }
-            if record.downloadedBytes != diskLength {
-                record.downloadedBytes = diskLength
-                record.updatedAt = Date()
-                record.revision += 1
-                records[id] = record
-                try await store.save(record)
-                emit(.updated(record))
-            }
-
-            let latestRecord = records[id] ?? record
-            let rateLimiter = DownloadRateLimiter(bytesPerSecond: effectiveSpeedLimit(latestRecord))
-            activeRateLimiters[id] = rateLimiter
-            defer { activeRateLimiters[id] = nil }
-            let (totalBytes, reportedTotal, etag, lastModified, serverFileName) = try await downloadWithRetry(
-                id: id,
-                source: effectiveSource(record.source),
-                writer: writer,
-                rateLimiter: rateLimiter
-            )
-            try Task.checkCancellation()
-
-            let finalLength = try await writer.length()
-            if finalLength < totalBytes {
-                throw DownloadCoreError.responseMismatch(
-                    "received \(finalLength) bytes, expected \(totalBytes)"
+            let recordForDownload = record
+            try await withHTTPFileDescriptorLease(
+                budget: fileDescriptorBudget,
+                downloadID: id
+            ) { [self] in
+                try await self.performDownload(
+                    id: id,
+                    initialRecord: recordForDownload
                 )
             }
-            guard var completing = records[id] else {
-                return
-            }
-            let completedName = resolvedCompletionName(
-                for: completing,
-                serverFileName: serverFileName
-            )
-            if completing.name != completedName {
-                // Reserve a response-derived filename before yielding to the
-                // writer actor. A second add() can then choose its own suffix
-                // instead of racing this completed file.
-                completing.name = completedName
-                completing.updatedAt = Date()
-                completing.revision += 1
-                records[id] = completing
-                try await store.save(completing)
-                emit(.updated(completing))
-            }
-            let completedDestination = URL(fileURLWithPath: record.folder, isDirectory: true)
-                .appendingPathComponent(completedName)
-            try await writer.finish(destinationURL: completedDestination)
-
-            guard var completed = records[id] else {
-                return
-            }
-            if completed.incompleteFileName != nil {
-                completed.incompleteFileName = "\(completedName).cooldm.part"
-            }
-            completed.status = .completed
-            completed.downloadedBytes = finalLength
-            completed.totalBytes = reportedTotal ?? finalLength
-            completed.etag = etag ?? completed.etag
-            completed.lastModified = lastModified ?? completed.lastModified
-            completed.parts = completed.parts.map { part in
-                var part = part
-                part.completed = true
-                return part
-            }
-            completed.error = nil
-            completed.updatedAt = Date()
-            completed.revision += 1
-            records[id] = completed
-            try await store.save(completed)
-            if schedulerConfiguration.useServerLastModifiedTime,
-               let rawLastModified = completed.lastModified,
-               let modifiedDate = HTTPDateParser.date(from: rawLastModified) {
-                do {
-                    var values = URLResourceValues()
-                    values.contentModificationDate = modifiedDate
-                    var destinationURL = completed.destinationURL
-                    try destinationURL.setResourceValues(values)
-                } catch {
-                    fputs(
-                        "CoolDownloadCore: unable to set Last-Modified time for \(id): \(error)\n",
-                        stderr
-                    )
-                }
-            }
-            emit(.updated(completed))
         } catch is CancellationError {
             // pause() persists the paused state before cancelling the task.
             if let current = records[id], current.status == .downloading || current.status == .preparing {
@@ -760,6 +797,106 @@ public actor DownloadService {
         }
     }
 
+    private func performDownload(
+        id: DownloadID,
+        initialRecord: DownloadRecord
+    ) async throws {
+        var record = initialRecord
+        let writer = try PartFileWriter(record: record)
+        let diskLength: Int64
+        if record.source.kind == .http, !record.parts.isEmpty {
+            diskLength = try contiguousPartBytes(record.parts)
+        } else {
+            diskLength = try await writer.length()
+        }
+        if record.downloadedBytes != diskLength {
+            record.downloadedBytes = diskLength
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+        }
+
+        let latestRecord = records[id] ?? record
+        let rateLimiter = makeRateLimiter(for: latestRecord)
+        activeRateLimiters[id] = rateLimiter
+        defer { activeRateLimiters[id] = nil }
+        let (totalBytes, reportedTotal, etag, lastModified, serverFileName) = try await downloadWithRetry(
+            id: id,
+            source: effectiveSource(record.source),
+            writer: writer,
+            rateLimiter: rateLimiter
+        )
+        try Task.checkCancellation()
+
+        let finalLength = try await writer.length()
+        if finalLength < totalBytes {
+            throw DownloadCoreError.responseMismatch(
+                "received \(finalLength) bytes, expected \(totalBytes)"
+            )
+        }
+        guard var completing = records[id] else {
+            return
+        }
+        let completedName = resolvedCompletionName(
+            for: completing,
+            serverFileName: serverFileName
+        )
+        if completing.name != completedName {
+            // Reserve a response-derived filename before yielding to the
+            // writer actor. A second add() can then choose its own suffix
+            // instead of racing this completed file.
+            completing.name = completedName
+            completing.updatedAt = Date()
+            completing.revision += 1
+            records[id] = completing
+            try await store.save(completing)
+            emit(.updated(completing))
+        }
+        let completedDestination = URL(fileURLWithPath: record.folder, isDirectory: true)
+            .appendingPathComponent(completedName)
+        try await writer.finish(destinationURL: completedDestination)
+
+        guard var completed = records[id] else {
+            return
+        }
+        if completed.incompleteFileName != nil {
+            completed.incompleteFileName = "\(completedName).cooldm.part"
+        }
+        completed.status = .completed
+        completed.downloadedBytes = finalLength
+        completed.totalBytes = reportedTotal ?? finalLength
+        completed.etag = etag ?? completed.etag
+        completed.lastModified = lastModified ?? completed.lastModified
+        completed.parts = completed.parts.map { part in
+            var part = part
+            part.completed = true
+            return part
+        }
+        completed.error = nil
+        completed.updatedAt = Date()
+        completed.revision += 1
+        records[id] = completed
+        try await store.save(completed)
+        if schedulerConfiguration.useServerLastModifiedTime,
+           let rawLastModified = completed.lastModified,
+           let modifiedDate = HTTPDateParser.date(from: rawLastModified) {
+            do {
+                var values = URLResourceValues()
+                values.contentModificationDate = modifiedDate
+                var destinationURL = completed.destinationURL
+                try destinationURL.setResourceValues(values)
+            } catch {
+                fputs(
+                    "CoolDownloadCore: unable to set Last-Modified time for \(id): \(error)\n",
+                    stderr
+                )
+            }
+        }
+        emit(.updated(completed))
+    }
+
     private func downloadWithRetry(
         id: DownloadID,
         source: DownloadSource,
@@ -775,6 +912,7 @@ public actor DownloadService {
         var attempt = 0
         while true {
             attempt += 1
+            var retryLease: HTTPRetryBudget.Lease?
             do {
                 if attempt > 1 {
                     guard var retrying = records[id] else {
@@ -787,6 +925,9 @@ public actor DownloadService {
                     records[id] = retrying
                     try await store.save(retrying)
                     emit(.updated(retrying))
+                    // The retry slot covers only the actual network attempt;
+                    // status persistence and backoff should not occupy it.
+                    retryLease = try await retryBudget.acquire(taskID: id)
                 }
 
                 if source.kind == .hls {
@@ -807,8 +948,13 @@ public actor DownloadService {
                                 segmentBytes: segmentBytes
                             )
                         },
-                        rateLimiter: rateLimiter
+                        rateLimiter: rateLimiter,
+                        fileDescriptorBudget: fileDescriptorBudget,
+                        downloadID: id
                     )
+                    if let retryLease {
+                        await retryBudget.release(retryLease)
+                    }
                     return (result.totalBytes, result.totalBytes, nil, nil, nil)
                 }
 
@@ -817,11 +963,16 @@ public actor DownloadService {
                 if let current,
                    current.source.kind == .http,
                    effectiveThreadCount(current) > 1 || !current.parts.isEmpty {
+                    // The split toggle only controls creation of a new range
+                    // layout. Once parts are persisted, keep this path for
+                    // safe Range-based recovery even if the user disables
+                    // splitting before resuming the task.
                     result = try await downloadHTTPWithRanges(
                         id: id,
                         source: source,
                         writer: writer,
-                        rateLimiter: rateLimiter
+                        rateLimiter: rateLimiter,
+                        fileDescriptorBudget: fileDescriptorBudget
                     )
                 } else {
                     result = try await downloader.download(
@@ -835,7 +986,8 @@ public actor DownloadService {
                         expectedLastModified: current?.lastModified,
                         rateLimiter: rateLimiter,
                         metrics: metrics,
-                        downloadID: id
+                        downloadID: id,
+                        fileDescriptorBudget: fileDescriptorBudget
                     )
                 }
                 let totalBytes: Int64
@@ -849,6 +1001,9 @@ public actor DownloadService {
                    expectedTotal != responseTotal {
                     throw DownloadCoreError.resourceChanged
                 }
+                if let retryLease {
+                    await retryBudget.release(retryLease)
+                }
                 return (
                     totalBytes,
                     result.totalBytes,
@@ -857,6 +1012,9 @@ public actor DownloadService {
                     result.fileName
                 )
             } catch {
+                if let retryLease {
+                    await retryBudget.release(retryLease)
+                }
                 guard !Task.isCancelled,
                       attempt < retryPolicy.maxAttempts,
                       isRetryable(error) else {
@@ -902,7 +1060,8 @@ public actor DownloadService {
         id: DownloadID,
         source: DownloadSource,
         writer: PartFileWriter,
-        rateLimiter: DownloadRateLimiter
+        rateLimiter: DownloadRateLimiter,
+        fileDescriptorBudget: HTTPFileDescriptorBudget
     ) async throws -> HTTPDownloadResult {
         guard var record = records[id] else {
             throw DownloadCoreError.notFound(id)
@@ -910,7 +1069,8 @@ public actor DownloadService {
         let metadata = try await downloader.probe(
             source: source,
             metrics: metrics,
-            downloadID: id
+            downloadID: id,
+            fileDescriptorBudget: fileDescriptorBudget
         )
         guard let totalBytes = metadata.totalBytes, totalBytes >= 0 else {
             if record.parts.isEmpty {
@@ -925,7 +1085,8 @@ public actor DownloadService {
                     expectedLastModified: record.lastModified,
                     rateLimiter: rateLimiter,
                     metrics: metrics,
-                    downloadID: id
+                    downloadID: id,
+                    fileDescriptorBudget: fileDescriptorBudget
                 )
             }
             throw DownloadCoreError.responseMismatch("并行下载需要已知的资源大小")
@@ -956,7 +1117,8 @@ public actor DownloadService {
                 expectedLastModified: record.lastModified,
                 rateLimiter: rateLimiter,
                 metrics: metrics,
-                downloadID: id
+                downloadID: id,
+                fileDescriptorBudget: fileDescriptorBudget
             )
         }
 
@@ -976,7 +1138,8 @@ public actor DownloadService {
                 expectedLastModified: record.lastModified,
                 rateLimiter: rateLimiter,
                 metrics: metrics,
-                downloadID: id
+                downloadID: id,
+                fileDescriptorBudget: fileDescriptorBudget
             )
         }
 
@@ -1017,39 +1180,152 @@ public actor DownloadService {
                   part.from + part.downloaded <= end else { return }
             count += 1
         }
-        let workerCount = min(max(1, effectiveThreadCount(record)), pendingCount)
+        // Do not create more workers than the process-wide lease budget. The
+        // lease remains the final cross-task guard, while this bound avoids a
+        // large set of parked tasks when one task already consumes the budget.
+        let workerCount = min(
+            max(1, effectiveThreadCount(record)),
+            pendingCount,
+            schedulerConfiguration.maxTotalConnections
+        )
         let workQueue = HTTPRangeWorkQueue(parts: parts)
-        try await withThrowingTaskGroup(of: HTTPDownloadResult?.self) { group in
-            for _ in 0..<workerCount {
-                group.addTask { [workQueue] in
-                    var lastResult: HTTPDownloadResult?
-                    while let item = await workQueue.claim() {
-                        do {
-                            let result = try await self.downloadRangeWithBudget(
-                                source: source,
-                                item: item,
-                                writer: writer,
-                                expectedETag: expectedETag,
-                                expectedLastModified: expectedLastModified,
-                                id: id,
-                                rateLimiter: rateLimiter
-                            )
-                            await workQueue.complete(partID: item.partID)
-                            lastResult = result
-                        } catch {
-                            await workQueue.release(item)
-                            throw error
+        let hostKey = HostPerformanceKey(link: source.link)
+        let hasExplicitThreadOverride = record.taskSettings?.threadCount != nil
+            || hostSettings(for: record.source.link)?.threadCount != nil
+        let initialProfile = hasExplicitThreadOverride
+            ? nil
+            : hostKey.flatMap { hostPerformance[$0] }
+        // An explicit task/host value is an opt-in starting point. Automatic
+        // jobs begin at one connection (or their host hint) and probe upward;
+        // either mode can still be reduced after a measured degradation.
+        let initialLimit = hasExplicitThreadOverride
+            ? workerCount
+            : min(
+                workerCount,
+                max(1, initialProfile?.preferredConnectionLimit ?? 1)
+            )
+        let concurrencyController = HTTPRangeConcurrencyController(
+            maximum: workerCount,
+            initialLimit: initialLimit,
+            initialGoodputBytesPerSecond: initialProfile?.smoothedGoodputBytesPerSecond
+        )
+        let rangeStartedAt = ContinuousClock.now
+        do {
+            var workerByteCounts: [Int64] = []
+            try await withThrowingTaskGroup(of: HTTPRangeWorkerResult.self) { group in
+                for workerIndex in 0..<workerCount {
+                    group.addTask { [workQueue, concurrencyController] in
+                        var lastResult: HTTPDownloadResult?
+                        var bytesWritten: Int64 = 0
+                        while true {
+                            // Check before waiting as well as after claiming:
+                            // a worker whose stage was reduced can otherwise
+                            // park forever after the final in-flight request
+                            // drains the queue.
+                            if await workQueue.isDrained() {
+                                await concurrencyController.stop()
+                                break
+                            }
+                            guard await concurrencyController.waitForPermit(workerIndex: workerIndex) else {
+                                break
+                            }
+                            guard !Task.isCancelled else { break }
+                            guard let item = await workQueue.claim() else {
+                                if await workQueue.isDrained() {
+                                    // A lower concurrency stage can leave
+                                    // parked workers behind the active limit.
+                                    await concurrencyController.stop()
+                                }
+                                break
+                            }
+                            do {
+                                let request = try await self.downloadRangeWithBudget(
+                                    source: source,
+                                    item: item,
+                                    writer: writer,
+                                    expectedETag: expectedETag,
+                                    expectedLastModified: expectedLastModified,
+                                    id: id,
+                                    rateLimiter: rateLimiter
+                                )
+                                await workQueue.complete(partID: item.partID)
+                                let remainingWork = await workQueue.remainingCount()
+                                _ = await concurrencyController.reportCompletion(
+                                    workerIndex: workerIndex,
+                                    bytes: request.result.bytesWritten,
+                                    elapsed: request.elapsed,
+                                    remainingWork: remainingWork
+                                )
+                                bytesWritten += request.result.bytesWritten
+                                lastResult = request.result
+                            } catch {
+                                await workQueue.release(item)
+                                // Cancellation is an expected lifecycle path
+                                // (pause, remove, shutdown, or a sibling
+                                // worker failing). It must not lower the
+                                // controller or count as a host failure.
+                                if !Task.isCancelled, !(error is CancellationError) {
+                                    let statusCode: Int? = {
+                                        guard let error = error as? DownloadCoreError,
+                                              case .httpStatus(let status) = error else {
+                                            return nil
+                                        }
+                                        return status
+                                    }()
+                                    _ = await concurrencyController.reportFailure(
+                                        statusCode: statusCode
+                                    )
+                                }
+                                throw error
+                            }
                         }
+                        return HTTPRangeWorkerResult(
+                            lastResult: lastResult,
+                            bytesWritten: bytesWritten
+                        )
                     }
-                    return lastResult
+                }
+                for try await workerResult in group {
+                    if let result = workerResult.lastResult {
+                        results.append(result)
+                    }
+                    workerByteCounts.append(workerResult.bytesWritten)
                 }
             }
-            for try await result in group {
-                if let result {
-                    results.append(result)
-                }
+            if let hostKey, let hostPerformanceStore {
+                // Keep the aggregate outside the child-task closures so Swift's
+                // strict concurrency checker can prove there is one writer.
+                let rangeBytesWritten = workerByteCounts.reduce(0, +)
+                await recordHostPerformance(
+                    store: hostPerformanceStore,
+                    key: hostKey,
+                    controller: concurrencyController,
+                    startedAt: rangeStartedAt,
+                    bytesWritten: rangeBytesWritten,
+                    succeeded: true
+                )
             }
+        } catch {
+            await concurrencyController.stop()
+            // A user cancellation is not evidence that the host or its
+            // current connection stage is unhealthy. Do not poison the
+            // persistent host hint with pause/remove/shutdown operations.
+            if !Task.isCancelled,
+               !(error is CancellationError),
+               let hostKey,
+               let hostPerformanceStore {
+                await recordHostPerformance(
+                    store: hostPerformanceStore,
+                    key: hostKey,
+                    controller: concurrencyController,
+                    startedAt: rangeStartedAt,
+                    bytesWritten: 0,
+                    succeeded: false
+                )
+            }
+            throw error
         }
+        await concurrencyController.stop()
 
         guard let completed = records[id],
               completed.parts.allSatisfy(\.completed),
@@ -1075,32 +1351,45 @@ public actor DownloadService {
         expectedLastModified: String?,
         id: DownloadID,
         rateLimiter: DownloadRateLimiter
-    ) async throws -> HTTPDownloadResult {
-        let lease = try await rangeConnectionBudget.acquire()
-        do {
-            let result = try await downloader.downloadRange(
-                source: source,
-                start: item.start,
-                end: item.end,
-                writer: writer,
-                expectedETag: expectedETag,
-                expectedLastModified: expectedLastModified,
-                progress: { [weak self] bytes in
-                    await self?.persistPartProgress(
-                        id: id,
-                        partID: item.partID,
-                        downloaded: item.downloaded + bytes
-                    )
-                },
-                rateLimiter: rateLimiter,
-                metrics: metrics,
-                downloadID: id
-            )
-            await rangeConnectionBudget.release(lease)
-            return result
-        } catch {
-            await rangeConnectionBudget.release(lease)
-            throw error
+    ) async throws -> HTTPRangeRequestResult {
+        // Acquire reservations in the same order as ordinary requests. This
+        // prevents a low FD limit and a saturated Range budget from forming a
+        // cross-resource wait cycle between workers.
+        return try await withHTTPFileDescriptorLease(
+            budget: fileDescriptorBudget,
+            downloadID: id
+        ) { [self] in
+            let lease = try await self.rangeConnectionBudget.acquire(taskID: id)
+            let requestStartedAt = ContinuousClock.now
+            do {
+                let result = try await self.downloader.downloadRange(
+                    source: source,
+                    start: item.start,
+                    end: item.end,
+                    writer: writer,
+                    expectedETag: expectedETag,
+                    expectedLastModified: expectedLastModified,
+                    progress: { [weak self] bytes in
+                        await self?.persistPartProgress(
+                            id: id,
+                            partID: item.partID,
+                            downloaded: item.downloaded + bytes
+                        )
+                    },
+                    rateLimiter: rateLimiter,
+                    metrics: self.metrics,
+                    downloadID: id,
+                    fileDescriptorBudget: nil
+                )
+                await self.rangeConnectionBudget.release(lease)
+                return HTTPRangeRequestResult(
+                    result: result,
+                    elapsed: ContinuousClock.now - requestStartedAt
+                )
+            } catch {
+                await self.rangeConnectionBudget.release(lease)
+                throw error
+            }
         }
     }
 
@@ -1112,15 +1401,20 @@ public actor DownloadService {
     ) -> [DownloadPart] {
         guard totalBytes > 0 else { return [] }
         let minimumPartCount = max(1, totalBytes / max(1, minimumPartSize))
-        let boundedPartCount = min(Int64(max(1, count)), minimumPartCount)
+        // Keep several unstarted pieces per active worker so a fast worker can
+        // take over the tail of a slow worker. The minimum-size bound still
+        // prevents this multiplier from creating tiny pieces on large files.
+        let targetPartCount = min(Int64(max(1, count)) * 4, 128)
+        let boundedPartCount = min(targetPartCount, minimumPartCount)
         let partCount = Int(min(128, boundedPartCount))
-        let chunkSize = (totalBytes + Int64(partCount) - 1) / Int64(partCount)
+        let baseChunkSize = totalBytes / Int64(partCount)
+        let remainder = totalBytes % Int64(partCount)
         var parts: [DownloadPart] = []
+        var from: Int64 = 0
         for index in 0..<partCount {
-            let from = Int64(index) * chunkSize
-            guard from < totalBytes else { break }
-            let to = min(totalBytes - 1, from + chunkSize - 1)
-            let length = to - from + 1
+            let length = baseChunkSize + (Int64(index) < remainder ? 1 : 0)
+            guard length > 0 else { break }
+            let to = from + length - 1
             let downloaded = max(0, min(length, existingLength - from))
             parts.append(DownloadPart(
                 id: index,
@@ -1129,8 +1423,41 @@ public actor DownloadService {
                 downloaded: downloaded,
                 completed: downloaded == length
             ))
+            from = to + 1
         }
         return parts
+    }
+
+    private func recordHostPerformance(
+        store: HostPerformanceStore,
+        key: HostPerformanceKey,
+        controller: HTTPRangeConcurrencyController,
+        startedAt: ContinuousClock.Instant,
+        bytesWritten: Int64,
+        succeeded: Bool
+    ) async {
+        let observation = await controller.observation()
+        let elapsedNanoseconds = max(
+            1,
+            downloadMetricsNanoseconds(ContinuousClock.now - startedAt)
+        )
+        let goodput = succeeded && bytesWritten > 0
+            ? Double(bytesWritten) * 1_000_000_000 / Double(elapsedNanoseconds)
+            : nil
+        do {
+            let updated = try await store.observe(
+                key: key,
+                succeeded: succeeded,
+                preferredConnectionLimit: succeeded ? observation.stableLimit : nil,
+                goodputBytesPerSecond: goodput
+            )
+            hostPerformance[key] = updated
+        } catch {
+            fputs(
+                "CoolDownloadCore: unable to save host performance cache: \(error)\n",
+                stderr
+            )
+        }
     }
 
     private func validateHTTPParts(
@@ -1310,16 +1637,34 @@ public actor DownloadService {
 
     private func effectiveThreadCount(_ record: DownloadRecord) -> Int {
         guard schedulerConfiguration.dynamicPartCreation || !record.parts.isEmpty else { return 1 }
-        let hostCount = hostSettings(for: record.source.link)?.threadCount
-        let configured = record.taskSettings?.threadCount
-            ?? hostCount
-            ?? schedulerConfiguration.maxConnectionsPerDownload
-        return min(max(1, configured), 64)
+        if let taskCount = record.taskSettings?.threadCount {
+            return min(max(1, taskCount), 64)
+        }
+        if let hostCount = hostSettings(for: record.source.link)?.threadCount {
+            return min(max(1, hostCount), 64)
+        }
+
+        // A learned host profile is an initial-stage hint, not a hard ceiling.
+        // Keeping the configured ceiling here lets the controller probe a
+        // faster stage again when network conditions improve or the profile is
+        // conservative. The profile is applied as `initialLimit` when the
+        // range scheduler is created below.
+        return min(
+            max(1, schedulerConfiguration.maxConnectionsPerDownload),
+            64
+        )
     }
 
-    private func effectiveSpeedLimit(_ record: DownloadRecord) -> Int64 {
+    private func effectiveLocalSpeedLimit(_ record: DownloadRecord) -> Int64 {
         let hostLimit = hostSettings(for: record.source.link)?.speedLimit
-        return max(0, record.taskSettings?.speedLimit ?? hostLimit ?? schedulerConfiguration.speedLimit)
+        return max(0, record.taskSettings?.speedLimit ?? hostLimit ?? 0)
+    }
+
+    private func makeRateLimiter(for record: DownloadRecord) -> DownloadRateLimiter {
+        DownloadRateLimiter(
+            bytesPerSecond: effectiveLocalSpeedLimit(record),
+            parent: globalRateLimiter
+        )
     }
 
     private func effectiveSource(_ source: DownloadSource) -> DownloadSource {

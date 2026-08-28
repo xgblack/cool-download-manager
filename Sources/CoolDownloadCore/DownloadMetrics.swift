@@ -14,6 +14,19 @@ public enum HTTPRequestMetricKind: String, Sendable, Equatable {
     case probeFallback
 }
 
+/// A durable checkpoint phase used to locate storage-path bottlenecks without
+/// recording file paths or payload data.
+public enum DownloadCheckpointPhase: String, Sendable, Equatable {
+    case recordEncode
+    case recordWrite
+    case recordSynchronize
+    case recordReplace
+    case sidecarEncode
+    case sidecarWrite
+    case sidecarSynchronize
+    case sidecarReplace
+}
+
 /// A point-in-time process resource sample attached to task and checkpoint
 /// metrics. `diskWriteBytes` is the kernel-accounted process write counter,
 /// which is useful for comparing runs but is not a device-level fsync count.
@@ -120,6 +133,13 @@ public enum DownloadMetricEvent: Sendable, Equatable {
         requestID: UUID,
         latencyNanoseconds: UInt64
     )
+    case httpRequestProtocol(
+        downloadID: DownloadID?,
+        requestID: UUID,
+        kind: HTTPRequestMetricKind,
+        networkProtocolName: String?,
+        reusedConnection: Bool?
+    )
     case httpRequestFinished(
         downloadID: DownloadID?,
         requestID: UUID,
@@ -141,6 +161,12 @@ public enum DownloadMetricEvent: Sendable, Equatable {
         kernelAccountedWriteBytes: UInt64,
         synchronizeCount: Int,
         succeeded: Bool
+    )
+    case checkpointPhase(
+        id: DownloadID,
+        phase: DownloadCheckpointPhase,
+        elapsedNanoseconds: UInt64,
+        bytes: Int64
     )
     case eventPublished(
         id: DownloadID?,

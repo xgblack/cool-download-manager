@@ -35,7 +35,8 @@ let package = Package(
         .library(name: "CoolDownloadIntegration", targets: ["CoolDownloadIntegration"]),
         .executable(name: "CoolDownloadManager", targets: ["CoolDownloadManager"]),
         .executable(name: "CoolDownloadManagerNativeMessagingHost", targets: ["CoolDownloadManagerNativeMessagingHost"]),
-        .executable(name: "CoolDownloadManagerCLI", targets: ["CoolDownloadManagerCLI"])
+        .executable(name: "CoolDownloadManagerCLI", targets: ["CoolDownloadManagerCLI"]),
+        .executable(name: "CoolDownloadBenchmark", targets: ["CoolDownloadBenchmark"])
     ],
     targets: [
         .target(
@@ -61,6 +62,11 @@ let package = Package(
             name: "CoolDownloadManagerCLI",
             dependencies: ["CoolDownloadCore", "CoolDownloadIntegration"],
             path: "Sources/CoolDownloadManagerCLI"
+        ),
+        .executableTarget(
+            name: "CoolDownloadBenchmark",
+            dependencies: ["CoolDownloadCore"],
+            path: "Benchmarks/CoolDownloadBenchmark"
         ),
         .testTarget(
             name: "CoolDownloadCoreTests",

@@ -5,7 +5,11 @@ public struct PerHostSettingsItem: Codable, Equatable, Sendable, Identifiable {
     public var username: String?
     public var password: String?
     public var userAgent: String?
+    /// An explicit per-host connection ceiling. Empty values inherit the
+    /// global ceiling while automatic jobs may still use a learned profile as
+    /// their initial stage.
     public var threadCount: Int?
+    /// A host-local cap. `nil` or zero leaves only the global aggregate cap.
     public var speedLimit: Int64?
 
     public var id: String { host }

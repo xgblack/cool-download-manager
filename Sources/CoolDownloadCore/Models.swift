@@ -27,6 +27,13 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
     public let minimumPartSize: Int64
     /// Maximum number of real HTTP range requests across all active tasks.
     public let maxTotalConnections: Int
+    /// Maximum number of retry attempts that may execute concurrently. The
+    /// initial attempt is not charged against this budget.
+    public let maxConcurrentRetries: Int
+    /// Process-wide reservation budget for open part-file handles and HTTP
+    /// requests. This is a reservation guard, not a replacement for the OS
+    /// `RLIMIT_NOFILE` value.
+    public let maxOpenFileDescriptors: Int
     public let appendExtensionToIncompleteDownloads: Bool
     public let useSparseFileAllocation: Bool
     public let deletePartialFileOnDownloadCancellation: Bool
@@ -44,6 +51,8 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
         dynamicPartCreation: Bool = true,
         minimumPartSize: Int64 = 16 * 1024 * 1024,
         maxTotalConnections: Int = 16,
+        maxConcurrentRetries: Int = 2,
+        maxOpenFileDescriptors: Int = 128,
         appendExtensionToIncompleteDownloads: Bool = false,
         useSparseFileAllocation: Bool = true,
         deletePartialFileOnDownloadCancellation: Bool = false,
@@ -57,6 +66,11 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
         self.dynamicPartCreation = dynamicPartCreation
         self.minimumPartSize = max(1, minimumPartSize)
         self.maxTotalConnections = max(1, maxTotalConnections)
+        self.maxConcurrentRetries = max(1, maxConcurrentRetries)
+        // Every active task needs one part-file handle and at least one
+        // request reservation. Keep two units available even when a caller
+        // supplies an unusually small value.
+        self.maxOpenFileDescriptors = max(2, maxOpenFileDescriptors)
         self.appendExtensionToIncompleteDownloads = appendExtensionToIncompleteDownloads
         self.useSparseFileAllocation = useSparseFileAllocation
         self.deletePartialFileOnDownloadCancellation = deletePartialFileOnDownloadCancellation
@@ -125,9 +139,12 @@ public struct DownloadPart: Codable, Sendable, Equatable {
 /// The entire value is optional on `DownloadRecord` so old records keep their
 /// exact shape and continue to inherit current global settings.
 public struct DownloadTaskSettings: Codable, Sendable, Equatable {
-    /// `nil` inherits the global connection count; valid values are 1...64.
+    /// `nil` inherits the host override or global connection ceiling;
+    /// automatic jobs may use a learned host profile as their initial stage.
+    /// Valid values are 1...64.
     public var threadCount: Int?
-    /// `nil` inherits the global limit; zero means unlimited.
+    /// `nil` adds no task-local cap; zero also means unlimited locally. The
+    /// global aggregate speed limit still applies when it is enabled.
     public var speedLimit: Int64?
     /// `nil` inherits the global completion-dialog preference.
     public var showCompletionDialog: Bool?

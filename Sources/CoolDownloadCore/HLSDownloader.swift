@@ -28,7 +28,9 @@ public final class HLSDownloader: @unchecked Sendable {
         completedSegments: Set<Int> = [],
         completedPartMetadata: [DownloadPart] = [],
         progress: (@Sendable (Int64, Int, Int, Int64) async -> Void)? = nil,
-        rateLimiter: DownloadRateLimiter? = nil
+        rateLimiter: DownloadRateLimiter? = nil,
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
+        downloadID: DownloadID? = nil
     ) async throws -> HLSDownloadResult {
         guard let playlistURL = URL(string: source.link),
               let scheme = playlistURL.scheme?.lowercased(),
@@ -36,7 +38,13 @@ public final class HLSDownloader: @unchecked Sendable {
             throw DownloadCoreError.invalidURL(source.link)
         }
 
-        let playlist = try await loadPlaylist(at: playlistURL, headers: source.headers, depth: 0)
+        let playlist = try await loadPlaylist(
+            at: playlistURL,
+            headers: source.headers,
+            depth: 0,
+            fileDescriptorBudget: fileDescriptorBudget,
+            downloadID: downloadID
+        )
         guard !playlist.segments.isEmpty else {
             throw DownloadCoreError.unsupportedHLS("播放列表不包含媒体分片")
         }
@@ -93,14 +101,26 @@ public final class HLSDownloader: @unchecked Sendable {
 
         var totalBytes = initialLength
         if let mapURL = playlist.initializationURL, effectiveCompletedSegments.isEmpty {
-            let data = try await fetchData(url: mapURL, headers: source.headers, rateLimiter: rateLimiter)
+            let data = try await fetchData(
+                url: mapURL,
+                headers: source.headers,
+                rateLimiter: rateLimiter,
+                fileDescriptorBudget: fileDescriptorBudget,
+                downloadID: downloadID
+            )
             try await writer.append(data)
             totalBytes += Int64(data.count)
         }
 
         for (index, segmentURL) in playlist.segments.enumerated() {
             if effectiveCompletedSegments.contains(index) { continue }
-            let data = try await fetchData(url: segmentURL, headers: source.headers, rateLimiter: rateLimiter)
+            let data = try await fetchData(
+                url: segmentURL,
+                headers: source.headers,
+                rateLimiter: rateLimiter,
+                fileDescriptorBudget: fileDescriptorBudget,
+                downloadID: downloadID
+            )
             try Task.checkCancellation()
             try await writer.append(data)
             totalBytes += Int64(data.count)
@@ -117,12 +137,19 @@ public final class HLSDownloader: @unchecked Sendable {
     private func loadPlaylist(
         at url: URL,
         headers: [String: String]?,
-        depth: Int
+        depth: Int,
+        fileDescriptorBudget: HTTPFileDescriptorBudget?,
+        downloadID: DownloadID?
     ) async throws -> Playlist {
         guard depth < 3 else {
             throw DownloadCoreError.unsupportedHLS("主播放列表嵌套层级过深")
         }
-        let data = try await fetchData(url: url, headers: headers)
+        let data = try await fetchData(
+            url: url,
+            headers: headers,
+            fileDescriptorBudget: fileDescriptorBudget,
+            downloadID: downloadID
+        )
         guard let text = String(data: data, encoding: .utf8) else {
             throw DownloadCoreError.unsupportedHLS("播放列表不是 UTF-8 文本")
         }
@@ -133,7 +160,13 @@ public final class HLSDownloader: @unchecked Sendable {
             throw DownloadCoreError.unsupportedHLS("缺少 #EXTM3U 标头")
         }
         if let variant = highestBandwidthVariant(lines: lines, baseURL: url) {
-            return try await loadPlaylist(at: variant, headers: headers, depth: depth + 1)
+            return try await loadPlaylist(
+                at: variant,
+                headers: headers,
+                depth: depth + 1,
+                fileDescriptorBudget: fileDescriptorBudget,
+                downloadID: downloadID
+            )
         }
 
         var segments: [URL] = []
@@ -199,23 +232,31 @@ public final class HLSDownloader: @unchecked Sendable {
     private func fetchData(
         url: URL,
         headers: [String: String]?,
-        rateLimiter: DownloadRateLimiter? = nil
+        rateLimiter: DownloadRateLimiter? = nil,
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
+        downloadID: DownloadID? = nil
     ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 60
         headers?.forEach { key, value in request.setValue(value, forHTTPHeaderField: key) }
-        let response = try await transport.response(for: request)
-        defer { response.cancelBody() }
-        guard (200...299).contains(response.statusCode) else {
-            throw DownloadCoreError.httpStatus(response.statusCode)
+        let preparedRequest = request
+        return try await withHTTPFileDescriptorLease(
+            budget: fileDescriptorBudget,
+            downloadID: downloadID
+        ) { [self] in
+            let response = try await self.transport.response(for: preparedRequest)
+            defer { response.cancelBody() }
+            guard (200...299).contains(response.statusCode) else {
+                throw DownloadCoreError.httpStatus(response.statusCode)
+            }
+            var result = Data()
+            for try await chunk in response.body {
+                try Task.checkCancellation()
+                try await rateLimiter?.consume(chunk.count)
+                result.append(chunk)
+            }
+            return result
         }
-        var result = Data()
-        for try await chunk in response.body {
-            try Task.checkCancellation()
-            try await rateLimiter?.consume(chunk.count)
-            result.append(chunk)
-        }
-        return result
     }
 }

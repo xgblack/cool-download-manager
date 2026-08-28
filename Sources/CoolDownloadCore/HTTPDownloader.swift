@@ -54,17 +54,22 @@ public struct HTTPTransportResponse: Sendable {
     public let statusCode: Int
     public let headers: [String: String]
     public let body: AsyncThrowingStream<Data, Error>
+    /// Live URLSession protocol metrics. The value may be populated after the
+    /// response is returned and is therefore intentionally reference-backed.
+    public let networkMetrics: HTTPTransportResponseMetrics
     private let cancelBodyHandler: @Sendable () -> Void
 
     public init(
         statusCode: Int,
         headers: [String: String],
         body: AsyncThrowingStream<Data, Error>,
+        networkMetrics: HTTPTransportResponseMetrics = HTTPTransportResponseMetrics(),
         cancelBody: @escaping @Sendable () -> Void = {}
     ) {
         self.statusCode = statusCode
         self.headers = headers
         self.body = body
+        self.networkMetrics = networkMetrics
         self.cancelBodyHandler = cancelBody
     }
 
@@ -109,7 +114,8 @@ public final class HTTPDownloader: @unchecked Sendable {
     public func probe(
         source: DownloadSource,
         metrics: (any DownloadMetricsSink)? = nil,
-        downloadID: DownloadID? = nil
+        downloadID: DownloadID? = nil,
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil
     ) async throws -> HTTPResourceMetadata {
         let url = try validatedURL(source.link)
         let sink = metrics ?? defaultMetrics
@@ -118,7 +124,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 source: source,
                 url: url,
                 metrics: sink,
-                downloadID: downloadID
+                downloadID: downloadID,
+                fileDescriptorBudget: fileDescriptorBudget
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -131,7 +138,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                     source: source,
                     url: url,
                     metrics: sink,
-                    downloadID: downloadID
+                    downloadID: downloadID,
+                    fileDescriptorBudget: fileDescriptorBudget
                 )
             case .httpStatus(let status) where status == 405 || status == 416 || status == 501:
                 // These statuses mean the range form is unavailable. Retry
@@ -140,7 +148,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                     source: source,
                     url: url,
                     metrics: sink,
-                    downloadID: downloadID
+                    downloadID: downloadID,
+                    fileDescriptorBudget: fileDescriptorBudget
                 )
             default:
                 throw error
@@ -166,7 +175,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         expectedLastModified: String? = nil,
         rateLimiter: DownloadRateLimiter? = nil,
         metrics: (any DownloadMetricsSink)? = nil,
-        downloadID: DownloadID? = nil
+        downloadID: DownloadID? = nil,
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil
     ) async throws -> HTTPDownloadResult {
         let url = try validatedURL(source.link)
         let sink = metrics ?? defaultMetrics
@@ -188,129 +198,135 @@ public final class HTTPDownloader: @unchecked Sendable {
             }
         }
 
-        let response = try await transport.response(for: request)
-        tracker?.markResponse(statusCode: response.statusCode)
-        defer { response.cancelBody() }
-        let statusCode = response.statusCode
-        guard (200...299).contains(statusCode) else {
-            throw DownloadCoreError.httpStatus(statusCode)
-        }
-        let responseContentLength = try Self.validatedContentLength(response.header("Content-Length"))
-
-        let isResume = offset > 0
-        var actualOffset = offset
-        var contentRangeTotal: Int64?
-        if isResume && statusCode == 200 {
-            try validateValidators(
-                response,
-                expectedETag: expectedETag,
-                expectedLastModified: expectedLastModified
-            )
-            try await writer.truncate()
-            actualOffset = 0
-        } else if isResume && statusCode != 206 {
-            throw DownloadCoreError.resumeNotSupported
-        }
-
-        if statusCode == 206 {
-            try validateValidators(
-                response,
-                expectedETag: expectedETag,
-                expectedLastModified: expectedLastModified
-            )
-            guard let contentRange = response.header("Content-Range"),
-                  let parsedRange = Self.parseContentRange(contentRange) else {
-                throw DownloadCoreError.responseMismatch(
-                    "206 响应未包含有效的 Content-Range"
-                )
+        let preparedRequest = request
+        return try await withHTTPFileDescriptorLease(
+            budget: fileDescriptorBudget,
+            downloadID: downloadID
+        ) { [self] in
+            let response = try await self.transport.response(for: preparedRequest)
+            tracker?.markResponse(response)
+            defer { response.cancelBody() }
+            let statusCode = response.statusCode
+            guard (200...299).contains(statusCode) else {
+                throw DownloadCoreError.httpStatus(statusCode)
             }
-            guard parsedRange.start == offset else {
-                throw DownloadCoreError.responseMismatch(
-                    "Content-Range 起始位置为 \(parsedRange.start)，应为 \(offset)"
+            let responseContentLength = try Self.validatedContentLength(response.header("Content-Length"))
+
+            let isResume = offset > 0
+            var actualOffset = offset
+            var contentRangeTotal: Int64?
+            if isResume && statusCode == 200 {
+                try self.validateValidators(
+                    response,
+                    expectedETag: expectedETag,
+                    expectedLastModified: expectedLastModified
                 )
+                try await writer.truncate()
+                actualOffset = 0
+            } else if isResume && statusCode != 206 {
+                throw DownloadCoreError.resumeNotSupported
             }
-            if let total = parsedRange.total {
-                let minimumTotal = parsedRange.end.map({ $0 + 1 }) ?? parsedRange.start
-                guard total >= minimumTotal else {
-                    throw DownloadCoreError.responseMismatch("Content-Range 总大小小于起始位置")
+
+            if statusCode == 206 {
+                try self.validateValidators(
+                    response,
+                    expectedETag: expectedETag,
+                    expectedLastModified: expectedLastModified
+                )
+                guard let contentRange = response.header("Content-Range"),
+                      let parsedRange = Self.parseContentRange(contentRange) else {
+                    throw DownloadCoreError.responseMismatch(
+                        "206 响应未包含有效的 Content-Range"
+                    )
                 }
-                contentRangeTotal = total
+                guard parsedRange.start == offset else {
+                    throw DownloadCoreError.responseMismatch(
+                        "Content-Range 起始位置为 \(parsedRange.start)，应为 \(offset)"
+                    )
+                }
+                if let total = parsedRange.total {
+                    let minimumTotal = parsedRange.end.map({ $0 + 1 }) ?? parsedRange.start
+                    guard total >= minimumTotal else {
+                        throw DownloadCoreError.responseMismatch("Content-Range 总大小小于起始位置")
+                    }
+                    contentRangeTotal = total
+                }
+                if let end = parsedRange.end,
+                   let contentLength = responseContentLength,
+                   contentLength != end - parsedRange.start + 1 {
+                    throw DownloadCoreError.responseMismatch(
+                        "Content-Length 与 Content-Range 不匹配"
+                    )
+                }
             }
-            if let end = parsedRange.end,
-               let contentLength = responseContentLength,
-               contentLength != end - parsedRange.start + 1 {
-                throw DownloadCoreError.responseMismatch(
-                    "Content-Length 与 Content-Range 不匹配"
-                )
-            }
-        }
 
-        let expectedBodyLength: Int64? = responseContentLength
-            ?? (statusCode == 206 ? Self.contentRangeLength(response.header("Content-Range")) : nil)
-        let originalOffset = actualOffset
+            let expectedBodyLength: Int64? = responseContentLength
+                ?? (statusCode == 206 ? Self.contentRangeLength(response.header("Content-Range")) : nil)
+            let originalOffset = actualOffset
 
-        var buffer = Data()
-        buffer.reserveCapacity(bufferSize)
-        var writtenBytes = actualOffset
-        var responseBodyBytes: Int64 = 0
-        for try await chunk in response.body {
-            try Task.checkCancellation()
-            if !chunk.isEmpty {
-                tracker?.markFirstByteIfNeeded()
-                tracker?.addBytes(Int64(chunk.count))
-            }
-            try await rateLimiter?.consume(chunk.count)
-            if let expectedBodyLength,
-               responseBodyBytes + Int64(chunk.count) > expectedBodyLength {
-                let remaining = max(0, expectedBodyLength - responseBodyBytes)
-                let allowed = Int(min(remaining, Int64(chunk.count)))
-                if allowed > 0 {
-                    let output = Data(chunk.prefix(allowed))
-                    try await writer.append(output)
+            var buffer = Data()
+            buffer.reserveCapacity(self.bufferSize)
+            var writtenBytes = actualOffset
+            var responseBodyBytes: Int64 = 0
+            for try await chunk in response.body {
+                try Task.checkCancellation()
+                if !chunk.isEmpty {
+                    tracker?.markFirstByteIfNeeded()
+                    tracker?.addBytes(Int64(chunk.count))
+                }
+                try await rateLimiter?.consume(chunk.count)
+                if let expectedBodyLength,
+                   responseBodyBytes + Int64(chunk.count) > expectedBodyLength {
+                    let remaining = max(0, expectedBodyLength - responseBodyBytes)
+                    let allowed = Int(min(remaining, Int64(chunk.count)))
+                    if allowed > 0 {
+                        let output = Data(chunk.prefix(allowed))
+                        try await writer.append(output)
+                        writtenBytes += Int64(output.count)
+                        responseBodyBytes += Int64(output.count)
+                    }
+                    try await writer.truncate(to: originalOffset)
+                    throw DownloadCoreError.responseMismatch(
+                        "接收的数据超过预期大小 \(expectedBodyLength) 字节"
+                    )
+                }
+                buffer.append(chunk)
+                responseBodyBytes += Int64(chunk.count)
+                while buffer.count >= self.bufferSize {
+                    let output = buffer.prefix(self.bufferSize)
+                    try await writer.append(Data(output))
                     writtenBytes += Int64(output.count)
-                    responseBodyBytes += Int64(output.count)
+                    await progress?(writtenBytes)
+                    buffer.removeFirst(output.count)
                 }
+            }
+            if !buffer.isEmpty {
+                try await writer.append(buffer)
+                writtenBytes += Int64(buffer.count)
+                await progress?(writtenBytes)
+            }
+
+            if let expectedBodyLength, responseBodyBytes != expectedBodyLength {
                 try await writer.truncate(to: originalOffset)
                 throw DownloadCoreError.responseMismatch(
-                    "接收的数据超过预期大小 \(expectedBodyLength) 字节"
+                    "实际接收 \(responseBodyBytes) 字节，应为 \(expectedBodyLength) 字节"
                 )
             }
-            buffer.append(chunk)
-            responseBodyBytes += Int64(chunk.count)
-            while buffer.count >= bufferSize {
-                let output = buffer.prefix(bufferSize)
-                try await writer.append(Data(output))
-                writtenBytes += Int64(output.count)
-                await progress?(writtenBytes)
-                buffer.removeFirst(output.count)
-            }
-        }
-        if !buffer.isEmpty {
-            try await writer.append(buffer)
-            writtenBytes += Int64(buffer.count)
-            await progress?(writtenBytes)
-        }
 
-        if let expectedBodyLength, responseBodyBytes != expectedBodyLength {
-            try await writer.truncate(to: originalOffset)
-            throw DownloadCoreError.responseMismatch(
-                "实际接收 \(responseBodyBytes) 字节，应为 \(expectedBodyLength) 字节"
+            let responseLength = responseContentLength
+            let totalBytes = contentRangeTotal ?? responseLength.map { actualOffset + $0 }
+            return HTTPDownloadResult(
+                statusCode: statusCode,
+                startOffset: actualOffset,
+                totalBytes: totalBytes,
+                bytesWritten: responseBodyBytes,
+                etag: response.header("ETag"),
+                lastModified: response.header("Last-Modified"),
+                fileName: DownloadFileNameResolver.fromContentDisposition(
+                    response.header("Content-Disposition")
+                )
             )
         }
-
-        let responseLength = responseContentLength
-        let totalBytes = contentRangeTotal ?? responseLength.map { actualOffset + $0 }
-        return HTTPDownloadResult(
-            statusCode: statusCode,
-            startOffset: actualOffset,
-            totalBytes: totalBytes,
-            bytesWritten: responseBodyBytes,
-            etag: response.header("ETag"),
-            lastModified: response.header("Last-Modified"),
-            fileName: DownloadFileNameResolver.fromContentDisposition(
-                response.header("Content-Disposition")
-            )
-        )
     }
 
     public func downloadRange(
@@ -323,7 +339,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         progress: (@Sendable (Int64) async -> Void)? = nil,
         rateLimiter: DownloadRateLimiter? = nil,
         metrics: (any DownloadMetricsSink)? = nil,
-        downloadID: DownloadID? = nil
+        downloadID: DownloadID? = nil,
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil
     ) async throws -> HTTPDownloadResult {
         guard start >= 0, end >= start else {
             throw DownloadCoreError.responseMismatch("请求的字节范围无效")
@@ -345,72 +362,78 @@ public final class HTTPDownloader: @unchecked Sendable {
             request.setValue(validator, forHTTPHeaderField: "If-Range")
         }
 
-        let response = try await transport.response(for: request)
-        tracker?.markResponse(statusCode: response.statusCode)
-        defer { response.cancelBody() }
-        guard response.statusCode == 206 else {
-            if response.statusCode == 200 {
-                throw DownloadCoreError.resumeNotSupported
+        let preparedRequest = request
+        return try await withHTTPFileDescriptorLease(
+            budget: fileDescriptorBudget,
+            downloadID: downloadID
+        ) { [self] in
+            let response = try await self.transport.response(for: preparedRequest)
+            tracker?.markResponse(response)
+            defer { response.cancelBody() }
+            guard response.statusCode == 206 else {
+                if response.statusCode == 200 {
+                    throw DownloadCoreError.resumeNotSupported
+                }
+                throw DownloadCoreError.httpStatus(response.statusCode)
             }
-            throw DownloadCoreError.httpStatus(response.statusCode)
-        }
-        try validateValidators(
-            response,
-            expectedETag: expectedETag,
-            expectedLastModified: expectedLastModified
-        )
-        guard let contentRange = response.header("Content-Range"),
-              let parsedRange = Self.parseContentRange(contentRange),
-              parsedRange.start == start,
-              parsedRange.end == end else {
-            throw DownloadCoreError.responseMismatch(
-                "Content-Range 与请求的 bytes=\(start)-\(end) 不匹配"
+            try self.validateValidators(
+                response,
+                expectedETag: expectedETag,
+                expectedLastModified: expectedLastModified
             )
-        }
-        let expectedBodyLength = end - start + 1
-        let responseContentLength = try Self.validatedContentLength(response.header("Content-Length"))
-        if let contentLength = responseContentLength,
-           contentLength != expectedBodyLength {
-            throw DownloadCoreError.responseMismatch("Content-Length 与请求的范围不匹配")
-        }
-        if let total = parsedRange.total, total < end + 1 {
-            throw DownloadCoreError.responseMismatch("Content-Range 总大小小于请求的范围")
-        }
-
-        var written: Int64 = 0
-        for try await chunk in response.body {
-            try Task.checkCancellation()
-            if !chunk.isEmpty {
-                tracker?.markFirstByteIfNeeded()
-                tracker?.addBytes(Int64(chunk.count))
-            }
-            try await rateLimiter?.consume(chunk.count)
-            let chunkLength = Int64(chunk.count)
-            guard written + chunkLength <= expectedBodyLength else {
+            guard let contentRange = response.header("Content-Range"),
+                  let parsedRange = Self.parseContentRange(contentRange),
+                  parsedRange.start == start,
+                  parsedRange.end == end else {
                 throw DownloadCoreError.responseMismatch(
-                    "接收的数据超过请求范围的预期大小 \(expectedBodyLength) 字节"
+                    "Content-Range 与请求的 bytes=\(start)-\(end) 不匹配"
                 )
             }
-            try await writer.write(chunk, at: start + written)
-            written += chunkLength
-            await progress?(written)
-        }
-        guard written == expectedBodyLength else {
-            throw DownloadCoreError.responseMismatch(
-                "请求范围实际接收 \(written) 字节，应为 \(expectedBodyLength) 字节"
+            let expectedBodyLength = end - start + 1
+            let responseContentLength = try Self.validatedContentLength(response.header("Content-Length"))
+            if let contentLength = responseContentLength,
+               contentLength != expectedBodyLength {
+                throw DownloadCoreError.responseMismatch("Content-Length 与请求的范围不匹配")
+            }
+            if let total = parsedRange.total, total < end + 1 {
+                throw DownloadCoreError.responseMismatch("Content-Range 总大小小于请求的范围")
+            }
+
+            var written: Int64 = 0
+            for try await chunk in response.body {
+                try Task.checkCancellation()
+                if !chunk.isEmpty {
+                    tracker?.markFirstByteIfNeeded()
+                    tracker?.addBytes(Int64(chunk.count))
+                }
+                try await rateLimiter?.consume(chunk.count)
+                let chunkLength = Int64(chunk.count)
+                guard written + chunkLength <= expectedBodyLength else {
+                    throw DownloadCoreError.responseMismatch(
+                        "接收的数据超过请求范围的预期大小 \(expectedBodyLength) 字节"
+                    )
+                }
+                try await writer.write(chunk, at: start + written)
+                written += chunkLength
+                await progress?(written)
+            }
+            guard written == expectedBodyLength else {
+                throw DownloadCoreError.responseMismatch(
+                    "请求范围实际接收 \(written) 字节，应为 \(expectedBodyLength) 字节"
+                )
+            }
+            return HTTPDownloadResult(
+                statusCode: response.statusCode,
+                startOffset: start,
+                totalBytes: parsedRange.total,
+                bytesWritten: written,
+                etag: response.header("ETag"),
+                lastModified: response.header("Last-Modified"),
+                fileName: DownloadFileNameResolver.fromContentDisposition(
+                    response.header("Content-Disposition")
+                )
             )
         }
-        return HTTPDownloadResult(
-            statusCode: response.statusCode,
-            startOffset: start,
-            totalBytes: parsedRange.total,
-            bytesWritten: written,
-            etag: response.header("ETag"),
-            lastModified: response.header("Last-Modified"),
-            fileName: DownloadFileNameResolver.fromContentDisposition(
-                response.header("Content-Disposition")
-            )
-        )
     }
 
     private func validatedURL(_ link: String) throws -> URL {
@@ -426,13 +449,20 @@ public final class HTTPDownloader: @unchecked Sendable {
         headers?.forEach { key, value in
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // URLSession transparently decodes gzip/deflate responses. A download
+        // manager must persist the exact representation advertised by the
+        // server; otherwise Content-Length and byte ranges describe compressed
+        // bytes while the delegate delivers decompressed bytes. Request the
+        // identity representation for every download and probe.
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
     }
 
     private func probeRange(
         source: DownloadSource,
         url: URL,
         metrics: any DownloadMetricsSink,
-        downloadID: DownloadID?
+        downloadID: DownloadID?,
+        fileDescriptorBudget: HTTPFileDescriptorBudget?
     ) async throws -> HTTPResourceMetadata {
         let tracker = metrics.isEnabled ? HTTPMetricTracker(
             sink: metrics,
@@ -446,65 +476,72 @@ public final class HTTPDownloader: @unchecked Sendable {
         applyHeaders(source.headers, to: &request)
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
 
-        let response = try await transport.response(for: request)
-        tracker?.markResponse(statusCode: response.statusCode)
-        defer { response.cancelBody() }
-        guard (200...299).contains(response.statusCode) else {
-            throw DownloadCoreError.httpStatus(response.statusCode)
-        }
+        let preparedRequest = request
+        return try await withHTTPFileDescriptorLease(
+            budget: fileDescriptorBudget,
+            downloadID: downloadID
+        ) { [self] in
+            let response = try await self.transport.response(for: preparedRequest)
+            tracker?.markResponse(response)
+            defer { response.cancelBody() }
+            guard (200...299).contains(response.statusCode) else {
+                throw DownloadCoreError.httpStatus(response.statusCode)
+            }
 
-        let etag = response.header("ETag")
-        let lastModified = response.header("Last-Modified")
-        let fileName = DownloadFileNameResolver.fromContentDisposition(
-            response.header("Content-Disposition")
-        )
-        let contentLength = try Self.validatedContentLength(response.header("Content-Length"))
+            let etag = response.header("ETag")
+            let lastModified = response.header("Last-Modified")
+            let fileName = DownloadFileNameResolver.fromContentDisposition(
+                response.header("Content-Disposition")
+            )
+            let contentLength = try Self.validatedContentLength(response.header("Content-Length"))
 
-        if response.statusCode == 206 {
-            guard let contentRange = response.header("Content-Range"),
-                  let parsed = Self.parseContentRange(contentRange),
-                  parsed.start == 0,
-                  parsed.end == 0,
-                  let total = parsed.total else {
-                throw DownloadCoreError.responseMismatch(
-                    "Range 探测响应未包含有效的 Content-Range"
+            if response.statusCode == 206 {
+                guard let contentRange = response.header("Content-Range"),
+                      let parsed = Self.parseContentRange(contentRange),
+                      parsed.start == 0,
+                      parsed.end == 0,
+                      let total = parsed.total else {
+                    throw DownloadCoreError.responseMismatch(
+                        "Range 探测响应未包含有效的 Content-Range"
+                    )
+                }
+                guard contentLength.map({ $0 == 1 }) ?? true else {
+                    throw DownloadCoreError.responseMismatch("Range 探测响应长度不是 1 字节")
+                }
+                let bodyLength = try await self.drain(response.body) { bytes in
+                    if bytes > 0 {
+                        tracker?.markFirstByteIfNeeded()
+                        tracker?.addBytes(bytes)
+                    }
+                }
+                guard bodyLength == 1 else {
+                    throw DownloadCoreError.responseMismatch("Range 探测实际接收 \(bodyLength) 字节，应为 1 字节")
+                }
+                return HTTPResourceMetadata(
+                    totalBytes: total,
+                    supportsRanges: true,
+                    etag: etag,
+                    lastModified: lastModified,
+                    fileName: fileName
                 )
             }
-            guard contentLength.map({ $0 == 1 }) ?? true else {
-                throw DownloadCoreError.responseMismatch("Range 探测响应长度不是 1 字节")
-            }
-            let bodyLength = try await drain(response.body) { bytes in
-                if bytes > 0 {
-                    tracker?.markFirstByteIfNeeded()
-                    tracker?.addBytes(bytes)
-                }
-            }
-            guard bodyLength == 1 else {
-                throw DownloadCoreError.responseMismatch("Range 探测实际接收 \(bodyLength) 字节，应为 1 字节")
-            }
+
             return HTTPResourceMetadata(
-                totalBytes: total,
-                supportsRanges: true,
+                totalBytes: contentLength,
+                supportsRanges: false,
                 etag: etag,
                 lastModified: lastModified,
                 fileName: fileName
             )
         }
-
-        return HTTPResourceMetadata(
-            totalBytes: contentLength,
-            supportsRanges: false,
-            etag: etag,
-            lastModified: lastModified,
-            fileName: fileName
-        )
     }
 
     private func probeSingleConnection(
         source: DownloadSource,
         url: URL,
         metrics: any DownloadMetricsSink,
-        downloadID: DownloadID?
+        downloadID: DownloadID?,
+        fileDescriptorBudget: HTTPFileDescriptorBudget?
     ) async throws -> HTTPResourceMetadata {
         let tracker = metrics.isEnabled ? HTTPMetricTracker(
             sink: metrics,
@@ -517,21 +554,27 @@ public final class HTTPDownloader: @unchecked Sendable {
         request.timeoutInterval = 30
         applyHeaders(source.headers, to: &request)
 
-        let response = try await transport.response(for: request)
-        tracker?.markResponse(statusCode: response.statusCode)
-        defer { response.cancelBody() }
-        guard (200...299).contains(response.statusCode) else {
-            throw DownloadCoreError.httpStatus(response.statusCode)
-        }
-        return HTTPResourceMetadata(
-            totalBytes: try Self.validatedContentLength(response.header("Content-Length")),
-            supportsRanges: false,
-            etag: response.header("ETag"),
-            lastModified: response.header("Last-Modified"),
-            fileName: DownloadFileNameResolver.fromContentDisposition(
-                response.header("Content-Disposition")
+        let preparedRequest = request
+        return try await withHTTPFileDescriptorLease(
+            budget: fileDescriptorBudget,
+            downloadID: downloadID
+        ) { [self] in
+            let response = try await self.transport.response(for: preparedRequest)
+            tracker?.markResponse(response)
+            defer { response.cancelBody() }
+            guard (200...299).contains(response.statusCode) else {
+                throw DownloadCoreError.httpStatus(response.statusCode)
+            }
+            return HTTPResourceMetadata(
+                totalBytes: try Self.validatedContentLength(response.header("Content-Length")),
+                supportsRanges: false,
+                etag: response.header("ETag"),
+                lastModified: response.header("Last-Modified"),
+                fileName: DownloadFileNameResolver.fromContentDisposition(
+                    response.header("Content-Disposition")
+                )
             )
-        )
+        }
     }
 
     private func validateValidators(
@@ -608,6 +651,7 @@ public final class HTTPDownloader: @unchecked Sendable {
 }
 
 private final class HTTPMetricTracker: @unchecked Sendable {
+    private static let protocolMetricsGracePeriod: Duration = .seconds(1)
     private let lock = NSLock()
     private let sink: any DownloadMetricsSink
     private let downloadID: DownloadID?
@@ -615,9 +659,13 @@ private final class HTTPMetricTracker: @unchecked Sendable {
     private let kind: HTTPRequestMetricKind
     private let startedAt = downloadMetricsNow()
     private var statusCode: Int?
+    private var networkMetrics: HTTPTransportResponseMetrics?
     private var receivedFirstByte = false
     private var bytes: Int64 = 0
     private var finished = false
+    private var protocolRecorded = false
+    private var metricsObserverID: UUID?
+    private var protocolObservationTask: Task<Void, Never>?
 
     init(
         sink: any DownloadMetricsSink,
@@ -635,14 +683,30 @@ private final class HTTPMetricTracker: @unchecked Sendable {
         ))
     }
 
-    func markResponse(statusCode: Int) {
-        lock.withLock {
-            self.statusCode = statusCode
+    func markResponse(_ response: HTTPTransportResponse) {
+        let networkMetrics = lock.withLock {
+            self.statusCode = response.statusCode
+            self.networkMetrics = response.networkMetrics
+            return response.networkMetrics
+        }
+        let observerID = networkMetrics.observe { [weak self] snapshot in
+            self?.recordProtocol(snapshot)
+        }
+        let registrationState = lock.withLock {
+            guard !protocolRecorded else { return (true, false) }
+            metricsObserverID = observerID
+            return (false, finished)
+        }
+        if registrationState.0 {
+            networkMetrics.removeObserver(observerID)
         }
         // `response(for:)` returns after the HTTP response has arrived. Record
         // TTFB here so metadata probes that intentionally cancel their bodies
         // remain visible in the same metric as streamed downloads.
         markFirstByteIfNeeded()
+        if registrationState.1 {
+            armProtocolObservationIfNeeded()
+        }
     }
 
     func markFirstByteIfNeeded() {
@@ -667,12 +731,14 @@ private final class HTTPMetricTracker: @unchecked Sendable {
     }
 
     func finish() {
-        let result = lock.withLock { () -> (statusCode: Int?, bytes: Int64)? in
+        let result = lock.withLock {
+            () -> (statusCode: Int?, bytes: Int64, networkMetrics: HTTPTransportResponseMetrics?)? in
             guard !finished else { return nil }
             finished = true
-            return (statusCode, bytes)
+            return (statusCode, bytes, networkMetrics)
         }
         guard let result else { return }
+        recordProtocol(result.networkMetrics?.snapshot() ?? .init())
         sink.record(.httpRequestFinished(
             downloadID: downloadID,
             requestID: requestID,
@@ -681,5 +747,81 @@ private final class HTTPMetricTracker: @unchecked Sendable {
             bytes: result.bytes,
             elapsedNanoseconds: downloadMetricsElapsed(since: startedAt)
         ))
+        armProtocolObservationIfNeeded()
+    }
+
+    private func recordProtocol(_ snapshot: HTTPTransportResponseMetrics.Snapshot) {
+        guard snapshot.networkProtocolName != nil || snapshot.reusedConnection != nil else {
+            return
+        }
+        let cleanup: (HTTPTransportResponseMetrics?, UUID?, Task<Void, Never>?)? = lock.withLock {
+            guard !protocolRecorded else { return nil }
+            protocolRecorded = true
+            let metrics = networkMetrics
+            let observerID = metricsObserverID
+            metricsObserverID = nil
+            let observationTask = protocolObservationTask
+            protocolObservationTask = nil
+            return (metrics, observerID, observationTask)
+        }
+        guard let cleanup else { return }
+        cleanup.2?.cancel()
+        if let metrics = cleanup.0, let observerID = cleanup.1 {
+            metrics.removeObserver(observerID)
+        }
+        sink.record(.httpRequestProtocol(
+            downloadID: downloadID,
+            requestID: requestID,
+            kind: kind,
+            networkProtocolName: snapshot.networkProtocolName,
+            reusedConnection: snapshot.reusedConnection
+        ))
+    }
+
+    private func armProtocolObservationIfNeeded() {
+        let registration: (HTTPTransportResponseMetrics, UUID)? = lock.withLock {
+            guard !protocolRecorded,
+                  let networkMetrics,
+                  let observerID = metricsObserverID,
+                  protocolObservationTask == nil else {
+                return nil
+            }
+            return (networkMetrics, observerID)
+        }
+        guard let registration else { return }
+        let networkMetrics = registration.0
+        let observerID = registration.1
+        let task = Task { [self] in
+            do {
+                try await Task.sleep(for: Self.protocolMetricsGracePeriod)
+            } catch {
+                return
+            }
+            expireProtocolObservation(networkMetrics: networkMetrics, observerID: observerID)
+        }
+        let cancel = lock.withLock {
+            guard !protocolRecorded, protocolObservationTask == nil else { return true }
+            protocolObservationTask = task
+            return false
+        }
+        if cancel {
+            task.cancel()
+        }
+    }
+
+    private func expireProtocolObservation(
+        networkMetrics: HTTPTransportResponseMetrics,
+        observerID: UUID
+    ) {
+        let shouldRemove = lock.withLock {
+            guard !protocolRecorded, metricsObserverID == observerID else { return false }
+            protocolRecorded = true
+            metricsObserverID = nil
+            protocolObservationTask = nil
+            return true
+        }
+        if shouldRemove {
+            networkMetrics.removeObserver(observerID)
+        }
     }
 }

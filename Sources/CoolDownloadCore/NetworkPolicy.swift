@@ -10,6 +10,109 @@ public enum HTTPProxyMode: String, Sendable, Equatable {
     case pac
 }
 
+/// A small reference shared by a transport response and its URLSession
+/// delegate callbacks. URLSession reports task metrics after response headers
+/// arrive, so the response must expose a live value rather than a copied
+/// snapshot. Only protocol-level facts are retained; URL, header and payload
+/// data never enter the metrics object.
+public final class HTTPTransportResponseMetrics: @unchecked Sendable {
+    public struct Snapshot: Sendable, Equatable {
+        public let networkProtocolName: String?
+        public let reusedConnection: Bool?
+
+        public init(
+            networkProtocolName: String? = nil,
+            reusedConnection: Bool? = nil
+        ) {
+            self.networkProtocolName = networkProtocolName
+            self.reusedConnection = reusedConnection
+        }
+    }
+
+    private let lock = NSLock()
+    private var value = Snapshot()
+    private var hasUpdate = false
+    private var observers: [UUID: @Sendable (Snapshot) -> Void] = [:]
+
+    public init() {}
+
+    public func snapshot() -> Snapshot {
+        lock.withLock { value }
+    }
+
+    /// Registers a callback for the first protocol metrics update. The
+    /// callback is invoked outside the lock and may run synchronously when
+    /// metrics arrived before the observer was registered.
+    @discardableResult
+    func observe(_ handler: @escaping @Sendable (Snapshot) -> Void) -> UUID {
+        let id = UUID()
+        let registration = lock.withLock {
+            observers[id] = handler
+            return (value, hasUpdate)
+        }
+        if registration.1 {
+            handler(registration.0)
+        }
+        return id
+    }
+
+    func removeObserver(_ id: UUID) {
+        _ = lock.withLock {
+            observers.removeValue(forKey: id)
+        }
+    }
+
+    func update(
+        networkProtocolName: String?,
+        reusedConnection: Bool?
+    ) {
+        let notification = lock.withLock {
+            value = Snapshot(
+                networkProtocolName: networkProtocolName ?? value.networkProtocolName,
+                reusedConnection: reusedConnection ?? value.reusedConnection
+            )
+            hasUpdate = true
+            return (value, Array(observers.values))
+        }
+        for observer in notification.1 {
+            observer(notification.0)
+        }
+    }
+}
+
+/// Tracks the terminal callbacks that delimit one URLSession task. Metrics
+/// are best-effort, but a response context must remain registered until both
+/// the task and its metrics callback have arrived so protocol observations are
+/// not lost when callback order changes.
+struct URLSessionRequestLifecycle: Sendable, Equatable {
+    private(set) var didReceiveResponse = false
+    private(set) var didComplete = false
+    private(set) var didCollectMetrics = false
+
+    mutating func markResponse() {
+        didReceiveResponse = true
+    }
+
+    mutating func markMetrics() -> Bool {
+        didCollectMetrics = true
+        return didComplete && didReceiveResponse
+    }
+
+    mutating func markComplete() -> Bool {
+        didComplete = true
+        // A task without an HTTP response has no response context or body
+        // stream to observe, so it can be discarded even when metrics are
+        // unavailable. HTTP responses stay registered until metrics arrive.
+        return didCollectMetrics || !didReceiveResponse
+    }
+
+    mutating func expireMetrics() -> Bool {
+        guard didReceiveResponse, didComplete, !didCollectMetrics else { return false }
+        didCollectMetrics = true
+        return true
+    }
+}
+
 /// Network policy used when the core creates a URLSession transport.
 ///
 /// URLSession can apply proxy and TLS policy directly. The system resolver is
@@ -45,6 +148,95 @@ public struct HTTPNetworkConfiguration: Sendable, Equatable {
     public static let `default` = Self()
 }
 
+/// Bounds response bytes retained by all URLSession body channels created by
+/// one downloader. A channel still applies its one MiB high-water mark, while
+/// this gate prevents many active ranges from multiplying that allowance
+/// without limit. Waiting callers hold no socket or response buffer.
+public actor HTTPResponseBufferBudget {
+    /// One shared process budget keeps separate URLSession transports from
+    /// multiplying the same response-buffer allowance.
+    public static let shared = HTTPResponseBufferBudget()
+
+    public struct Lease: Sendable, Equatable {
+        fileprivate let id: UUID
+        fileprivate let capacity: Int
+    }
+
+    private let capacity: Int
+    private var available: Int
+    private var waiters: [(id: UUID, requested: Int, continuation: CheckedContinuation<Lease, Error>)] = []
+    private var active: [UUID: Int] = [:]
+
+    public init(capacity: Int = 16 * 1024 * 1024) {
+        self.capacity = max(1, capacity)
+        self.available = max(1, capacity)
+    }
+
+    public func acquire(_ requested: Int = 1024 * 1024) async throws -> Lease {
+        try Task.checkCancellation()
+        let amount = min(max(1, requested), capacity)
+        let waiterID = UUID()
+        let lease = try await withTaskCancellationHandler(operation: {
+            try await acquireOrWait(id: waiterID, requested: amount)
+        }, onCancel: {
+            Task { await self.cancelWaiter(id: waiterID) }
+        })
+        if Task.isCancelled {
+            release(lease)
+            throw CancellationError()
+        }
+        return lease
+    }
+
+    private func acquireOrWait(id: UUID, requested: Int) async throws -> Lease {
+        if available >= requested {
+            return grant(requested)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            if Task.isCancelled {
+                continuation.resume(throwing: CancellationError())
+            } else {
+                waiters.append((id: id, requested: requested, continuation: continuation))
+            }
+        }
+    }
+
+    public func release(_ lease: Lease) {
+        guard let amount = active.removeValue(forKey: lease.id) else { return }
+        available = min(capacity, available + amount)
+        resumeAvailableWaiters()
+    }
+
+    public func usage() -> (activeBytes: Int, waiting: Int, capacity: Int) {
+        (capacity - available, waiters.count, capacity)
+    }
+
+    private func grant(_ requested: Int) -> Lease {
+        let lease = Lease(id: UUID(), capacity: requested)
+        available -= requested
+        active[lease.id] = requested
+        return lease
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumeAvailableWaiters() {
+        var index = 0
+        while index < waiters.count {
+            guard available >= waiters[index].requested else {
+                index += 1
+                continue
+            }
+            let waiter = waiters.remove(at: index)
+            waiter.continuation.resume(returning: grant(waiter.requested))
+        }
+    }
+}
+
 /// Pull-based response channel with bounded buffering. URLSession callbacks
 /// cannot await a slow consumer, so the corresponding data task is suspended
 /// while more than one MiB is waiting to be written.
@@ -61,9 +253,17 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
     private var completion: Completion?
     private weak var task: URLSessionDataTask?
     private var taskIsSuspended = false
+    private var drainHandler: (@Sendable () -> Void)?
+    private var drainNotified = false
 
     private let highWaterMark = 1024 * 1024
     private let lowWaterMark = 512 * 1024
+
+    func setDrainHandler(_ handler: @escaping @Sendable () -> Void) {
+        lock.withLock {
+            drainHandler = handler
+        }
+    }
 
     func attach(task: URLSessionDataTask) {
         let shouldCancel = lock.withLock { () -> Bool in
@@ -98,6 +298,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
 
     func finish(throwing error: Error? = nil) {
         var consumer: CheckedContinuation<Data?, Error>?
+        var drained: (@Sendable () -> Void)?
         lock.lock()
         guard completion == nil else {
             lock.unlock()
@@ -108,9 +309,11 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
         if chunks.isEmpty {
             consumer = waitingConsumer
             waitingConsumer = nil
+            drained = markDrainedLocked()
         }
         lock.unlock()
 
+        drained?()
         guard let consumer else { return }
         if let error {
             consumer.resume(throwing: error)
@@ -123,6 +326,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
         var consumer: CheckedContinuation<Data?, Error>?
         var taskToCancel: URLSessionDataTask?
         var shouldResumeTask = false
+        var drained: (@Sendable () -> Void)?
         lock.lock()
         if completion == nil || !chunks.isEmpty {
             completion = .failed(CancellationError())
@@ -134,6 +338,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
             task = nil
             shouldResumeTask = taskIsSuspended
             taskIsSuspended = false
+            drained = markDrainedLocked()
         }
         lock.unlock()
 
@@ -141,6 +346,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
         if shouldResumeTask {
             taskToCancel?.resume()
         }
+        drained?()
         consumer?.resume(throwing: CancellationError())
     }
 
@@ -149,6 +355,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 var immediate: Result<Data?, Error>?
+                var drained: (@Sendable () -> Void)?
                 lock.lock()
                 if !chunks.isEmpty {
                     let data = chunks.removeFirst()
@@ -156,6 +363,9 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
                     if taskIsSuspended, bufferedBytes <= lowWaterMark {
                         task?.resume()
                         taskIsSuspended = false
+                    }
+                    if bufferedBytes == 0, completion != nil {
+                        drained = markDrainedLocked()
                     }
                     immediate = .success(data)
                 } else if let completion {
@@ -173,6 +383,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
                     )
                 }
                 lock.unlock()
+                drained?()
                 if let immediate {
                     continuation.resume(with: immediate)
                 }
@@ -181,18 +392,39 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
             cancel()
         }
     }
+
+    private func markDrainedLocked() -> (@Sendable () -> Void)? {
+        guard !drainNotified else { return nil }
+        drainNotified = true
+        return drainHandler
+    }
 }
 
 private final class URLSessionRequestContext: @unchecked Sendable {
     private let lock = NSLock()
     private let bodyChannel = URLSessionBodyChannel()
+    private let responseBufferBudget: HTTPResponseBufferBudget
+    private var responseBufferLease: HTTPResponseBufferBudget.Lease?
+    let networkMetrics = HTTPTransportResponseMetrics()
     private var responseContinuation: CheckedContinuation<HTTPTransportResponse, Error>?
     private var responseResult: Result<HTTPTransportResponse, Error>?
     private var responseResolved = false
     private var stagedData = Data()
     private var isTerminal = false
+    private var lifecycle = URLSessionRequestLifecycle()
 
     private let outputChunkSize = 256 * 1024
+
+    init(
+        responseBufferBudget: HTTPResponseBufferBudget,
+        responseBufferLease: HTTPResponseBufferBudget.Lease
+    ) {
+        self.responseBufferBudget = responseBufferBudget
+        self.responseBufferLease = responseBufferLease
+        self.bodyChannel.setDrainHandler { [weak self] in
+            self?.releaseResponseBuffer()
+        }
+    }
 
     func attach(task: URLSessionDataTask) {
         bodyChannel.attach(task: task)
@@ -224,7 +456,10 @@ private final class URLSessionRequestContext: @unchecked Sendable {
         }
     }
 
-    func receive(response: HTTPURLResponse) {
+    func receive(response: HTTPURLResponse) -> Bool {
+        lock.withLock {
+            lifecycle.markResponse()
+        }
         let channel = bodyChannel
         let body = AsyncThrowingStream<Data, Error>(unfolding: {
             try await channel.next()
@@ -235,9 +470,32 @@ private final class URLSessionRequestContext: @unchecked Sendable {
                 result[String(describing: entry.key)] = String(describing: entry.value)
             },
             body: body,
-            cancelBody: { channel.cancel() }
+            networkMetrics: networkMetrics,
+            cancelBody: { [self] in cancelBody() }
         )
         resolveResponse(.success(transportResponse))
+        return lock.withLock {
+            lifecycle.didComplete && lifecycle.didCollectMetrics
+        }
+    }
+
+    /// Returns true when both terminal callbacks have arrived and the
+    /// delegate can safely discard this context. URLSession may deliver task
+    /// metrics before or after `didCompleteWithError`; removing the context on
+    /// either callback alone loses protocol observations or leaves the body
+    /// stream without its completion signal.
+    func receive(metrics: URLSessionTaskMetrics) -> Bool {
+        if let transaction = metrics.transactionMetrics.last {
+            networkMetrics.update(
+                networkProtocolName: transaction.networkProtocolName,
+                reusedConnection: transaction.isReusedConnection
+            )
+        }
+        return lock.withLock { lifecycle.markMetrics() }
+    }
+
+    func expireMetrics() -> Bool {
+        lock.withLock { lifecycle.expireMetrics() }
     }
 
     func receive(data: Data) {
@@ -256,9 +514,11 @@ private final class URLSessionRequestContext: @unchecked Sendable {
         }
     }
 
-    func complete(error: Error?) {
+    func complete(error: Error?) -> Bool {
         var output: Data?
+        let shouldRemove: Bool
         lock.lock()
+        shouldRemove = lifecycle.markComplete()
         if !isTerminal {
             isTerminal = true
             if !stagedData.isEmpty {
@@ -274,6 +534,7 @@ private final class URLSessionRequestContext: @unchecked Sendable {
         resolveResponse(.failure(
             error ?? DownloadCoreError.responseMismatch("响应未返回 HTTP 标头")
         ))
+        return shouldRemove
     }
 
     func fail(_ error: Error) {
@@ -292,6 +553,20 @@ private final class URLSessionRequestContext: @unchecked Sendable {
         }
         resolveResponse(.failure(CancellationError()))
         bodyChannel.cancel()
+    }
+
+    func cancelBody() {
+        bodyChannel.cancel()
+    }
+
+    private func releaseResponseBuffer() {
+        let lease: HTTPResponseBufferBudget.Lease? = lock.withLock {
+            let lease = responseBufferLease
+            responseBufferLease = nil
+            return lease
+        }
+        guard let lease else { return }
+        Task { await responseBufferBudget.release(lease) }
     }
 
     private func resolveResponse(_ result: Result<HTTPTransportResponse, Error>) {
@@ -314,6 +589,7 @@ private final class URLSessionRequestContext: @unchecked Sendable {
 /// URLSession delegate for streaming response bodies plus the authentication
 /// cases that cannot be represented by request headers.
 private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private static let metricsCleanupDelay: Duration = .seconds(5)
     private let configuration: HTTPNetworkConfiguration
     private let contextLock = NSLock()
     private var contexts: [Int: URLSessionRequestContext] = [:]
@@ -340,10 +616,13 @@ private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @
         }
         guard let response = response as? HTTPURLResponse else {
             context.fail(DownloadCoreError.responseMismatch("响应不是 HTTP"))
+            removeContext(for: dataTask)
             completionHandler(.cancel)
             return
         }
-        context.receive(response: response)
+        if context.receive(response: response) {
+            removeContext(for: dataTask)
+        }
         completionHandler(.allow)
     }
 
@@ -352,10 +631,12 @@ private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        let context = contextLock.withLock {
-            contexts.removeValue(forKey: task.taskIdentifier)
+        guard let context = context(for: task) else { return }
+        if context.complete(error: error) {
+            removeContext(for: task)
+        } else {
+            scheduleMetricsCleanup(for: task.taskIdentifier, context: context)
         }
-        context?.complete(error: error)
     }
 
     func urlSession(
@@ -373,6 +654,16 @@ private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         respond(to: challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        if let context = context(for: task), context.receive(metrics: metrics) {
+            removeContext(for: task)
+        }
     }
 
     private func respond(
@@ -413,6 +704,48 @@ private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @
     private func context(for task: URLSessionTask) -> URLSessionRequestContext? {
         contextLock.withLock { contexts[task.taskIdentifier] }
     }
+
+    private func removeContext(for task: URLSessionTask) {
+        _ = contextLock.withLock {
+            contexts.removeValue(forKey: task.taskIdentifier)
+        }
+    }
+
+    private func context(for taskIdentifier: Int) -> URLSessionRequestContext? {
+        contextLock.withLock { contexts[taskIdentifier] }
+    }
+
+    private func removeContext(for taskIdentifier: Int, ifSame context: URLSessionRequestContext) {
+        contextLock.withLock {
+            guard let current = contexts[taskIdentifier], current === context else { return }
+            contexts.removeValue(forKey: taskIdentifier)
+        }
+    }
+
+    /// URLSession normally reports task metrics immediately after completion,
+    /// but the delegate contract does not make that callback a hard
+    /// requirement. Keep a completed HTTP context briefly for a late metrics
+    /// callback, then release the dictionary entry so a missing callback
+    /// cannot retain one context per request forever.
+    private func scheduleMetricsCleanup(
+        for taskIdentifier: Int,
+        context: URLSessionRequestContext
+    ) {
+        Task { [weak self, weak context] in
+            do {
+                try await Task.sleep(for: Self.metricsCleanupDelay)
+            } catch {
+                return
+            }
+            guard let self, let context,
+                  let current = self.context(for: taskIdentifier),
+                  current === context,
+                  context.expireMetrics() else {
+                return
+            }
+            self.removeContext(for: taskIdentifier, ifSame: context)
+        }
+    }
 }
 
 /// Builds URLSession requests while applying the configured macOS network
@@ -420,14 +753,17 @@ private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @
 /// retain its delegate strongly for the lifetime of the session on all SDKs.
 final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
     static let minimumConnectionsPerHost = 64
+    static let responseBufferReservation = 1024 * 1024
 
     private let session: URLSession
     private let delegate: URLSessionDelegateProxy
+    private let responseBufferBudget: HTTPResponseBufferBudget
     let configuredMaximumConnectionsPerHost: Int
 
     public init(
         configuration: URLSessionConfiguration = .ephemeral,
-        networkConfiguration: HTTPNetworkConfiguration = .default
+        networkConfiguration: HTTPNetworkConfiguration = .default,
+        responseBufferBudget: HTTPResponseBufferBudget = .shared
     ) {
         let networkConfiguration = networkConfiguration
         let sessionConfiguration = configuration
@@ -441,6 +777,7 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
         configuredMaximumConnectionsPerHost = sessionConfiguration.httpMaximumConnectionsPerHost
         let delegate = URLSessionDelegateProxy(configuration: networkConfiguration)
         self.delegate = delegate
+        self.responseBufferBudget = responseBufferBudget
         self.session = URLSession(
             configuration: sessionConfiguration,
             delegate: delegate,
@@ -453,7 +790,11 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
     }
 
     public func response(for request: URLRequest) async throws -> HTTPTransportResponse {
-        let context = URLSessionRequestContext()
+        let responseBufferLease = try await responseBufferBudget.acquire(Self.responseBufferReservation)
+        let context = URLSessionRequestContext(
+            responseBufferBudget: responseBufferBudget,
+            responseBufferLease: responseBufferLease
+        )
         let task = session.dataTask(with: request)
         context.attach(task: task)
         delegate.register(context, for: task)

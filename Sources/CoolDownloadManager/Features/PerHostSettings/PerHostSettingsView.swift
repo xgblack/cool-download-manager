@@ -138,18 +138,20 @@ struct PerHostSettingsView: View {
 
                 NativeSettingsGroup(title: "下载") {
                     NativeSettingsRow(title: "线程数") {
-                        TextField("留空使用全局设置", text: $state.threadCount)
+                        TextField("空=继承全局上限", text: $state.threadCount)
                             .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.trailing)
                             .monospacedDigit()
                             .frame(width: 160)
+                            .help("显式主机值是连接上限；空值继承全局上限，自动任务仍会参考学习画像作为起始档位")
                     }
                     NativeSettingsRow(title: "速度限制（字节/秒）", showsDivider: false) {
-                        TextField("留空使用全局设置", text: $state.speedLimit)
+                        TextField("字节/秒（空=全局，0=本地不限）", text: $state.speedLimit)
                             .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.trailing)
                             .monospacedDigit()
                             .frame(width: 160)
+                            .help("空值继承全局设置；0 只取消主机本地上限，全局上限仍生效")
                     }
                 }
             }

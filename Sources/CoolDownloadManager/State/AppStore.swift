@@ -29,6 +29,7 @@ final class AppStore: ObservableObject {
     private let queueStore: QueueStore?
     private let categoryStore: CategoryStore?
     private let perHostSettingsStore: PerHostSettingsStore?
+    private let hostPerformanceStore: HostPerformanceStore?
     private var integrationServer: LoopbackHTTPServer?
     private var privateSocketServer: PrivateSocketServer?
     private var queueScheduleTask: Task<Void, Never>?
@@ -54,6 +55,7 @@ final class AppStore: ObservableObject {
         self.settingsStore = loadedSettingsStore
         self.settings = initialSettings
         self.perHostSettingsStore = try? PerHostSettingsStore(dataRoot: dataRoot)
+        self.hostPerformanceStore = try? HostPerformanceStore(dataRoot: dataRoot)
 
         do {
             let store = try DownloadStore(rootURL: dataRoot)
@@ -74,7 +76,8 @@ final class AppStore: ObservableObject {
                     speedLimit: initialSettings.speedLimit,
                     userAgent: initialSettings.userAgent,
                     useServerLastModifiedTime: initialSettings.useServerLastModifiedTime
-                )
+                ),
+                hostPerformanceStore: hostPerformanceStore
             )
         } catch {
             self.store = nil
