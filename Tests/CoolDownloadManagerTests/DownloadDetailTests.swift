@@ -27,7 +27,7 @@ struct DownloadDetailTests {
         )
     }
 
-    @Test("失败任务没有分片时显示服务器错误而不是等待")
+    @Test("失败任务没有 Range 工作块时显示服务器错误")
     func reportsFailedEmptyParts() {
         let record = DownloadRecord(
             id: 7,
@@ -38,11 +38,11 @@ struct DownloadDetailTests {
             error: "服务器返回 HTTP 403"
         )
 
-        #expect(emptyPartsMessage(for: record) == "失败：服务器返回 HTTP 403")
+        #expect(emptyRangeWorkMessage(for: record) == "失败：服务器返回 HTTP 403")
     }
 
-    @Test("准备中的空分片仍显示等待")
-    func reportsWaitingEmptyParts() {
+    @Test("没有 Range 工作块时不暗示正在使用更多连接")
+    func reportsEmptyRangeWork() {
         let record = DownloadRecord(
             id: 8,
             source: DownloadSource(kind: .http, link: "https://example.test/file.bin"),
@@ -51,7 +51,42 @@ struct DownloadDetailTests {
             status: .downloading
         )
 
-        #expect(emptyPartsMessage(for: record) == "等待服务器返回分片信息")
+        #expect(emptyRangeWorkMessage(for: record) == "暂无 Range 工作块")
+    }
+
+    @Test("进度页按任务、主机、全局优先级显示最大连接数")
+    func displaysConfiguredConnectionLimit() {
+        var record = DownloadRecord(
+            id: 9,
+            source: DownloadSource(kind: .http, link: "https://cdn.example.test/file.bin"),
+            folder: "/tmp",
+            name: "file.bin"
+        )
+        let hostSettings = [
+            PerHostSettingsItem(host: "*.example.test", threadCount: 4),
+            PerHostSettingsItem(host: "cdn.example.test", threadCount: 8)
+        ]
+
+        #expect(displayedConnectionLimit(
+            for: record,
+            globalLimit: 16,
+            perHostSettings: hostSettings
+        ) == 8)
+
+        record.taskSettings = DownloadTaskSettings(threadCount: 12)
+        #expect(displayedConnectionLimit(
+            for: record,
+            globalLimit: 16,
+            perHostSettings: hostSettings
+        ) == 12)
+
+        record.taskSettings = nil
+        record.source.link = "https://other.invalid/file.bin"
+        #expect(displayedConnectionLimit(
+            for: record,
+            globalLimit: 16,
+            perHostSettings: hostSettings
+        ) == 16)
     }
 
     @Test("旧下载事件不能覆盖较新的暂停状态")

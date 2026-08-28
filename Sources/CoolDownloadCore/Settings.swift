@@ -341,7 +341,7 @@ public actor SettingsStore {
 
     private func validate(_ settings: AppSettingsModel) throws {
         guard (1...64).contains(settings.threadCount) else {
-            throw SettingsStoreError.invalid("线程数必须在 1 到 64 之间")
+            throw SettingsStoreError.invalid("单任务最大连接数必须在 1 到 64 之间")
         }
         guard (0...256).contains(settings.maxConcurrentDownloads) else {
             throw SettingsStoreError.invalid("最大并发数必须在 0 到 256 之间")

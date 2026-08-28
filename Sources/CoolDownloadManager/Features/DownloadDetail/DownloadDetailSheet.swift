@@ -107,13 +107,13 @@ struct DownloadDetailSheet: View {
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 14) {
             NativeSettingsGroup(title: "任务下载设置") {
-                NativeSettingsRow(title: "线程数") {
+                NativeSettingsRow(title: "最大连接数") {
                     settingField(
                         placeholder: "空=继承主机/全局上限",
                         text: $viewState.threadCount,
                         effect: threadCountEffectText
                     )
-                    .help("显式任务值是连接上限；空值按主机覆盖或全局上限选择，自动任务仍会参考学习画像作为起始档位")
+                    .help("空值继承主机或全局连接上限；实际连接数仍由自适应调度决定")
                 }
                 NativeSettingsRow(title: "速度限制") {
                     settingField(
@@ -153,7 +153,7 @@ struct DownloadDetailSheet: View {
         } else if let value = Int(threadText), (1...64).contains(value) {
             threadCount = value
         } else {
-            viewState.errorMessage = "任务线程数必须是 1 到 64 之间的整数，或留空。"
+            viewState.errorMessage = "任务最大连接数必须是 1 到 64 之间的整数，或留空。"
             return
         }
         let speedLimit: Int64?
@@ -296,7 +296,7 @@ struct DownloadDetailSheet: View {
         case .added, .paused, .failed, .cancelled:
             return "下次开始时生效"
         case .preparing, .downloading, .retrying:
-            return "尚未创建分片时本次生效"
+            return "尚未创建 Range 工作块时本次生效"
         case .completed:
             return "重新下载时生效"
         }

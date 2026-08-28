@@ -161,7 +161,7 @@ public struct DownloadTaskSettings: Codable, Sendable, Equatable {
 
     public func validated() throws -> Self {
         if let threadCount, !(1...64).contains(threadCount) {
-            throw DownloadCoreError.invalidTaskSettings("任务线程数必须在 1 到 64 之间")
+            throw DownloadCoreError.invalidTaskSettings("任务最大连接数必须在 1 到 64 之间")
         }
         if let speedLimit, speedLimit < 0 {
             throw DownloadCoreError.invalidTaskSettings("任务速度限制不能为负数")

@@ -194,7 +194,7 @@ struct CoreTests {
             )
             Issue.record("thread counts above the supported range should fail")
         } catch let error as DownloadCoreError {
-            #expect(error == .invalidTaskSettings("任务线程数必须在 1 到 64 之间"))
+            #expect(error == .invalidTaskSettings("任务最大连接数必须在 1 到 64 之间"))
         }
     }
 

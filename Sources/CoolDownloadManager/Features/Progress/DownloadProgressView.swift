@@ -1,19 +1,38 @@
 import SwiftUI
 import CoolDownloadCore
 
-func emptyPartsMessage(for record: DownloadRecord) -> String {
-    guard record.status == .failed else {
-        return "等待服务器返回分片信息"
-    }
+func emptyRangeWorkMessage(for record: DownloadRecord) -> String {
+    guard record.status == .failed else { return "暂无 Range 工作块" }
     return record.error.map { "失败：\($0)" } ?? "下载失败"
+}
+
+func displayedConnectionLimit(
+    for record: DownloadRecord,
+    globalLimit: Int,
+    perHostSettings: [PerHostSettingsItem]
+) -> Int {
+    if let taskLimit = record.taskSettings?.threadCount {
+        return min(max(1, taskLimit), 64)
+    }
+    guard let host = URL(string: record.source.link)?.host?.lowercased(), !host.isEmpty else {
+        return min(max(1, globalLimit), 64)
+    }
+    let hostLimit = perHostSettings
+        .sorted { lhs, rhs in
+            let lhsWildcards = lhs.host.filter { $0 == "*" }.count
+            let rhsWildcards = rhs.host.filter { $0 == "*" }.count
+            if lhsWildcards != rhsWildcards { return lhsWildcards < rhsWildcards }
+            return lhs.host.count > rhs.host.count
+        }
+        .first { $0.matches(host: host) }?
+        .threadCount
+    return min(max(1, hostLimit ?? globalLimit), 64)
 }
 
 /// Native macOS progress surface for one download.
 ///
-/// The original client keeps the aggregate progress and the individual
-/// connection parts visible together. `DownloadRecord.parts` is persisted by
-/// the core, so the same information remains available after reopening the
-/// panel or resuming a download.
+/// Aggregate progress stays primary while persisted Range work remains
+/// available as optional diagnostics after reopening or resuming a download.
 struct DownloadProgressView: View {
     let record: DownloadRecord
     @ObservedObject var store: DownloadListStore
@@ -46,6 +65,14 @@ struct DownloadProgressView: View {
             return nil
         }
         return formattedDuration(Double(total - currentRecord.downloadedBytes) / speed)
+    }
+
+    private var connectionLimit: Int {
+        displayedConnectionLimit(
+            for: currentRecord,
+            globalLimit: coordinator.store.settings.threadCount,
+            perHostSettings: coordinator.store.perHostSettings
+        )
     }
 
     var body: some View {
@@ -114,7 +141,7 @@ struct DownloadProgressView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, 18)
                 Divider().frame(height: 34)
-                metric("分片", value: "\(currentRecord.parts.count)")
+                metric("最大连接数", value: "\(connectionLimit)")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, 18)
             }
@@ -132,11 +159,11 @@ struct DownloadProgressView: View {
     private var partSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("分片进度")
+                Text("Range 工作块")
                     .font(.headline)
                 Spacer()
                 if !currentRecord.parts.isEmpty {
-                    Text("已完成 \(completedPartCount)/\(currentRecord.parts.count)")
+                    Text("已完成 \(completedPartCount) / \(currentRecord.parts.count)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -155,7 +182,7 @@ struct DownloadProgressView: View {
             }
 
             if currentRecord.parts.isEmpty {
-                Text(emptyPartsMessage(for: currentRecord))
+                Text(emptyRangeWorkMessage(for: currentRecord))
                     .font(.callout)
                     .foregroundStyle(currentRecord.status == .failed ? .red : .secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -185,7 +212,7 @@ struct DownloadProgressView: View {
         }
         .frame(height: 12)
         .background(Color.secondary.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
-        .accessibilityLabel("各分片总体进度")
+        .accessibilityLabel("各 Range 工作块总体进度")
     }
 
     private var partTable: some View {
@@ -197,7 +224,7 @@ struct DownloadProgressView: View {
     private func partTableContent(at date: Date) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text("分片")
+                Text("工作块")
                     .frame(width: 50, alignment: .leading)
                 Text("状态")
                     .frame(width: 90, alignment: .leading)
@@ -443,7 +470,7 @@ struct DownloadProgressView: View {
 
 @MainActor
 private final class ProgressViewState: ObservableObject {
-    @Published var showsPartDetails = true
+    @Published var showsPartDetails = false
 }
 
 private struct PartProgressSegment: View {
@@ -460,7 +487,7 @@ private struct PartProgressSegment: View {
                 }
         }
         .frame(width: width)
-        .accessibilityLabel("分片 \(part.id + 1)，\(Int(progress * 100))%")
+        .accessibilityLabel("Range 工作块 \(part.id + 1)，\(Int(progress * 100))%")
     }
 
     private var progress: Double {

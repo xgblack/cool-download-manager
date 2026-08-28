@@ -39,7 +39,7 @@ public struct PerHostSettingsItem: Codable, Equatable, Sendable, Identifiable {
             throw PerHostSettingsError.invalid("主机设置不能包含路径")
         }
         if let threadCount, !(1...64).contains(threadCount) {
-            throw PerHostSettingsError.invalid("主机线程数必须在 1 到 64 之间")
+            throw PerHostSettingsError.invalid("主机最大连接数必须在 1 到 64 之间")
         }
         if let speedLimit, speedLimit < 0 {
             throw PerHostSettingsError.invalid("主机速度限制不能为负数")
