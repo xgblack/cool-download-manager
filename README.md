@@ -33,7 +33,7 @@ The macOS vertical slice currently covers:
 - Basic SwiftUI download list actions: add, start, pause, retry, remove, queue,
   category, checksum, and completion flows
 - Persistent settings, per-host overrides, queue scheduling, and task-level
-  thread/speed overrides, proxy/PAC selection, proxy authentication, and
+  connection/speed overrides, proxy/PAC selection, proxy authentication, and
   optional server `Last-Modified` timestamps
 - Queue-specific concurrency, automatic-stop policy, and one-shot completion
   events surfaced to the macOS UI
@@ -46,6 +46,14 @@ flow. DNS server addresses are stored and validated for migration compatibility,
 but URLSession does not expose a per-session resolver API. The implementation
 status and compatibility decisions are tracked in
 `.helloagents/plans/swift-native-macos-rewrite/`.
+
+## Download Scheduling Model
+
+The product vocabulary and current decision flow for simultaneous downloads,
+per-task connection ceilings, HTTP Range work units, and small/large files are
+documented in [下载调度概念与处理流程](docs/download-scheduling-concepts.md).
+Benchmark evidence and the Motrix/aria2 comparison remain in
+[下载核心性能评估](docs/download-core-performance-evaluation.md).
 
 ## Build And Test
 
