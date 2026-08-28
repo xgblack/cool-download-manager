@@ -30,7 +30,8 @@ public final class HLSDownloader: @unchecked Sendable {
         progress: (@Sendable (Int64, Int, Int, Int64) async -> Void)? = nil,
         rateLimiter: DownloadRateLimiter? = nil,
         fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
-        downloadID: DownloadID? = nil
+        downloadID: DownloadID? = nil,
+        activity: HTTPRequestActivityHandler? = nil
     ) async throws -> HLSDownloadResult {
         guard let playlistURL = URL(string: source.link),
               let scheme = playlistURL.scheme?.lowercased(),
@@ -43,7 +44,8 @@ public final class HLSDownloader: @unchecked Sendable {
             headers: source.headers,
             depth: 0,
             fileDescriptorBudget: fileDescriptorBudget,
-            downloadID: downloadID
+            downloadID: downloadID,
+            activity: activity
         )
         guard !playlist.segments.isEmpty else {
             throw DownloadCoreError.unsupportedHLS("播放列表不包含媒体分片")
@@ -106,7 +108,8 @@ public final class HLSDownloader: @unchecked Sendable {
                 headers: source.headers,
                 rateLimiter: rateLimiter,
                 fileDescriptorBudget: fileDescriptorBudget,
-                downloadID: downloadID
+                downloadID: downloadID,
+                activity: activity
             )
             try await writer.append(data)
             totalBytes += Int64(data.count)
@@ -119,7 +122,8 @@ public final class HLSDownloader: @unchecked Sendable {
                 headers: source.headers,
                 rateLimiter: rateLimiter,
                 fileDescriptorBudget: fileDescriptorBudget,
-                downloadID: downloadID
+                downloadID: downloadID,
+                activity: activity
             )
             try Task.checkCancellation()
             try await writer.append(data)
@@ -139,7 +143,8 @@ public final class HLSDownloader: @unchecked Sendable {
         headers: [String: String]?,
         depth: Int,
         fileDescriptorBudget: HTTPFileDescriptorBudget?,
-        downloadID: DownloadID?
+        downloadID: DownloadID?,
+        activity: HTTPRequestActivityHandler?
     ) async throws -> Playlist {
         guard depth < 3 else {
             throw DownloadCoreError.unsupportedHLS("主播放列表嵌套层级过深")
@@ -148,7 +153,8 @@ public final class HLSDownloader: @unchecked Sendable {
             url: url,
             headers: headers,
             fileDescriptorBudget: fileDescriptorBudget,
-            downloadID: downloadID
+            downloadID: downloadID,
+            activity: activity
         )
         guard let text = String(data: data, encoding: .utf8) else {
             throw DownloadCoreError.unsupportedHLS("播放列表不是 UTF-8 文本")
@@ -165,7 +171,8 @@ public final class HLSDownloader: @unchecked Sendable {
                 headers: headers,
                 depth: depth + 1,
                 fileDescriptorBudget: fileDescriptorBudget,
-                downloadID: downloadID
+                downloadID: downloadID,
+                activity: activity
             )
         }
 
@@ -234,7 +241,8 @@ public final class HLSDownloader: @unchecked Sendable {
         headers: [String: String]?,
         rateLimiter: DownloadRateLimiter? = nil,
         fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
-        downloadID: DownloadID? = nil
+        downloadID: DownloadID? = nil,
+        activity: HTTPRequestActivityHandler? = nil
     ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -245,7 +253,8 @@ public final class HLSDownloader: @unchecked Sendable {
             budget: fileDescriptorBudget,
             downloadID: downloadID
         ) { [self] in
-            let response = try await self.transport.response(for: preparedRequest)
+            try await withHTTPRequestActivity(activity) {
+                let response = try await self.transport.response(for: preparedRequest)
             defer { response.cancelBody() }
             guard (200...299).contains(response.statusCode) else {
                 throw DownloadCoreError.httpStatus(response.statusCode)
@@ -257,6 +266,7 @@ public final class HLSDownloader: @unchecked Sendable {
                 result.append(chunk)
             }
             return result
+            }
         }
     }
 }

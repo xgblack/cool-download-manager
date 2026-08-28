@@ -86,6 +86,30 @@ public protocol HTTPTransport: Sendable {
     func response(for request: URLRequest) async throws -> HTTPTransportResponse
 }
 
+/// Reports the lifetime of one active HTTP data request. The callback runs
+/// after any file-descriptor reservation is acquired and before the transport
+/// starts, then runs again after the response body has been fully consumed or
+/// the request fails.
+public typealias HTTPRequestActivityHandler = @Sendable (_ active: Bool) async -> Void
+
+func withHTTPRequestActivity<T: Sendable>(
+    _ activity: HTTPRequestActivityHandler?,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    guard let activity else {
+        return try await operation()
+    }
+    await activity(true)
+    do {
+        let value = try await operation()
+        await activity(false)
+        return value
+    } catch {
+        await activity(false)
+        throw error
+    }
+}
+
 public final class HTTPDownloader: @unchecked Sendable {
     private let transport: any HTTPTransport
     private let defaultMetrics: any DownloadMetricsSink
@@ -115,7 +139,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         source: DownloadSource,
         metrics: (any DownloadMetricsSink)? = nil,
         downloadID: DownloadID? = nil,
-        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
+        activity: HTTPRequestActivityHandler? = nil
     ) async throws -> HTTPResourceMetadata {
         let url = try validatedURL(source.link)
         let sink = metrics ?? defaultMetrics
@@ -125,7 +150,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 url: url,
                 metrics: sink,
                 downloadID: downloadID,
-                fileDescriptorBudget: fileDescriptorBudget
+                fileDescriptorBudget: fileDescriptorBudget,
+                activity: activity
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -139,7 +165,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                     url: url,
                     metrics: sink,
                     downloadID: downloadID,
-                    fileDescriptorBudget: fileDescriptorBudget
+                    fileDescriptorBudget: fileDescriptorBudget,
+                    activity: activity
                 )
             case .httpStatus(let status) where status == 405 || status == 416 || status == 501:
                 // These statuses mean the range form is unavailable. Retry
@@ -149,7 +176,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                     url: url,
                     metrics: sink,
                     downloadID: downloadID,
-                    fileDescriptorBudget: fileDescriptorBudget
+                    fileDescriptorBudget: fileDescriptorBudget,
+                    activity: activity
                 )
             default:
                 throw error
@@ -176,7 +204,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         rateLimiter: DownloadRateLimiter? = nil,
         metrics: (any DownloadMetricsSink)? = nil,
         downloadID: DownloadID? = nil,
-        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
+        activity: HTTPRequestActivityHandler? = nil
     ) async throws -> HTTPDownloadResult {
         let url = try validatedURL(source.link)
         let sink = metrics ?? defaultMetrics
@@ -203,7 +232,8 @@ public final class HTTPDownloader: @unchecked Sendable {
             budget: fileDescriptorBudget,
             downloadID: downloadID
         ) { [self] in
-            let response = try await self.transport.response(for: preparedRequest)
+            try await withHTTPRequestActivity(activity) {
+                let response = try await self.transport.response(for: preparedRequest)
             tracker?.markResponse(response)
             defer { response.cancelBody() }
             let statusCode = response.statusCode
@@ -326,6 +356,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                     response.header("Content-Disposition")
                 )
             )
+            }
         }
     }
 
@@ -340,7 +371,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         rateLimiter: DownloadRateLimiter? = nil,
         metrics: (any DownloadMetricsSink)? = nil,
         downloadID: DownloadID? = nil,
-        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil
+        fileDescriptorBudget: HTTPFileDescriptorBudget? = nil,
+        activity: HTTPRequestActivityHandler? = nil
     ) async throws -> HTTPDownloadResult {
         guard start >= 0, end >= start else {
             throw DownloadCoreError.responseMismatch("请求的字节范围无效")
@@ -367,7 +399,8 @@ public final class HTTPDownloader: @unchecked Sendable {
             budget: fileDescriptorBudget,
             downloadID: downloadID
         ) { [self] in
-            let response = try await self.transport.response(for: preparedRequest)
+            try await withHTTPRequestActivity(activity) {
+                let response = try await self.transport.response(for: preparedRequest)
             tracker?.markResponse(response)
             defer { response.cancelBody() }
             guard response.statusCode == 206 else {
@@ -433,6 +466,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                     response.header("Content-Disposition")
                 )
             )
+            }
         }
     }
 
@@ -462,7 +496,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         url: URL,
         metrics: any DownloadMetricsSink,
         downloadID: DownloadID?,
-        fileDescriptorBudget: HTTPFileDescriptorBudget?
+        fileDescriptorBudget: HTTPFileDescriptorBudget?,
+        activity: HTTPRequestActivityHandler?
     ) async throws -> HTTPResourceMetadata {
         let tracker = metrics.isEnabled ? HTTPMetricTracker(
             sink: metrics,
@@ -481,7 +516,8 @@ public final class HTTPDownloader: @unchecked Sendable {
             budget: fileDescriptorBudget,
             downloadID: downloadID
         ) { [self] in
-            let response = try await self.transport.response(for: preparedRequest)
+            try await withHTTPRequestActivity(activity) {
+                let response = try await self.transport.response(for: preparedRequest)
             tracker?.markResponse(response)
             defer { response.cancelBody() }
             guard (200...299).contains(response.statusCode) else {
@@ -533,6 +569,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                 lastModified: lastModified,
                 fileName: fileName
             )
+            }
         }
     }
 
@@ -541,7 +578,8 @@ public final class HTTPDownloader: @unchecked Sendable {
         url: URL,
         metrics: any DownloadMetricsSink,
         downloadID: DownloadID?,
-        fileDescriptorBudget: HTTPFileDescriptorBudget?
+        fileDescriptorBudget: HTTPFileDescriptorBudget?,
+        activity: HTTPRequestActivityHandler?
     ) async throws -> HTTPResourceMetadata {
         let tracker = metrics.isEnabled ? HTTPMetricTracker(
             sink: metrics,
@@ -559,7 +597,8 @@ public final class HTTPDownloader: @unchecked Sendable {
             budget: fileDescriptorBudget,
             downloadID: downloadID
         ) { [self] in
-            let response = try await self.transport.response(for: preparedRequest)
+            try await withHTTPRequestActivity(activity) {
+                let response = try await self.transport.response(for: preparedRequest)
             tracker?.markResponse(response)
             defer { response.cancelBody() }
             guard (200...299).contains(response.statusCode) else {
@@ -574,6 +613,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                     response.header("Content-Disposition")
                 )
             )
+            }
         }
     }
 

@@ -707,6 +707,8 @@ final class AppStore: ObservableObject {
             notificationStatuses[record.id] = record.status
         case .removed(let id):
             notificationStatuses[id] = nil
+        case .activeConnectionCountChanged:
+            break
         }
     }
 

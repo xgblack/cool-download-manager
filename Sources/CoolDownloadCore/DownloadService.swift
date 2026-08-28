@@ -39,6 +39,7 @@ public actor DownloadService {
     private var lastProgressPersistence: [DownloadID: ContinuousClock.Instant] = [:]
     private var lastProgressPersistenceBytes: [DownloadID: Int64] = [:]
     private var lastProgressEvent: [DownloadID: ContinuousClock.Instant] = [:]
+    private var activeConnectionCounts: [DownloadID: Int] = [:]
     private var shuttingDown = false
 
     private static let progressPersistenceInterval: Duration = .seconds(2)
@@ -82,6 +83,7 @@ public actor DownloadService {
 
     public func boot() async throws {
         shuttingDown = false
+        activeConnectionCounts.removeAll(keepingCapacity: true)
         await store.updateMetrics(metrics)
         var loaded = Dictionary(
             uniqueKeysWithValues: try await store.load().map { ($0.id, $0) }
@@ -269,6 +271,7 @@ public actor DownloadService {
         tasks.removeAll()
         activeIDs.removeAll()
         activeQueueIDs.removeAll()
+        activeConnectionCounts.removeAll(keepingCapacity: true)
         subscribers.values.forEach { $0.finish() }
         subscribers.removeAll()
         queueEventSubscribers.values.forEach { $0.finish() }
@@ -734,6 +737,7 @@ public actor DownloadService {
             lastProgressPersistence[id] = nil
             lastProgressPersistenceBytes[id] = nil
             lastProgressEvent[id] = nil
+            resetActiveConnectionCount(for: id)
             if shouldRecordMetrics {
                 let finalRecord = records[id]
                 metrics.record(.taskFinished(
@@ -950,7 +954,8 @@ public actor DownloadService {
                         },
                         rateLimiter: rateLimiter,
                         fileDescriptorBudget: fileDescriptorBudget,
-                        downloadID: id
+                        downloadID: id,
+                        activity: requestActivityHandler(for: id)
                     )
                     if let retryLease {
                         await retryBudget.release(retryLease)
@@ -987,7 +992,8 @@ public actor DownloadService {
                         rateLimiter: rateLimiter,
                         metrics: metrics,
                         downloadID: id,
-                        fileDescriptorBudget: fileDescriptorBudget
+                        fileDescriptorBudget: fileDescriptorBudget,
+                        activity: requestActivityHandler(for: id)
                     )
                 }
                 let totalBytes: Int64
@@ -1070,7 +1076,8 @@ public actor DownloadService {
             source: source,
             metrics: metrics,
             downloadID: id,
-            fileDescriptorBudget: fileDescriptorBudget
+            fileDescriptorBudget: fileDescriptorBudget,
+            activity: requestActivityHandler(for: id)
         )
         guard let totalBytes = metadata.totalBytes, totalBytes >= 0 else {
             if record.parts.isEmpty {
@@ -1086,7 +1093,8 @@ public actor DownloadService {
                     rateLimiter: rateLimiter,
                     metrics: metrics,
                     downloadID: id,
-                    fileDescriptorBudget: fileDescriptorBudget
+                    fileDescriptorBudget: fileDescriptorBudget,
+                    activity: requestActivityHandler(for: id)
                 )
             }
             throw DownloadCoreError.responseMismatch("并行下载需要已知的资源大小")
@@ -1118,7 +1126,8 @@ public actor DownloadService {
                 rateLimiter: rateLimiter,
                 metrics: metrics,
                 downloadID: id,
-                fileDescriptorBudget: fileDescriptorBudget
+                fileDescriptorBudget: fileDescriptorBudget,
+                activity: requestActivityHandler(for: id)
             )
         }
 
@@ -1139,7 +1148,8 @@ public actor DownloadService {
                 rateLimiter: rateLimiter,
                 metrics: metrics,
                 downloadID: id,
-                fileDescriptorBudget: fileDescriptorBudget
+                fileDescriptorBudget: fileDescriptorBudget,
+                activity: requestActivityHandler(for: id)
             )
         }
 
@@ -1379,7 +1389,8 @@ public actor DownloadService {
                     rateLimiter: rateLimiter,
                     metrics: self.metrics,
                     downloadID: id,
-                    fileDescriptorBudget: nil
+                    fileDescriptorBudget: nil,
+                    activity: self.requestActivityHandler(for: id)
                 )
                 await self.rangeConnectionBudget.release(lease)
                 return HTTPRangeRequestResult(
@@ -1391,6 +1402,29 @@ public actor DownloadService {
                 throw error
             }
         }
+    }
+
+    private func setActiveConnection(for id: DownloadID, active: Bool) {
+        let previous = activeConnectionCounts[id] ?? 0
+        let current = max(0, previous + (active ? 1 : -1))
+        guard current != previous else { return }
+        if current == 0 {
+            activeConnectionCounts[id] = nil
+        } else {
+            activeConnectionCounts[id] = current
+        }
+        emit(.activeConnectionCountChanged(id: id, count: current))
+    }
+
+    private func requestActivityHandler(for id: DownloadID) -> HTTPRequestActivityHandler {
+        { [weak self] active in
+            await self?.setActiveConnection(for: id, active: active)
+        }
+    }
+
+    private func resetActiveConnectionCount(for id: DownloadID) {
+        guard activeConnectionCounts.removeValue(forKey: id) != nil else { return }
+        emit(.activeConnectionCountChanged(id: id, count: 0))
     }
 
     private func makeHTTPParts(
@@ -1715,6 +1749,8 @@ public actor DownloadService {
             descriptor = (record.id, "updated")
         case .removed(let id):
             descriptor = (id, "removed")
+        case .activeConnectionCountChanged(let id, _):
+            descriptor = (id, "activeConnectionCountChanged")
         }
         metrics.record(.eventPublished(
             id: descriptor.id,

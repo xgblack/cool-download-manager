@@ -75,6 +75,10 @@ struct DownloadProgressView: View {
         )
     }
 
+    private var activeConnectionCount: Int {
+        store.activeConnectionCount(for: currentRecord.id)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -141,9 +145,13 @@ struct DownloadProgressView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, 18)
                 Divider().frame(height: 34)
-                metric("最大连接数", value: "\(connectionLimit)")
+                metric(
+                    "连接数（当前 / 设置上限）",
+                    value: "\(activeConnectionCount) / \(connectionLimit)"
+                )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, 18)
+                    .help("当前正在执行的 HTTP 数据请求数 / 本任务设置的连接上限；HTTP/2 可能复用底层 TCP 连接")
             }
             .padding(.vertical, 3)
 

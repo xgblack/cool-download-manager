@@ -291,4 +291,7 @@ public enum DownloadEvent: Sendable, Equatable {
     case created(DownloadRecord)
     case updated(DownloadRecord)
     case removed(id: DownloadID)
+    /// Non-persistent runtime state. The count represents active HTTP data
+    /// requests for this task; HTTP/2 may reuse one underlying TCP connection.
+    case activeConnectionCountChanged(id: DownloadID, count: Int)
 }

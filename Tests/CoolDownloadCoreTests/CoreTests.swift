@@ -1405,6 +1405,52 @@ struct CoreTests {
         #expect(try Data(contentsOf: record.destinationURL) == Data("hello world".utf8))
     }
 
+    @Test("ordinary HTTP downloads report one active connection")
+    func ordinaryDownloadPublishesActiveConnectionCount() async throws {
+        let transport = SlowTransport(delay: .milliseconds(80))
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 1
+            )
+        )
+        try await service.boot()
+        let recorder = ActiveConnectionEventRecorder()
+        let events = await service.events()
+        let observer = Task {
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                recorder.record(event)
+            }
+        }
+        defer { observer.cancel() }
+
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/ordinary-runtime-count.bin",
+                suggestedName: "ordinary-runtime-count.bin"
+            ),
+            folder: root.path,
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline, !recorder.completedCycle(for: id) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(recorder.counts(for: id).contains(1))
+        #expect(recorder.counts(for: id).last == 0)
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        await service.shutdown()
+    }
+
     @Test("completed downloads can be explicitly redownloaded")
     func serviceRedownloadsCompletedFile() async throws {
         let transport = MemoryTransport()
@@ -1486,6 +1532,123 @@ struct CoreTests {
         #expect(transport.requestCount() == 13)
         #expect(transport.recordedRequests().first?.httpMethod == "GET")
         #expect(transport.recordedRequests().first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+        await service.shutdown()
+    }
+
+    @Test("active connection events follow leased requests and return to zero")
+    func servicePublishesActiveRangeRequestCounts() async throws {
+        let content = Data(repeating: 0x41, count: 48)
+        let transport = ConcurrentRangeTransport(
+            content: content,
+            responseDelay: .milliseconds(50)
+        )
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 3,
+                minimumPartSize: 1,
+                maxTotalConnections: 3
+            )
+        )
+        try await service.boot()
+        let recorder = ActiveConnectionEventRecorder()
+        let events = await service.events()
+        let observer = Task {
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                recorder.record(event)
+            }
+        }
+        defer { observer.cancel() }
+
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/runtime-count.bin",
+                suggestedName: "runtime-count.bin"
+            ),
+            folder: root.path,
+            start: true,
+            taskSettings: DownloadTaskSettings(threadCount: 3)
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        while ContinuousClock.now < deadline, !recorder.completedCycle(for: id) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let counts = recorder.counts(for: id)
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
+        #expect(counts.contains(3))
+        #expect(counts.allSatisfy { (0...3).contains($0) })
+        #expect(counts.last == 0)
+        #expect(transport.maxObserved() == 3)
+        await service.shutdown()
+    }
+
+    @Test("cancelling Range requests publishes a final zero active count")
+    func cancelledRangeRequestsPublishZeroActiveCount() async throws {
+        let content = Data(repeating: 0x42, count: 32)
+        let transport = ConcurrentRangeTransport(
+            content: content,
+            responseDelay: .milliseconds(200)
+        )
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1,
+                maxTotalConnections: 2
+            )
+        )
+        try await service.boot()
+        let recorder = ActiveConnectionEventRecorder()
+        let events = await service.events()
+        let observer = Task {
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                recorder.record(event)
+            }
+        }
+        defer { observer.cancel() }
+
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/cancel-runtime-count.bin",
+                suggestedName: "cancel-runtime-count.bin"
+            ),
+            folder: root.path,
+            start: true,
+            taskSettings: DownloadTaskSettings(threadCount: 2)
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline, recorder.maximumCount(for: id) < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try await service.pause(ids: [id])
+        while ContinuousClock.now < deadline, !recorder.completedCycle(for: id) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(recorder.maximumCount(for: id) == 2)
+        #expect(recorder.counts(for: id).last == 0)
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .paused)
         await service.shutdown()
     }
 
@@ -3879,5 +4042,28 @@ private final class ConcurrentRangeTransport: HTTPTransport, @unchecked Sendable
         let bounds = raw.split(separator: "-", maxSplits: 1).compactMap { Int64($0) }
         guard bounds.count == 2 else { return nil }
         return (bounds[0], bounds[1])
+    }
+}
+
+private final class ActiveConnectionEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var countsByDownload: [DownloadID: [Int]] = [:]
+
+    func record(_ event: DownloadEvent) {
+        guard case .activeConnectionCountChanged(let id, let count) = event else { return }
+        lock.withLock { countsByDownload[id, default: []].append(count) }
+    }
+
+    func counts(for id: DownloadID) -> [Int] {
+        lock.withLock { countsByDownload[id] ?? [] }
+    }
+
+    func maximumCount(for id: DownloadID) -> Int {
+        counts(for: id).max() ?? 0
+    }
+
+    func completedCycle(for id: DownloadID) -> Bool {
+        let counts = counts(for: id)
+        return counts.contains(where: { $0 > 0 }) && counts.last == 0
     }
 }

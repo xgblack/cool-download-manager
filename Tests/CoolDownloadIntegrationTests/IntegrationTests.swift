@@ -313,6 +313,8 @@ struct IntegrationTests {
                     record = value
                 case .removed:
                     record = nil
+                case .activeConnectionCountChanged:
+                    record = nil
                 }
                 if let record, record.name == "browser-progress.bin" {
                     statuses.append(record.status)

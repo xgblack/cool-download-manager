@@ -89,6 +89,30 @@ struct DownloadDetailTests {
         ) == 16)
     }
 
+    @Test("活动连接数在暂停后清零并忽略过期事件")
+    @MainActor
+    func tracksActiveConnectionCountOnlyWhileDownloading() {
+        let store = DownloadListStore(service: nil)
+        var record = DownloadRecord(
+            id: 10,
+            source: DownloadSource(kind: .http, link: "https://example.test/file.bin"),
+            folder: "/tmp",
+            name: "file.bin",
+            status: .downloading
+        )
+        store.apply([record], announceCompletion: false)
+        store.apply(.activeConnectionCountChanged(id: record.id, count: 3))
+        #expect(store.activeConnectionCount(for: record.id) == 3)
+
+        record.status = .paused
+        record.revision += 1
+        store.apply([record], announceCompletion: false)
+        #expect(store.activeConnectionCount(for: record.id) == 0)
+
+        store.apply(.activeConnectionCountChanged(id: record.id, count: 2))
+        #expect(store.activeConnectionCount(for: record.id) == 0)
+    }
+
     @Test("旧下载事件不能覆盖较新的暂停状态")
     @MainActor
     func staleDownloadEventDoesNotResumePausedTask() {

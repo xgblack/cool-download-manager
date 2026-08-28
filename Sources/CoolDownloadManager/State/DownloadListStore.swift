@@ -163,6 +163,7 @@ final class DownloadListStore: ObservableObject {
     @Published private(set) var progressID: DownloadID?
     @Published private(set) var failedID: DownloadID?
     @Published private(set) var speeds: [DownloadID: Double] = [:]
+    @Published private(set) var activeConnectionCounts: [DownloadID: Int] = [:]
 
     let service: DownloadService?
     /// Called after a snapshot no longer contains records that were visible
@@ -250,7 +251,7 @@ final class DownloadListStore: ObservableObject {
         }
     }
 
-    private func apply(_ event: DownloadEvent) {
+    func apply(_ event: DownloadEvent) {
         switch event {
         case .created(let record), .updated(let record):
             if let current = downloads.first(where: { $0.id == record.id }),
@@ -263,9 +264,12 @@ final class DownloadListStore: ObservableObject {
             next.append(record)
             apply(next, updatePartSpeeds: false, at: now)
         case .removed(let id):
+            setActiveConnectionCount(0, for: id)
             partSpeedSampler.remove(downloadID: id)
             guard downloads.contains(where: { $0.id == id }) else { return }
             apply(downloads.filter { $0.id != id }, updatePartSpeeds: false)
+        case .activeConnectionCountChanged(let id, let count):
+            setActiveConnectionCount(count, for: id)
         }
     }
 
@@ -317,6 +321,13 @@ final class DownloadListStore: ObservableObject {
         }
         downloads = acceptedRecords.sorted { $0.createdAt > $1.createdAt }
         knownStatuses = Dictionary(uniqueKeysWithValues: acceptedRecords.map { ($0.id, $0.status) })
+        let downloadingIDs = Set(acceptedRecords.lazy.filter { $0.status == .downloading }.map(\.id))
+        let staleRuntimeIDs = activeConnectionCounts.keys.filter { !downloadingIDs.contains($0) }
+        if !staleRuntimeIDs.isEmpty {
+            var nextCounts = activeConnectionCounts
+            staleRuntimeIDs.forEach { nextCounts[$0] = nil }
+            activeConnectionCounts = nextCounts
+        }
         let removedIDs = previousIDs.subtracting(knownStatuses.keys)
         if !removedIDs.isEmpty {
             onRemovedIDs?(removedIDs)
@@ -360,6 +371,20 @@ final class DownloadListStore: ObservableObject {
 
     func speed(for id: DownloadID, partID: Int, at date: Date = Date()) -> Double? {
         partSpeedSampler.speed(for: id, partID: partID, at: date)
+    }
+
+    func activeConnectionCount(for id: DownloadID) -> Int {
+        activeConnectionCounts[id] ?? 0
+    }
+
+    private func setActiveConnectionCount(_ count: Int, for id: DownloadID) {
+        let normalized = max(0, count)
+        let isDownloading = downloads.first(where: { $0.id == id })?.status == .downloading
+        let nextCount = isDownloading ? normalized : 0
+        guard activeConnectionCounts[id] != nextCount else { return }
+        var nextCounts = activeConnectionCounts
+        nextCounts[id] = nextCount == 0 ? nil : nextCount
+        activeConnectionCounts = nextCounts
     }
 
     func acknowledgeCompletion() {
