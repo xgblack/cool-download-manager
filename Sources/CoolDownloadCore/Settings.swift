@@ -54,7 +54,10 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             mergeTopBarWithTitleBar: true,
             showIconLabels: true,
             useRelativeDateTime: true,
-            threadCount: 8,
+            // Keep new installations conservative. Users can raise the
+            // connection ceiling after measuring a host that benefits from
+            // parallel ranges.
+            threadCount: 1,
             maxConcurrentDownloads: 3,
             maxDownloadRetryCount: 3,
             dynamicPartCreation: true,

@@ -46,6 +46,8 @@ public actor DownloadStore {
     private let lock: SingleWriterLock
     private var records: [DownloadID: DownloadRecord] = [:]
     private var legacyObjects: [DownloadID: JSONValue] = [:]
+    private var metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
+    private var metricsEnabled = false
 
     public init(rootURL: URL) throws {
         self.rootURL = rootURL.standardizedFileURL
@@ -127,6 +129,11 @@ public actor DownloadStore {
         max(records.keys.max() ?? 0, 0) + 1
     }
 
+    public func updateMetrics(_ metrics: any DownloadMetricsSink) {
+        self.metrics = metrics
+        metricsEnabled = metrics.isEnabled
+    }
+
     public func save(_ record: DownloadRecord) throws {
         // DownloadService can be re-entered while a previous save is awaiting
         // filesystem I/O. Never let an older progress event overwrite a newer
@@ -134,28 +141,41 @@ public actor DownloadStore {
         if let current = records[record.id], current.revision > record.revision {
             return
         }
-        try FileManager.default.createDirectory(
-            at: recordsURL,
-            withIntermediateDirectories: true
-        )
-        let data: Data
-        if let legacyObject = legacyObjects[record.id] {
-            data = try LegacyJSONCodec.encodeRecord(record, preserving: legacyObject)
-        } else {
-            data = try encoder.encode(record)
-        }
         let target = recordsURL.appendingPathComponent("\(record.id).json")
         let temporary = recordsURL.appendingPathComponent(
             ".\(record.id).json.\(UUID().uuidString).tmp"
         )
+        let shouldRecordMetrics = metricsEnabled
+        let checkpointStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
+        let checkpointStartResources = shouldRecordMetrics
+            ? DownloadResourceSnapshot.capture()
+            : nil
+        var encodedBytes: Int64 = 0
+        var logicalWriteBytes: Int64 = 0
+        var synchronizeCount = 0
 
         do {
+            try FileManager.default.createDirectory(
+                at: recordsURL,
+                withIntermediateDirectories: true
+            )
+            let data: Data
+            if let legacyObject = legacyObjects[record.id] {
+                data = try LegacyJSONCodec.encodeRecord(record, preserving: legacyObject)
+            } else {
+                data = try encoder.encode(record)
+            }
+            let recordBytes = Int64(data.count)
+            encodedBytes += recordBytes
+            logicalWriteBytes += recordBytes
+
             guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else {
                 throw DownloadCoreError.permissionDenied(temporary.path)
             }
             let handle = try FileHandle(forWritingTo: temporary)
             try handle.write(contentsOf: data)
             try handle.synchronize()
+            synchronizeCount += 1
             try handle.close()
 
             if FileManager.default.fileExists(atPath: target.path) {
@@ -169,9 +189,32 @@ public actor DownloadStore {
                 try FileManager.default.moveItem(at: temporary, to: target)
             }
             records[record.id] = record
-            try saveSidecarParts(record)
+            let sidecar = try saveSidecarParts(record)
+            encodedBytes += sidecar.encodedBytes
+            logicalWriteBytes += sidecar.encodedBytes
+            synchronizeCount += sidecar.synchronizeCount
+            recordCheckpointMetric(
+                id: record.id,
+                startedAt: checkpointStartedAt,
+                startResources: checkpointStartResources,
+                encodedBytes: encodedBytes,
+                logicalWriteBytes: logicalWriteBytes,
+                synchronizeCount: synchronizeCount,
+                succeeded: true,
+                enabled: shouldRecordMetrics
+            )
         } catch {
             try? FileManager.default.removeItem(at: temporary)
+            recordCheckpointMetric(
+                id: record.id,
+                startedAt: checkpointStartedAt,
+                startResources: checkpointStartResources,
+                encodedBytes: encodedBytes,
+                logicalWriteBytes: logicalWriteBytes,
+                synchronizeCount: synchronizeCount,
+                succeeded: false,
+                enabled: shouldRecordMetrics
+            )
             if let error = error as? DownloadCoreError {
                 throw error
             }
@@ -202,13 +245,15 @@ public actor DownloadStore {
         record.parts = try LegacyJSONCodec.decodeParts(data: Data(contentsOf: file))
     }
 
-    private func saveSidecarParts(_ record: DownloadRecord) throws {
+    private func saveSidecarParts(
+        _ record: DownloadRecord
+    ) throws -> (encodedBytes: Int64, synchronizeCount: Int) {
         let target = partsURL.appendingPathComponent("\(record.id).json")
         guard !record.parts.isEmpty else {
             if FileManager.default.fileExists(atPath: target.path) {
                 try FileManager.default.removeItem(at: target)
             }
-            return
+            return (0, 0)
         }
         let temporary = partsURL.appendingPathComponent(".\(record.id).json.\(UUID().uuidString).tmp")
         let data = try LegacyJSONCodec.encodeParts(record.parts, kind: record.source.kind)
@@ -225,9 +270,33 @@ public actor DownloadStore {
             } else {
                 try FileManager.default.moveItem(at: temporary, to: target)
             }
+            return (Int64(data.count), 1)
         } catch {
             try? FileManager.default.removeItem(at: temporary)
             throw DownloadCoreError.permissionDenied(target.path)
         }
+    }
+
+    private func recordCheckpointMetric(
+        id: DownloadID,
+        startedAt: UInt64,
+        startResources: DownloadResourceSnapshot?,
+        encodedBytes: Int64,
+        logicalWriteBytes: Int64,
+        synchronizeCount: Int,
+        succeeded: Bool,
+        enabled: Bool
+    ) {
+        guard enabled, let startResources else { return }
+        let endResources = DownloadResourceSnapshot.capture()
+        metrics.record(.checkpoint(
+            id: id,
+            elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
+            encodedBytes: encodedBytes,
+            logicalWriteBytes: logicalWriteBytes,
+            kernelAccountedWriteBytes: endResources.diskWriteDelta(from: startResources),
+            synchronizeCount: synchronizeCount,
+            succeeded: succeeded
+        ))
     }
 }

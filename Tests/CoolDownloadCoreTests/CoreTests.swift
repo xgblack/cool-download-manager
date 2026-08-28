@@ -434,7 +434,7 @@ struct CoreTests {
 
         let store = try SettingsStore(dataRoot: root)
         let settings = try await store.load()
-        #expect(settings.threadCount == 8)
+        #expect(settings.threadCount == 1)
         #expect(settings.maxConcurrentDownloads == 3)
         #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/CoolDM"))
         #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))
@@ -977,6 +977,7 @@ struct CoreTests {
         let records = await service.snapshot().downloads
         #expect(records.filter { [first, second].contains($0.id) }.allSatisfy { $0.status == .completed })
         #expect(transport.maxObserved() == 1)
+        await service.shutdown()
     }
 
     @Test("pausing an active download remains paused after the response unwinds")
@@ -1224,7 +1225,8 @@ struct CoreTests {
             defaultFolder: root,
             schedulerConfiguration: DownloadSchedulerConfiguration(
                 maxConcurrentDownloads: 1,
-                maxConnectionsPerDownload: 3
+                maxConnectionsPerDownload: 3,
+                minimumPartSize: 1
             )
         )
         try await service.boot()
@@ -1252,6 +1254,282 @@ struct CoreTests {
         #expect(transport.requestCount() == 4)
         #expect(transport.recordedRequests().first?.httpMethod == "GET")
         #expect(transport.recordedRequests().first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+        await service.shutdown()
+    }
+
+    @Test("small range-capable resources use one ordinary request")
+    func smallRangeResourceUsesSequentialDownload() async throws {
+        let content = Data("small".utf8)
+        let transport = RangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 8
+            )
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/small.bin",
+                suggestedName: "small.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        var completed: DownloadRecord?
+        while ContinuousClock.now < deadline {
+            completed = await service.snapshot().downloads.first { $0.id == id && $0.status == .completed }
+            if completed != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let record = try #require(completed)
+        #expect(record.parts.isEmpty)
+        #expect(transport.requestCount() == 1)
+        #expect(try Data(contentsOf: record.destinationURL) == content)
+        #expect(transport.recordedRequests().contains { $0.value(forHTTPHeaderField: "Range") == nil })
+        await service.shutdown()
+    }
+
+    @Test("global range connection budget caps in-flight requests")
+    func globalRangeConnectionBudget() async throws {
+        let content = Data(repeating: 0x33, count: 64)
+        let transport = ConcurrentRangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 2,
+                maxConnectionsPerDownload: 4,
+                minimumPartSize: 1,
+                maxTotalConnections: 2
+            )
+        )
+        try await service.boot()
+        _ = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/budget-a.bin",
+                suggestedName: "budget-a.bin"
+            ),
+            start: true
+        ))
+        let secondID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/budget-b.bin",
+                suggestedName: "budget-b.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            let records = await service.snapshot().downloads
+            if records.count == 2, records.allSatisfy({ $0.status == .completed }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(await service.snapshot().downloads.allSatisfy { $0.status == .completed })
+        #expect(transport.maxObserved() == 2)
+        #expect(try Data(contentsOf: try #require(
+            await service.snapshot().downloads.first(where: { $0.id == secondID })?.destinationURL
+        )) == content)
+        await service.shutdown()
+    }
+
+    @Test("cancelled range budget waiters do not leak capacity")
+    func cancelledRangeBudgetWaiterDoesNotLeakCapacity() async throws {
+        let budget = HTTPRangeConnectionBudget(limit: 1)
+        let heldLease = try await budget.acquire()
+        let waitingLease = Task { try await budget.acquire() }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, await budget.usage().waiting != 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().waiting == 1)
+
+        waitingLease.cancel()
+        do {
+            _ = try await waitingLease.value
+            Issue.record("cancelled waiter should not receive a lease")
+        } catch is CancellationError {
+            // Expected: cancellation removes the parked continuation.
+        }
+
+        #expect(await budget.usage().waiting == 0)
+        await budget.release(heldLease)
+
+        let replacementLease = try await budget.acquire()
+        #expect(await budget.usage().active == 1)
+        await budget.release(replacementLease)
+        #expect(await budget.usage().active == 0)
+    }
+
+    @Test("lowering the range budget waits for active leases to drain")
+    func loweringRangeBudgetWaitsForActiveLeases() async throws {
+        let budget = HTTPRangeConnectionBudget(limit: 2)
+        let firstLease = try await budget.acquire()
+        let secondLease = try await budget.acquire()
+        let waitingLease = Task { try await budget.acquire() }
+
+        let deadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < deadline, await budget.usage().waiting != 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await budget.usage().waiting == 1)
+
+        await budget.updateLimit(1)
+        await budget.release(firstLease)
+        let afterFirstRelease = await budget.usage()
+        #expect(afterFirstRelease.active == 1)
+        #expect(afterFirstRelease.waiting == 1)
+        #expect(afterFirstRelease.limit == 1)
+
+        await budget.release(secondLease)
+        let promotedLease = try await waitingLease.value
+        let afterSecondRelease = await budget.usage()
+        #expect(afterSecondRelease.active == 1)
+        #expect(afterSecondRelease.waiting == 0)
+        await budget.release(promotedLease)
+    }
+
+    @Test("download metrics capture task stream checkpoint and event boundaries")
+    func downloadMetricsCaptureCoreBoundaries() async throws {
+        let content = Data("0123456789abcdefghijklmnopqrstuv".utf8)
+        let transport = RangeTransport(content: content)
+        let metrics = DownloadMetricsCollector()
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 1,
+                minimumPartSize: 1
+            ),
+            metrics: metrics
+        )
+        try await service.boot()
+
+        let ordinaryID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/metrics-ordinary.bin",
+                suggestedName: "metrics-ordinary.bin"
+            ),
+            start: true
+        ))
+        let ordinaryDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < ordinaryDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == ordinaryID })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == ordinaryID })?.status == .completed)
+
+        await service.updateConfiguration(
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1
+            )
+        )
+        let rangeID = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/metrics-range.bin",
+                suggestedName: "metrics-range.bin"
+            ),
+            start: true
+        ))
+        let rangeDeadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < rangeDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == rangeID })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == rangeID })?.status == .completed)
+
+        let metricsDeadline = ContinuousClock.now + .seconds(1)
+        var events = metrics.snapshot()
+        while ContinuousClock.now < metricsDeadline {
+            let finishedIDs = Set(events.compactMap { event -> DownloadID? in
+                guard case .taskFinished(let id, _, _, _, _) = event else { return nil }
+                return id
+            })
+            if finishedIDs.isSuperset(of: [ordinaryID, rangeID]) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+            events = metrics.snapshot()
+        }
+
+        let startedIDs = Set(events.compactMap { event -> DownloadID? in
+            guard case .taskStarted(let id, _, _) = event else { return nil }
+            return id
+        })
+        let finishedIDs = Set(events.compactMap { event -> DownloadID? in
+            guard case .taskFinished(let id, _, _, let succeeded, _) = event, succeeded else { return nil }
+            return id
+        })
+        let firstByteIDs = Set(events.compactMap { event -> DownloadID? in
+            guard case .httpResponseFirstByte(let id, _, _) = event else { return nil }
+            return id
+        })
+        let checkpointIDs = Set(events.compactMap { event -> DownloadID? in
+            guard case .checkpoint(let id, _, let encodedBytes, let logicalWriteBytes, _, let synchronizeCount, let succeeded) = event,
+                  succeeded,
+                  encodedBytes > 0,
+                  logicalWriteBytes > 0,
+                  synchronizeCount >= 1 else {
+                return nil
+            }
+            return id
+        })
+        let publishedIDs = Set(events.compactMap { event -> DownloadID? in
+            guard case .eventPublished(let id, _, _, _) = event else { return nil }
+            return id
+        })
+
+        #expect(startedIDs.isSuperset(of: [ordinaryID, rangeID]))
+        #expect(finishedIDs.isSuperset(of: [ordinaryID, rangeID]))
+        #expect(firstByteIDs.isSuperset(of: [ordinaryID, rangeID]))
+        #expect(checkpointIDs.isSuperset(of: [ordinaryID, rangeID]))
+        #expect(publishedIDs.isSuperset(of: [ordinaryID, rangeID]))
+        #expect(events.contains { event in
+            guard case .httpRequestFinished(let id, _, let kind, let statusCode, let bytes, _) = event else {
+                return false
+            }
+            return id == ordinaryID
+                && kind == .ordinaryGet
+                && statusCode == 200
+                && bytes == Int64(content.count)
+        })
+        #expect(events.contains { event in
+            guard case .httpRequestFinished(let id, _, let kind, let statusCode, let bytes, _) = event else {
+                return false
+            }
+            return id == rangeID
+                && kind == .range
+                && statusCode == 206
+                && bytes > 0
+        })
+
+        await service.shutdown()
     }
 
     @Test("range progress coalesces frequent updates without losing bytes")
@@ -1291,6 +1569,7 @@ struct CoreTests {
         #expect(record.downloadedBytes == Int64(content.count))
         #expect(try Data(contentsOf: record.destinationURL) == content)
         #expect(record.revision < 50)
+        await service.shutdown()
     }
 
     @Test("URLSession transport permits all supported range connections")
@@ -1364,7 +1643,8 @@ struct CoreTests {
     @Test("HTTP probe cancels a full-body fallback when Range is ignored")
     func rangeProbeCancelsIgnoredRangeBody() async throws {
         let transport = IgnoringRangeTransport(totalBytes: 6_114_656_256)
-        let downloader = HTTPDownloader(transport: transport)
+        let metrics = DownloadMetricsCollector()
+        let downloader = HTTPDownloader(transport: transport, metrics: metrics)
 
         let metadata = try await downloader.probe(source: DownloadSource(
             kind: .http,
@@ -1375,6 +1655,22 @@ struct CoreTests {
         #expect(!metadata.supportsRanges)
         #expect(transport.requestCount() == 1)
         #expect(transport.wasBodyCancelled())
+
+        let events = metrics.snapshot()
+        let rangeProbeRequestIDs = Set(events.compactMap { event -> UUID? in
+            guard case .httpRequestStarted(_, let requestID, .probeRange, _) = event else {
+                return nil
+            }
+            return requestID
+        })
+        let firstByteRequestIDs = Set(events.compactMap { event -> UUID? in
+            guard case .httpResponseFirstByte(_, let requestID, _) = event else {
+                return nil
+            }
+            return requestID
+        })
+        #expect(!rangeProbeRequestIDs.isEmpty)
+        #expect(rangeProbeRequestIDs.isSubset(of: firstByteRequestIDs))
     }
 
     @Test("HLS downloader selects a variant and concatenates media segments")
@@ -2063,8 +2359,22 @@ private final class RangeTransport: HTTPTransport, @unchecked Sendable {
             )
         }
 
-        guard let rangeHeader = request.value(forHTTPHeaderField: "Range"),
-              let (start, end) = parseRange(rangeHeader),
+        guard let rangeHeader = request.value(forHTTPHeaderField: "Range") else {
+            stream = AsyncThrowingStream { continuation in
+                continuation.yield(content)
+                continuation.finish()
+            }
+            return HTTPTransportResponse(
+                statusCode: 200,
+                headers: [
+                    "Content-Length": String(content.count),
+                    "Accept-Ranges": "bytes",
+                    "ETag": "\"v1\""
+                ],
+                body: stream
+            )
+        }
+        guard let (start, end) = parseRange(rangeHeader),
               start >= 0,
               end >= start,
               end < Int64(content.count) else {
@@ -2106,6 +2416,117 @@ private final class RangeTransport: HTTPTransport, @unchecked Sendable {
 
     func recordedRequests() -> [URLRequest] {
         lock.withLock { requests }
+    }
+
+    private func parseRange(_ value: String) -> (Int64, Int64)? {
+        let raw = value.replacingOccurrences(of: "bytes=", with: "")
+        let bounds = raw.split(separator: "-", maxSplits: 1).compactMap { Int64($0) }
+        guard bounds.count == 2 else { return nil }
+        return (bounds[0], bounds[1])
+    }
+}
+
+private final class ConcurrentRangeTransport: HTTPTransport, @unchecked Sendable {
+    private let content: Data
+    private let lock = NSLock()
+    private var active = 0
+    private var maximum = 0
+
+    init(content: Data) {
+        self.content = content
+    }
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        if request.httpMethod == "HEAD" {
+            let stream = AsyncThrowingStream<Data, Error> { continuation in
+                continuation.finish()
+            }
+            return HTTPTransportResponse(
+                statusCode: 200,
+                headers: ["Content-Length": String(content.count)],
+                body: stream
+            )
+        }
+
+        guard let rangeHeader = request.value(forHTTPHeaderField: "Range"),
+              let (start, end) = parseRange(rangeHeader),
+              start >= 0,
+              end >= start,
+              end < Int64(content.count) else {
+            let stream = AsyncThrowingStream<Data, Error> { continuation in
+                continuation.yield(content)
+                continuation.finish()
+            }
+            return HTTPTransportResponse(
+                statusCode: 200,
+                headers: [
+                    "Content-Length": String(content.count),
+                    "Accept-Ranges": "bytes",
+                    "ETag": "\"v1\""
+                ],
+                body: stream
+            )
+        }
+
+        let bytes = Data(content[Int(start)...Int(end)])
+        let isProbe = start == 0 && end == 0
+        if isProbe {
+            let stream = AsyncThrowingStream<Data, Error> { continuation in
+                continuation.yield(bytes)
+                continuation.finish()
+            }
+            return makeRangeResponse(start: start, end: end, body: stream)
+        }
+
+        incrementActive()
+        let owner = self
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            Task { [owner] in
+                defer { owner.decrementActive() }
+                do {
+                    try await Task.sleep(for: .milliseconds(25))
+                    try Task.checkCancellation()
+                    continuation.yield(bytes)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+        return makeRangeResponse(start: start, end: end, body: stream)
+    }
+
+    func maxObserved() -> Int {
+        lock.withLock { maximum }
+    }
+
+    private func makeRangeResponse(
+        start: Int64,
+        end: Int64,
+        body: AsyncThrowingStream<Data, Error>
+    ) -> HTTPTransportResponse {
+        HTTPTransportResponse(
+            statusCode: 206,
+            headers: [
+                "Content-Range": "bytes \(start)-\(end)/\(content.count)",
+                "Content-Length": String(end - start + 1),
+                "ETag": "\"v1\""
+            ],
+            body: body
+        )
+    }
+
+    private func incrementActive() {
+        lock.withLock {
+            active += 1
+            maximum = max(maximum, active)
+        }
+    }
+
+    private func decrementActive() {
+        lock.withLock {
+            active = max(0, active - 1)
+        }
     }
 
     private func parseRange(_ value: String) -> (Int64, Int64)? {

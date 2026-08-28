@@ -7,6 +7,9 @@ public actor DownloadService {
     private var defaultFolder: URL
     private var schedulerConfiguration: DownloadSchedulerConfiguration
     private var retryPolicy: DownloadRetryPolicy
+    private let rangeConnectionBudget: HTTPRangeConnectionBudget
+    private let metrics: any DownloadMetricsSink
+    private let metricsEnabled: Bool
     private var records: [DownloadID: DownloadRecord] = [:]
     private var tasks: [DownloadID: Task<Void, Never>] = [:]
     private var activeRateLimiters: [DownloadID: DownloadRateLimiter] = [:]
@@ -19,9 +22,13 @@ public actor DownloadService {
     private var subscribers: [UUID: AsyncStream<DownloadEvent>.Continuation] = [:]
     private var queueEventSubscribers: [UUID: AsyncStream<DownloadQueueEvent>.Continuation] = [:]
     private var lastProgressPersistence: [DownloadID: ContinuousClock.Instant] = [:]
+    private var lastProgressPersistenceBytes: [DownloadID: Int64] = [:]
+    private var lastProgressEvent: [DownloadID: ContinuousClock.Instant] = [:]
     private var shuttingDown = false
 
-    private static let progressPersistenceInterval: Duration = .milliseconds(250)
+    private static let progressPersistenceInterval: Duration = .seconds(2)
+    private static let progressPersistenceByteInterval: Int64 = 8 * 1024 * 1024
+    private static let progressEventInterval: Duration = .milliseconds(250)
 
     public init(
         store: DownloadStore,
@@ -29,7 +36,8 @@ public actor DownloadService {
         hlsDownloader: HLSDownloader? = nil,
         defaultFolder: URL,
         schedulerConfiguration: DownloadSchedulerConfiguration = .init(),
-        retryPolicy: DownloadRetryPolicy = .init()
+        retryPolicy: DownloadRetryPolicy = .init(),
+        metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
     ) {
         self.store = store
         self.downloader = downloader
@@ -37,10 +45,16 @@ public actor DownloadService {
         self.defaultFolder = defaultFolder.standardizedFileURL
         self.schedulerConfiguration = schedulerConfiguration
         self.retryPolicy = retryPolicy
+        self.metrics = metrics
+        self.metricsEnabled = metrics.isEnabled
+        self.rangeConnectionBudget = HTTPRangeConnectionBudget(
+            limit: schedulerConfiguration.maxTotalConnections
+        )
     }
 
     public func boot() async throws {
         shuttingDown = false
+        await store.updateMetrics(metrics)
         var loaded = Dictionary(
             uniqueKeysWithValues: try await store.load().map { ($0.id, $0) }
         )
@@ -71,9 +85,10 @@ public actor DownloadService {
         retryPolicy: DownloadRetryPolicy? = nil,
         defaultFolder: URL? = nil,
         networkConfiguration: HTTPNetworkConfiguration? = nil
-    ) {
+    ) async {
         if let schedulerConfiguration {
             self.schedulerConfiguration = schedulerConfiguration
+            await rangeConnectionBudget.updateLimit(schedulerConfiguration.maxTotalConnections)
         }
         if let retryPolicy {
             self.retryPolicy = retryPolicy
@@ -582,7 +597,34 @@ public actor DownloadService {
             return
         }
 
-        defer { lastProgressPersistence[id] = nil }
+        let shouldRecordMetrics = metricsEnabled
+        let taskStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
+        let taskStartResources = shouldRecordMetrics
+            ? DownloadResourceSnapshot.capture()
+            : nil
+        if let taskStartResources {
+            metrics.record(.taskStarted(
+                id: id,
+                timestampNanoseconds: taskStartedAt,
+                resources: taskStartResources
+            ))
+        }
+
+        defer {
+            lastProgressPersistence[id] = nil
+            lastProgressPersistenceBytes[id] = nil
+            lastProgressEvent[id] = nil
+            if shouldRecordMetrics {
+                let finalRecord = records[id]
+                metrics.record(.taskFinished(
+                    id: id,
+                    elapsedNanoseconds: downloadMetricsElapsed(since: taskStartedAt),
+                    bytes: finalRecord?.downloadedBytes ?? record.downloadedBytes,
+                    succeeded: finalRecord?.status == .completed,
+                    resources: DownloadResourceSnapshot.capture()
+                ))
+            }
+        }
 
         do {
             record.status = .downloading
@@ -791,7 +833,9 @@ public actor DownloadService {
                         },
                         expectedETag: current?.etag,
                         expectedLastModified: current?.lastModified,
-                        rateLimiter: rateLimiter
+                        rateLimiter: rateLimiter,
+                        metrics: metrics,
+                        downloadID: id
                     )
                 }
                 let totalBytes: Int64
@@ -827,6 +871,13 @@ public actor DownloadService {
                     try await store.save(record)
                     emit(.updated(record))
                 }
+                if metricsEnabled {
+                    metrics.record(.retryScheduled(
+                        id: id,
+                        attempt: attempt + 1,
+                        delayNanoseconds: downloadMetricsNanoseconds(retryPolicy.delay)
+                    ))
+                }
                 try await Task.sleep(for: retryPolicy.delay)
             }
         }
@@ -856,7 +907,11 @@ public actor DownloadService {
         guard var record = records[id] else {
             throw DownloadCoreError.notFound(id)
         }
-        let metadata = try await downloader.probe(source: source)
+        let metadata = try await downloader.probe(
+            source: source,
+            metrics: metrics,
+            downloadID: id
+        )
         guard let totalBytes = metadata.totalBytes, totalBytes >= 0 else {
             if record.parts.isEmpty {
                 return try await downloader.download(
@@ -868,7 +923,9 @@ public actor DownloadService {
                     },
                     expectedETag: record.etag,
                     expectedLastModified: record.lastModified,
-                    rateLimiter: rateLimiter
+                    rateLimiter: rateLimiter,
+                    metrics: metrics,
+                    downloadID: id
                 )
             }
             throw DownloadCoreError.responseMismatch("并行下载需要已知的资源大小")
@@ -897,7 +954,29 @@ public actor DownloadService {
                 },
                 expectedETag: record.etag,
                 expectedLastModified: record.lastModified,
-                rateLimiter: rateLimiter
+                rateLimiter: rateLimiter,
+                metrics: metrics,
+                downloadID: id
+            )
+        }
+
+        // A range request only pays for itself when at least two minimum-sized
+        // pieces are available. This also avoids probing and issuing a single
+        // Range request for a resource that cannot benefit from splitting.
+        let minimumPartSize = schedulerConfiguration.minimumPartSize
+        if record.parts.isEmpty, totalBytes / minimumPartSize < 2 {
+            return try await downloader.download(
+                source: source,
+                offset: try await writer.length(),
+                writer: writer,
+                progress: { [weak self] bytes in
+                    await self?.persistProgress(id: id, bytes: bytes)
+                },
+                expectedETag: record.etag,
+                expectedLastModified: record.lastModified,
+                rateLimiter: rateLimiter,
+                metrics: metrics,
+                downloadID: id
             )
         }
 
@@ -910,7 +989,8 @@ public actor DownloadService {
             parts = makeHTTPParts(
                 totalBytes: totalBytes,
                 existingLength: existingLength,
-                count: effectiveThreadCount(record)
+                count: effectiveThreadCount(record),
+                minimumPartSize: schedulerConfiguration.minimumPartSize
             )
         } else {
             parts = try validateHTTPParts(record.parts, totalBytes: totalBytes)
@@ -931,31 +1011,43 @@ public actor DownloadService {
         let expectedETag = record.etag
         let expectedLastModified = record.lastModified
         var results: [HTTPDownloadResult] = []
-        try await withThrowingTaskGroup(of: HTTPDownloadResult.self) { group in
-            for part in parts where !part.completed {
-                let start = part.from + part.downloaded
-                guard let end = part.to, start <= end else { continue }
-                group.addTask { [downloader, writer] in
-                    try await downloader.downloadRange(
-                        source: source,
-                        start: start,
-                        end: end,
-                        writer: writer,
-                        expectedETag: expectedETag,
-                        expectedLastModified: expectedLastModified,
-                        progress: { bytes in
-                            await self.persistPartProgress(
+        let pendingCount = parts.reduce(into: 0) { count, part in
+            guard !part.completed,
+                  let end = part.to,
+                  part.from + part.downloaded <= end else { return }
+            count += 1
+        }
+        let workerCount = min(max(1, effectiveThreadCount(record)), pendingCount)
+        let workQueue = HTTPRangeWorkQueue(parts: parts)
+        try await withThrowingTaskGroup(of: HTTPDownloadResult?.self) { group in
+            for _ in 0..<workerCount {
+                group.addTask { [workQueue] in
+                    var lastResult: HTTPDownloadResult?
+                    while let item = await workQueue.claim() {
+                        do {
+                            let result = try await self.downloadRangeWithBudget(
+                                source: source,
+                                item: item,
+                                writer: writer,
+                                expectedETag: expectedETag,
+                                expectedLastModified: expectedLastModified,
                                 id: id,
-                                partID: part.id,
-                                downloaded: part.downloaded + bytes
+                                rateLimiter: rateLimiter
                             )
-                        },
-                        rateLimiter: rateLimiter
-                    )
+                            await workQueue.complete(partID: item.partID)
+                            lastResult = result
+                        } catch {
+                            await workQueue.release(item)
+                            throw error
+                        }
+                    }
+                    return lastResult
                 }
             }
             for try await result in group {
-                results.append(result)
+                if let result {
+                    results.append(result)
+                }
             }
         }
 
@@ -975,13 +1067,53 @@ public actor DownloadService {
         )
     }
 
+    private func downloadRangeWithBudget(
+        source: DownloadSource,
+        item: HTTPRangeWorkItem,
+        writer: PartFileWriter,
+        expectedETag: String?,
+        expectedLastModified: String?,
+        id: DownloadID,
+        rateLimiter: DownloadRateLimiter
+    ) async throws -> HTTPDownloadResult {
+        let lease = try await rangeConnectionBudget.acquire()
+        do {
+            let result = try await downloader.downloadRange(
+                source: source,
+                start: item.start,
+                end: item.end,
+                writer: writer,
+                expectedETag: expectedETag,
+                expectedLastModified: expectedLastModified,
+                progress: { [weak self] bytes in
+                    await self?.persistPartProgress(
+                        id: id,
+                        partID: item.partID,
+                        downloaded: item.downloaded + bytes
+                    )
+                },
+                rateLimiter: rateLimiter,
+                metrics: metrics,
+                downloadID: id
+            )
+            await rangeConnectionBudget.release(lease)
+            return result
+        } catch {
+            await rangeConnectionBudget.release(lease)
+            throw error
+        }
+    }
+
     private func makeHTTPParts(
         totalBytes: Int64,
         existingLength: Int64,
-        count: Int
+        count: Int,
+        minimumPartSize: Int64
     ) -> [DownloadPart] {
         guard totalBytes > 0 else { return [] }
-        let partCount = min(max(1, count), Int(totalBytes))
+        let minimumPartCount = max(1, totalBytes / max(1, minimumPartSize))
+        let boundedPartCount = min(Int64(max(1, count)), minimumPartCount)
+        let partCount = Int(min(128, boundedPartCount))
         let chunkSize = (totalBytes + Int64(partCount) - 1) / Int64(partCount)
         var parts: [DownloadPart] = []
         for index in 0..<partCount {
@@ -1055,17 +1187,23 @@ public actor DownloadService {
         record.downloadedBytes = record.parts.reduce(0) { $0 + $1.downloaded }
         record.updatedAt = Date()
         records[id] = record
-        guard shouldPersistProgress(id: id, force: record.parts[index].completed) else {
-            return
+        let force = record.parts[index].completed
+        if shouldPersistProgress(
+            id: id,
+            downloadedBytes: record.downloadedBytes,
+            force: force
+        ) {
+            record.revision += 1
+            records[id] = record
+            do {
+                try await store.save(record)
+            } catch {
+                reportPersistenceFailure("range progress", id: id, error: error)
+            }
         }
-        record.revision += 1
-        records[id] = record
-        do {
-            try await store.save(record)
-        } catch {
-            reportPersistenceFailure("range progress", id: id, error: error)
+        if shouldEmitProgress(id: id, force: force) {
+            emit(.updated(records[id] ?? record))
         }
-        emit(.updated(record))
     }
 
     private func persistProgress(id: DownloadID, bytes: Int64) async {
@@ -1075,25 +1213,46 @@ public actor DownloadService {
         record.downloadedBytes = bytes
         record.updatedAt = Date()
         records[id] = record
-        guard shouldPersistProgress(id: id) else { return }
-        record.revision += 1
-        records[id] = record
-        do {
-            try await store.save(record)
-        } catch {
-            reportPersistenceFailure("progress", id: id, error: error)
+        if shouldPersistProgress(id: id, downloadedBytes: bytes) {
+            record.revision += 1
+            records[id] = record
+            do {
+                try await store.save(record)
+            } catch {
+                reportPersistenceFailure("progress", id: id, error: error)
+            }
         }
-        emit(.updated(record))
+        if shouldEmitProgress(id: id) {
+            emit(.updated(records[id] ?? record))
+        }
     }
 
-    private func shouldPersistProgress(id: DownloadID, force: Bool = false) -> Bool {
+    private func shouldPersistProgress(
+        id: DownloadID,
+        downloadedBytes: Int64,
+        force: Bool = false
+    ) -> Bool {
         let now = ContinuousClock.now
         if !force,
            let lastPersistence = lastProgressPersistence[id],
-           now - lastPersistence < Self.progressPersistenceInterval {
+           now - lastPersistence < Self.progressPersistenceInterval,
+           downloadedBytes - (lastProgressPersistenceBytes[id] ?? 0)
+                < Self.progressPersistenceByteInterval {
             return false
         }
         lastProgressPersistence[id] = now
+        lastProgressPersistenceBytes[id] = downloadedBytes
+        return true
+    }
+
+    private func shouldEmitProgress(id: DownloadID, force: Bool = false) -> Bool {
+        let now = ContinuousClock.now
+        if !force,
+           let lastEvent = lastProgressEvent[id],
+           now - lastEvent < Self.progressEventInterval {
+            return false
+        }
+        lastProgressEvent[id] = now
         return true
     }
 
@@ -1197,7 +1356,27 @@ public actor DownloadService {
     }
 
     private func emit(_ event: DownloadEvent) {
+        guard metricsEnabled else {
+            subscribers.values.forEach { $0.yield(event) }
+            return
+        }
+        let startedAt = downloadMetricsNow()
         subscribers.values.forEach { $0.yield(event) }
+        let descriptor: (id: DownloadID?, name: String)
+        switch event {
+        case .created(let record):
+            descriptor = (record.id, "created")
+        case .updated(let record):
+            descriptor = (record.id, "updated")
+        case .removed(let id):
+            descriptor = (id, "removed")
+        }
+        metrics.record(.eventPublished(
+            id: descriptor.id,
+            eventName: descriptor.name,
+            subscriberCount: subscribers.count,
+            elapsedNanoseconds: downloadMetricsElapsed(since: startedAt)
+        ))
     }
 
     private func emitQueueEvent(_ event: DownloadQueueEvent) {

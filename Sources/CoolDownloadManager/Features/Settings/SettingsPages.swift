@@ -129,7 +129,7 @@ struct DownloadSettingsPage: View {
 
             NativeSettingsGroup(title: "调度") {
                 NativeSettingsNumberRow(
-                    "分段线程数",
+                    "分片连接上限",
                     value: state.intBinding(\.threadCount, range: 1...64),
                     range: 1...64
                 )
@@ -150,7 +150,7 @@ struct DownloadSettingsPage: View {
                     suffix: "字节/秒"
                 )
                 NativeSettingsToggleRow(
-                    "动态创建分段",
+                    "启用 HTTP 分片",
                     isOn: state.binding(\.dynamicPartCreation),
                     showsDivider: false
                 )

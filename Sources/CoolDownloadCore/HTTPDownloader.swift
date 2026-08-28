@@ -83,26 +83,43 @@ public protocol HTTPTransport: Sendable {
 
 public final class HTTPDownloader: @unchecked Sendable {
     private let transport: any HTTPTransport
+    private let defaultMetrics: any DownloadMetricsSink
     private let bufferSize = 64 * 1024
 
     public init(
         configuration: URLSessionConfiguration = .ephemeral,
-        networkConfiguration: HTTPNetworkConfiguration = .default
+        networkConfiguration: HTTPNetworkConfiguration = .default,
+        metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
     ) {
         self.transport = URLSessionHTTPTransport(
             configuration: configuration,
             networkConfiguration: networkConfiguration
         )
+        self.defaultMetrics = metrics
     }
 
-    public init(transport: any HTTPTransport) {
+    public init(
+        transport: any HTTPTransport,
+        metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
+    ) {
         self.transport = transport
+        self.defaultMetrics = metrics
     }
 
-    public func probe(source: DownloadSource) async throws -> HTTPResourceMetadata {
+    public func probe(
+        source: DownloadSource,
+        metrics: (any DownloadMetricsSink)? = nil,
+        downloadID: DownloadID? = nil
+    ) async throws -> HTTPResourceMetadata {
         let url = try validatedURL(source.link)
+        let sink = metrics ?? defaultMetrics
         do {
-            return try await probeRange(source: source, url: url)
+            return try await probeRange(
+                source: source,
+                url: url,
+                metrics: sink,
+                downloadID: downloadID
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as DownloadCoreError {
@@ -110,11 +127,21 @@ public final class HTTPDownloader: @unchecked Sendable {
             case .responseMismatch:
                 // A non-conforming range response can still have a usable
                 // ordinary GET representation.
-                return try await probeSingleConnection(source: source, url: url)
+                return try await probeSingleConnection(
+                    source: source,
+                    url: url,
+                    metrics: sink,
+                    downloadID: downloadID
+                )
             case .httpStatus(let status) where status == 405 || status == 416 || status == 501:
                 // These statuses mean the range form is unavailable. Retry
                 // the metadata request without a Range header.
-                return try await probeSingleConnection(source: source, url: url)
+                return try await probeSingleConnection(
+                    source: source,
+                    url: url,
+                    metrics: sink,
+                    downloadID: downloadID
+                )
             default:
                 throw error
             }
@@ -137,9 +164,18 @@ public final class HTTPDownloader: @unchecked Sendable {
         progress: (@Sendable (Int64) async -> Void)? = nil,
         expectedETag: String? = nil,
         expectedLastModified: String? = nil,
-        rateLimiter: DownloadRateLimiter? = nil
+        rateLimiter: DownloadRateLimiter? = nil,
+        metrics: (any DownloadMetricsSink)? = nil,
+        downloadID: DownloadID? = nil
     ) async throws -> HTTPDownloadResult {
         let url = try validatedURL(source.link)
+        let sink = metrics ?? defaultMetrics
+        let tracker = sink.isEnabled ? HTTPMetricTracker(
+            sink: sink,
+            downloadID: downloadID,
+            kind: .ordinaryGet
+        ) : nil
+        defer { tracker?.finish() }
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -153,6 +189,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
 
         let response = try await transport.response(for: request)
+        tracker?.markResponse(statusCode: response.statusCode)
         defer { response.cancelBody() }
         let statusCode = response.statusCode
         guard (200...299).contains(statusCode) else {
@@ -218,6 +255,10 @@ public final class HTTPDownloader: @unchecked Sendable {
         var responseBodyBytes: Int64 = 0
         for try await chunk in response.body {
             try Task.checkCancellation()
+            if !chunk.isEmpty {
+                tracker?.markFirstByteIfNeeded()
+                tracker?.addBytes(Int64(chunk.count))
+            }
             try await rateLimiter?.consume(chunk.count)
             if let expectedBodyLength,
                responseBodyBytes + Int64(chunk.count) > expectedBodyLength {
@@ -280,12 +321,21 @@ public final class HTTPDownloader: @unchecked Sendable {
         expectedETag: String? = nil,
         expectedLastModified: String? = nil,
         progress: (@Sendable (Int64) async -> Void)? = nil,
-        rateLimiter: DownloadRateLimiter? = nil
+        rateLimiter: DownloadRateLimiter? = nil,
+        metrics: (any DownloadMetricsSink)? = nil,
+        downloadID: DownloadID? = nil
     ) async throws -> HTTPDownloadResult {
         guard start >= 0, end >= start else {
             throw DownloadCoreError.responseMismatch("请求的字节范围无效")
         }
         let url = try validatedURL(source.link)
+        let sink = metrics ?? defaultMetrics
+        let tracker = sink.isEnabled ? HTTPMetricTracker(
+            sink: sink,
+            downloadID: downloadID,
+            kind: .range
+        ) : nil
+        defer { tracker?.finish() }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 60
@@ -296,6 +346,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
 
         let response = try await transport.response(for: request)
+        tracker?.markResponse(statusCode: response.statusCode)
         defer { response.cancelBody() }
         guard response.statusCode == 206 else {
             if response.statusCode == 200 {
@@ -329,6 +380,10 @@ public final class HTTPDownloader: @unchecked Sendable {
         var written: Int64 = 0
         for try await chunk in response.body {
             try Task.checkCancellation()
+            if !chunk.isEmpty {
+                tracker?.markFirstByteIfNeeded()
+                tracker?.addBytes(Int64(chunk.count))
+            }
             try await rateLimiter?.consume(chunk.count)
             let chunkLength = Int64(chunk.count)
             guard written + chunkLength <= expectedBodyLength else {
@@ -373,7 +428,18 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
     }
 
-    private func probeRange(source: DownloadSource, url: URL) async throws -> HTTPResourceMetadata {
+    private func probeRange(
+        source: DownloadSource,
+        url: URL,
+        metrics: any DownloadMetricsSink,
+        downloadID: DownloadID?
+    ) async throws -> HTTPResourceMetadata {
+        let tracker = metrics.isEnabled ? HTTPMetricTracker(
+            sink: metrics,
+            downloadID: downloadID,
+            kind: .probeRange
+        ) : nil
+        defer { tracker?.finish() }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
@@ -381,6 +447,7 @@ public final class HTTPDownloader: @unchecked Sendable {
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
 
         let response = try await transport.response(for: request)
+        tracker?.markResponse(statusCode: response.statusCode)
         defer { response.cancelBody() }
         guard (200...299).contains(response.statusCode) else {
             throw DownloadCoreError.httpStatus(response.statusCode)
@@ -406,7 +473,12 @@ public final class HTTPDownloader: @unchecked Sendable {
             guard contentLength.map({ $0 == 1 }) ?? true else {
                 throw DownloadCoreError.responseMismatch("Range 探测响应长度不是 1 字节")
             }
-            let bodyLength = try await drain(response.body)
+            let bodyLength = try await drain(response.body) { bytes in
+                if bytes > 0 {
+                    tracker?.markFirstByteIfNeeded()
+                    tracker?.addBytes(bytes)
+                }
+            }
             guard bodyLength == 1 else {
                 throw DownloadCoreError.responseMismatch("Range 探测实际接收 \(bodyLength) 字节，应为 1 字节")
             }
@@ -428,13 +500,25 @@ public final class HTTPDownloader: @unchecked Sendable {
         )
     }
 
-    private func probeSingleConnection(source: DownloadSource, url: URL) async throws -> HTTPResourceMetadata {
+    private func probeSingleConnection(
+        source: DownloadSource,
+        url: URL,
+        metrics: any DownloadMetricsSink,
+        downloadID: DownloadID?
+    ) async throws -> HTTPResourceMetadata {
+        let tracker = metrics.isEnabled ? HTTPMetricTracker(
+            sink: metrics,
+            downloadID: downloadID,
+            kind: .probeFallback
+        ) : nil
+        defer { tracker?.finish() }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
         applyHeaders(source.headers, to: &request)
 
         let response = try await transport.response(for: request)
+        tracker?.markResponse(statusCode: response.statusCode)
         defer { response.cancelBody() }
         guard (200...299).contains(response.statusCode) else {
             throw DownloadCoreError.httpStatus(response.statusCode)
@@ -467,11 +551,15 @@ public final class HTTPDownloader: @unchecked Sendable {
         }
     }
 
-    private func drain(_ body: AsyncThrowingStream<Data, Error>) async throws -> Int64 {
+    private func drain(
+        _ body: AsyncThrowingStream<Data, Error>,
+        onBytes: ((Int64) -> Void)? = nil
+    ) async throws -> Int64 {
         var count: Int64 = 0
         for try await chunk in body {
             try Task.checkCancellation()
             count += Int64(chunk.count)
+            onBytes?(Int64(chunk.count))
         }
         return count
     }
@@ -516,5 +604,82 @@ public final class HTTPDownloader: @unchecked Sendable {
             throw DownloadCoreError.responseMismatch("Content-Length 不是非负整数")
         }
         return integer
+    }
+}
+
+private final class HTTPMetricTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sink: any DownloadMetricsSink
+    private let downloadID: DownloadID?
+    private let requestID = UUID()
+    private let kind: HTTPRequestMetricKind
+    private let startedAt = downloadMetricsNow()
+    private var statusCode: Int?
+    private var receivedFirstByte = false
+    private var bytes: Int64 = 0
+    private var finished = false
+
+    init(
+        sink: any DownloadMetricsSink,
+        downloadID: DownloadID?,
+        kind: HTTPRequestMetricKind
+    ) {
+        self.sink = sink
+        self.downloadID = downloadID
+        self.kind = kind
+        sink.record(.httpRequestStarted(
+            downloadID: downloadID,
+            requestID: requestID,
+            kind: kind,
+            timestampNanoseconds: startedAt
+        ))
+    }
+
+    func markResponse(statusCode: Int) {
+        lock.withLock {
+            self.statusCode = statusCode
+        }
+        // `response(for:)` returns after the HTTP response has arrived. Record
+        // TTFB here so metadata probes that intentionally cancel their bodies
+        // remain visible in the same metric as streamed downloads.
+        markFirstByteIfNeeded()
+    }
+
+    func markFirstByteIfNeeded() {
+        let shouldRecord = lock.withLock { () -> Bool in
+            guard !receivedFirstByte else { return false }
+            receivedFirstByte = true
+            return true
+        }
+        guard shouldRecord else { return }
+        sink.record(.httpResponseFirstByte(
+            downloadID: downloadID,
+            requestID: requestID,
+            latencyNanoseconds: downloadMetricsElapsed(since: startedAt)
+        ))
+    }
+
+    func addBytes(_ additionalBytes: Int64) {
+        guard additionalBytes > 0 else { return }
+        lock.withLock {
+            bytes += additionalBytes
+        }
+    }
+
+    func finish() {
+        let result = lock.withLock { () -> (statusCode: Int?, bytes: Int64)? in
+            guard !finished else { return nil }
+            finished = true
+            return (statusCode, bytes)
+        }
+        guard let result else { return }
+        sink.record(.httpRequestFinished(
+            downloadID: downloadID,
+            requestID: requestID,
+            kind: kind,
+            statusCode: result.statusCode,
+            bytes: result.bytes,
+            elapsedNanoseconds: downloadMetricsElapsed(since: startedAt)
+        ))
     }
 }

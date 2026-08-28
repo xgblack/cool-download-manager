@@ -22,6 +22,11 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
     public let maxConcurrentDownloads: Int
     public let maxConnectionsPerDownload: Int
     public let dynamicPartCreation: Bool
+    /// The minimum target size for a persisted HTTP range. Files that cannot
+    /// provide at least this much work per range stay on one connection.
+    public let minimumPartSize: Int64
+    /// Maximum number of real HTTP range requests across all active tasks.
+    public let maxTotalConnections: Int
     public let appendExtensionToIncompleteDownloads: Bool
     public let useSparseFileAllocation: Bool
     public let deletePartialFileOnDownloadCancellation: Bool
@@ -37,6 +42,8 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
         maxConcurrentDownloads: Int = 3,
         maxConnectionsPerDownload: Int = 1,
         dynamicPartCreation: Bool = true,
+        minimumPartSize: Int64 = 16 * 1024 * 1024,
+        maxTotalConnections: Int = 16,
         appendExtensionToIncompleteDownloads: Bool = false,
         useSparseFileAllocation: Bool = true,
         deletePartialFileOnDownloadCancellation: Bool = false,
@@ -48,6 +55,8 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
         self.maxConcurrentDownloads = maxConcurrentDownloads <= 0 ? Int.max : max(1, maxConcurrentDownloads)
         self.maxConnectionsPerDownload = max(1, maxConnectionsPerDownload)
         self.dynamicPartCreation = dynamicPartCreation
+        self.minimumPartSize = max(1, minimumPartSize)
+        self.maxTotalConnections = max(1, maxTotalConnections)
         self.appendExtensionToIncompleteDownloads = appendExtensionToIncompleteDownloads
         self.useSparseFileAllocation = useSparseFileAllocation
         self.deletePartialFileOnDownloadCancellation = deletePartialFileOnDownloadCancellation
