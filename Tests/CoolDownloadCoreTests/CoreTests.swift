@@ -596,7 +596,7 @@ struct CoreTests {
 
         let store = try SettingsStore(dataRoot: root)
         let settings = try await store.load()
-        #expect(settings.threadCount == 1)
+        #expect(settings.threadCount == 8)
         #expect(settings.maxConcurrentDownloads == 3)
         #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/CoolDM"))
         #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))

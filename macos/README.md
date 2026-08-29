@@ -47,7 +47,7 @@ link, and a drag arrow. A Developer ID identity can be supplied with
 
 For local integration smoke tests, the app keeps the legacy default of an unauthenticated loopback API on port `15151`. Set `CDM_API_KEY` to require `X-Api-Key`, or `CDM_HTTP_PORT` to use another loopback port. These environment overrides are temporary until the native settings screen owns the same values.
 
-The app uses at most three active downloads by default. Set `CDM_MAX_CONCURRENT_DOWNLOADS` to change that limit. A download uses one HTTP connection by default; set `CDM_RANGE_CONNECTIONS` to a value greater than one to enable parallel byte ranges when the server advertises or confirms Range support. Range metadata and validators are persisted with the download record so a paused task can resume without treating a changed resource as the same file.
+The app uses at most three active downloads by default. Set `CDM_MAX_CONCURRENT_DOWNLOADS` to change that limit. A download has a default ceiling of eight HTTP requests; automatic Range scheduling still starts at one request and probes upward only when the server advertises or confirms Range support. Set `CDM_RANGE_CONNECTIONS` to override that ceiling for local smoke tests. Range metadata and validators are persisted with the download record so a paused task can resume without treating a changed resource as the same file.
 
 The current implementation deliberately does not claim release completeness:
 custom DNS resolution, confirmed power-action execution, updater, Xcode bundle

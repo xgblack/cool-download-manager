@@ -10,8 +10,8 @@
 
 1. **分片不是必然提速。** 当单连接已经接近链路、CDN 或服务端上限时，增加 Range 连接只会增加握手、调度、缓冲、写盘和服务端压力；单连接被限速、延迟较高或链路利用不足时，多个连接才可能近似叠加吞吐。
 2. **当前核心已经具备受约束的反馈闭环。** `DownloadService` 探测资源后创建有界 Range 工作块，worker 按 1/2/4/8 风格档位试探，实际请求受全局 lease、响应缓冲、重试和文件描述符预算约束；不满足收益或延迟条件时会回退。它仍不是 aria2 那种可迁移已写 segment、综合 RTT/CPU/I/O 的完整调度器。
-3. **正式本机矩阵不支持把默认并发提高到 16 或 64。** 系统 APFS 256 MiB 中位 goodput 为 1/2/4/8/16 连接的 `3655/2211/2153/2122/2092 MiB/s`；4 GiB 中位值为 `3593/2170/1946 MiB/s`（1/4/16 连接）。外置 USB APFS SSD 也从 `724 MiB/s`（1 连接）降到 `494-511 MiB/s`（2-16 连接）。多连接同时增加 Range 请求、峰值 FD 和 checkpoint 成本。
-4. **受限源和总带宽上限证明了“条件式收益”。** 每连接约 4 MiB/s 的夹具中，1/2/4/8/16 连接中位 goodput 为 `3.80/6.22/7.80/7.73/7.79 MiB/s`；总带宽固定为 16 MiB/s 时，各档均为 `15.86-15.95 MiB/s`。因此增加连接只能在单连接确实受限时带来收益，不能作为默认策略。
+3. **新安装的单任务最大连接数设为 8，但不强制建立 8 个请求。** 自动任务仍从 1 个活动请求开始并按收益试探。系统 APFS 256 MiB 中位 goodput 为 1/2/4/8/16 连接的 `3655/2211/2153/2122/2092 MiB/s`；4 GiB 中位值为 `3593/2170/1946 MiB/s`（1/4/16 连接）。外置 USB APFS SSD 也从 `724 MiB/s`（1 连接）降到 `494-511 MiB/s`（2-16 连接）。因此 8 是产品允许的可探测上限，不是性能保证。
+4. **受限源和总带宽上限证明了“条件式收益”。** 每连接约 4 MiB/s 的夹具中，1/2/4/8/16 连接中位 goodput 为 `3.80/6.22/7.80/7.73/7.79 MiB/s`；总带宽固定为 16 MiB/s 时，各档均为 `15.86-15.95 MiB/s`。因此增加连接只能在单连接确实受限时带来收益，不能作为固定打满的策略。
 5. **阶段 2～4 的最终决定是保留当前阈值、暂不增加反馈信号、暂不实现写缓存。** 16 MiB 在受限 A/B 中优于 32 MiB（`11.94` 对 `7.45 MiB/s`）；全局 16 与 8 lease 同负载中位吞吐相差约 1.8%，但 16 的服务端并发和 FD 更高，因此 16 只作为共享上限和余量，不是目标并发。项目继续保持纯 Swift HTTP/HLS 核心，aria2 仅作为设计研究对象。
 
 ## 1. 范围、版本与证据
@@ -46,7 +46,7 @@ Motrix 和 aria2 的源码快照分别见：
 4. `makeHTTPParts` 在连接上限和最小分片阈值内创建最多 `连接上限 × 4`、总计不超过 128 个持久化工作单元；已有文件长度映射为每个范围的已下载前缀。这样快 worker 完成后可以继续领取尚未开始的单元，但不会抢占已经写入中的 Range（[DownloadService.swift](../Sources/CoolDownloadCore/DownloadService.swift)）。
 5. worker 从 `HTTPRangeWorkQueue` 领取范围，`HTTPRangeConcurrencyController` 按完成工作单元的聚合 goodput 在 1/2/4/8 风格档位升降，收益不足 10%、吞吐下降或请求失败时回退；实际请求还必须从 `HTTPRangeConnectionBudget` 获取全局 lease。每个请求使用精确 Range 和 `If-Range`，并通过 `PartFileWriter.write(_:at:)` 写入固定偏移（[HTTPRangeScheduler.swift](../Sources/CoolDownloadCore/HTTPRangeScheduler.swift)、[HTTPDownloader.swift](../Sources/CoolDownloadCore/HTTPDownloader.swift)）。
 
-配置口径需要区分：`DownloadSchedulerConfiguration` 的构造默认值是 1 个连接，macOS 应用启动时会读取 `AppSettingsModel.threadCount` 作为单任务连接天花板；当前实现已将新安装默认值调整为 1，已有用户保存的线程数不自动重置。连接上限优先级为 **任务显式覆盖 > 主机显式覆盖 > 全局线程设置**；没有显式覆盖的自动任务会把主机学习画像作为**初始活动档位**，但画像不能永久缩小可探测上限。最终实际 Range 请求数还会被文件大小、剩余工作单元和全局 lease 预算裁剪（[Models.swift](../Sources/CoolDownloadCore/Models.swift)、[Settings.swift](../Sources/CoolDownloadCore/Settings.swift)、[AppStore.swift](../Sources/CoolDownloadManager/State/AppStore.swift)）。
+配置口径需要区分：`DownloadSchedulerConfiguration` 的无配置构造兜底是 1 个连接，macOS 应用启动时会读取 `AppSettingsModel.threadCount` 作为单任务连接天花板；新安装默认天花板为 8，已有用户保存的线程数不自动重置。自动任务仍从 1 个活动请求或主机画像档位开始试探。连接上限优先级为 **任务显式覆盖 > 主机显式覆盖 > 全局线程设置**；没有显式覆盖的自动任务会把主机学习画像作为**初始活动档位**，但画像不能永久缩小可探测上限。最终实际 Range 请求数还会被文件大小、剩余工作单元和全局 lease 预算裁剪（[Models.swift](../Sources/CoolDownloadCore/Models.swift)、[Settings.swift](../Sources/CoolDownloadCore/Settings.swift)、[AppStore.swift](../Sources/CoolDownloadManager/State/AppStore.swift)）。
 
 ### 2.2 已有优点
 
@@ -318,11 +318,11 @@ CoolDM 不需要照搬 aria2 的公式，但应保留三个原则：
 
 ### 阶段 2：决定默认阈值与预算
 
-**状态：已完成，保留现值。**
+**状态：已完成；阈值与预算保留，产品默认连接上限后续调整为 8。**
 
 - 最小工作块保留 16 MiB：在相同受限源 A/B 中为 11.94 MiB/s，32 MiB 为 7.45 MiB/s，16 MiB 优势约 60.2%，三次测量全部校验通过。
 - 全局 Range lease 保留 16：四任务同负载下，8 lease 中位 1600.64 MiB/s，16 lease 中位 1572.39 MiB/s；16 没有带来速度收益，却把 server max 从 8 提到 16、峰值 OS FD 从 27 提到 43。16 是共享安全上限和跨任务余量，不是目标并发。
-- 新安装默认单任务连接保留 1；已有用户设置不自动重置。受限源可在控制器试探到 2/4 后获得收益，但高速源、代理和外置 SSD 均未证明更高档位稳定更快。
+- 新安装的单任务最大连接数调整为 8；已有用户设置不自动重置。该值只扩大自动控制器的可探测上限，自动任务仍从 1 开始；受限源可在试探到 2/4 后获得收益，但高速源、代理和外置 SSD 均未证明持续使用 8 个请求稳定更快。
 
 ### 阶段 3：按证据完善在线反馈
 
@@ -346,7 +346,7 @@ CoolDM 不需要照搬 aria2 的公式，但应保留三个原则：
 
 | 项目 | 当前决定 |
 | --- | --- |
-| 新安装 HTTP 默认连接 | 1；已有配置不重置 |
+| 新安装 HTTP 默认最大连接数 | 8；已有配置不重置，自动任务仍从 1 个活动请求开始试探 |
 | 单任务配置上限 | 64 仅作为校验硬上限，不是默认目标；实际活动请求受工作单元和全局 lease 裁剪 |
 | 最小 Range 工作块 | 16 MiB；小文件或不满足 Range 条件时走普通 GET |
 | 全局 Range lease | 16；跨任务共享安全上限，不主动打满，也不提高到 32/64 |
@@ -389,7 +389,7 @@ CoolDM 不需要照搬 aria2 的公式，但应保留三个原则：
 
 本轮执行已完成所有有条件的阶段，当前不再有需要立即修改的性能算法：
 
-1. 保持新安装单连接、16 MiB 最小工作块和全局 16 lease；不要因为设置允许 16 或 64 就主动创建同等数量的 Range 请求。
+1. 新安装的单任务最大连接数使用 8，同时保持 16 MiB 最小工作块和全局 16 lease；不要因为上限为 8 就主动创建 8 个 Range 请求。
 2. 保持现有自适应 worker、背压、全局限速、重试/FD 预算、轮转公平和节流 checkpoint；这些机制解决的是“收益出现时可用、收益消失时回退”。
 3. 将正式 JSON 作为后续回归基线。新增公网区域、代理供应商、可写 HDD/NAS/NFS 或不同 macOS 版本时，先复跑同一矩阵，再决定是否改变阈值。
 4. 只有重复 profiling 证明写盘路径限制 goodput，才选择一种有界写优化并重新验证恢复；在此之前不加入缓存或更重的存储层。

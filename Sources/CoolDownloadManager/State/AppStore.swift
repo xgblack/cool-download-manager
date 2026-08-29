@@ -62,7 +62,8 @@ final class AppStore: ObservableObject {
             self.store = store
             let environment = ProcessInfo.processInfo.environment
             let maxConcurrent = environment["CDM_MAX_CONCURRENT_DOWNLOADS"].flatMap(Int.init) ?? 3
-            let rangeConnections = environment["CDM_RANGE_CONNECTIONS"].flatMap(Int.init) ?? 1
+            let rangeConnections = environment["CDM_RANGE_CONNECTIONS"].flatMap(Int.init)
+                ?? initialSettings.threadCount
             self.service = DownloadService(
                 store: store,
                 defaultFolder: defaultFolder,

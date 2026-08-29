@@ -136,7 +136,7 @@ on port `15151` by default. Temporary environment overrides are available:
 CDM_API_KEY=change-me
 CDM_HTTP_PORT=15151
 CDM_MAX_CONCURRENT_DOWNLOADS=3
-CDM_RANGE_CONNECTIONS=1
+CDM_RANGE_CONNECTIONS=8
 ```
 
 The Native Messaging manifest is written to the standard Chrome, Chromium,
