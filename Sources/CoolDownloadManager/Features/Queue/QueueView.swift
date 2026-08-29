@@ -40,13 +40,13 @@ struct QueueView: View {
                 state.refreshDraft(from: selectedModel)
             }
         }
-        .onChange(of: store.queueModels) { models in
+        .onChange(of: store.queueModels) { _, models in
             state.selectFirstIfNeeded(models)
             if !state.isEditing {
                 state.refreshDraft(from: selectedModel)
             }
         }
-        .onChange(of: state.selectedQueueID) { _ in
+        .onChange(of: state.selectedQueueID) {
             state.refreshDraft(from: selectedModel)
         }
         .alert("操作失败", isPresented: Binding(
@@ -175,9 +175,7 @@ struct QueueView: View {
             }
             .buttonStyle(.borderless)
             .padding(10)
-            .background(.bar)
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     @ViewBuilder

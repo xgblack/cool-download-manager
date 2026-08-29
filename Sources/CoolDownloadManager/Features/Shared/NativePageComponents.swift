@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Shared chrome for the app's secondary pages. The settings window is the
-/// visual reference: compact material headers, restrained grouped surfaces,
-/// and one stable action area at the bottom of an editor.
+/// Shared structure for secondary pages. Window chrome and glass are owned by
+/// the system; these components only establish content hierarchy and spacing.
 enum NativePageLayout {
     static let contentWidth: CGFloat = 780
     static let compactContentWidth: CGFloat = 680
@@ -38,7 +37,6 @@ struct NativePageHeader<Trailing: View>: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 30, height: 30)
-                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -57,7 +55,6 @@ struct NativePageHeader<Trailing: View>: View {
         }
         .padding(.horizontal, 20)
         .frame(height: NativePageLayout.headerHeight)
-        .background(.bar)
     }
 }
 
@@ -106,7 +103,6 @@ struct NativePageContent<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -127,32 +123,35 @@ struct NativePageSurface<Content: View>: View {
             content()
         }
         .padding(padding)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: NativePageLayout.groupRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: NativePageLayout.groupRadius, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
-        }
     }
 }
 
 struct NativePageActionBar<Content: View>: View {
+    let usesGlass: Bool
     @ViewBuilder let content: () -> Content
 
-    init(@ViewBuilder content: @escaping () -> Content) {
+    init(usesGlass: Bool = true, @ViewBuilder content: @escaping () -> Content) {
+        self.usesGlass = usesGlass
         self.content = content
     }
 
     var body: some View {
-        HStack(spacing: 10) {
-            content()
+        Group {
+            if usesGlass {
+                LiquidGlassActionSurface {
+                    content()
+                }
+            } else {
+                HStack(spacing: 10) {
+                    content()
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: NativePageLayout.actionBarHeight)
+            }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 13)
-        .frame(minHeight: NativePageLayout.actionBarHeight)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Divider()
-        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 }
 
@@ -175,7 +174,6 @@ struct NativeSidebarHeader: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 24, height: 24)
-                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
             Spacer(minLength: 8)
@@ -185,7 +183,6 @@ struct NativeSidebarHeader: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
-        .background(.bar)
     }
 }
 

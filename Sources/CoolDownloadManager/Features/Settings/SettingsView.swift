@@ -58,7 +58,6 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 920, minHeight: 640)
-        .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(preferredColorScheme)
         .background {
             WindowAccessor { window in
@@ -89,11 +88,11 @@ struct SettingsView: View {
         } message: {
             Text(viewState.errorMessage ?? "")
         }
-        .onChange(of: store.settings) { updated in
+        .onChange(of: store.settings) { _, updated in
             guard !viewState.isDirty, !viewState.isSaving else { return }
             viewState.markModelSaved(updated)
         }
-        .onChange(of: store.perHostSettings) { updated in
+        .onChange(of: store.perHostSettings) { _, updated in
             guard !viewState.perHostState.isDirty else { return }
             viewState.markPerHostSaved(updated)
         }
@@ -107,10 +106,10 @@ struct SettingsView: View {
             }
             apply(coordinator.settingsDestination)
         }
-        .onChange(of: coordinator.settingsDestination) { destination in
+        .onChange(of: coordinator.settingsDestination) { _, destination in
             apply(destination)
         }
-        .onChange(of: viewState.section) { section in
+        .onChange(of: viewState.section) { _, section in
             guard viewState.path.isEmpty else { return }
             coordinator.settingsDestination = .section(section)
         }
@@ -141,7 +140,6 @@ struct SettingsView: View {
         .padding(.vertical, 10)
         .frame(width: SettingsWindowLayout.sidebarWidth)
         .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     @ViewBuilder
@@ -328,7 +326,6 @@ private struct SettingsWindowHeader: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: SettingsWindowLayout.headerHeight)
-        .background(.bar)
     }
 
     private var sidebarHeader: some View {

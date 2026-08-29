@@ -130,7 +130,6 @@ struct BatchDownloadView: View {
             }
         }
         .frame(width: 780, height: 700)
-        .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("批量下载")
         .fileImporter(
             isPresented: $state.isFolderPickerPresented,

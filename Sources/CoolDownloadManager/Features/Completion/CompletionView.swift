@@ -34,7 +34,6 @@ struct CompletionView: View {
             }
             actionBar
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 640, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
     }
 
@@ -53,7 +52,7 @@ struct CompletionView: View {
     }
 
     private var actionBar: some View {
-        NativePageActionBar {
+        NativePageActionBar(usesGlass: false) {
             Button("重新下载", systemImage: "arrow.clockwise") {
                 store.redownload(id: currentRecord.id)
                 onClose()

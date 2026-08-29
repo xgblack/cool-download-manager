@@ -102,7 +102,6 @@ struct AddDownloadSheet: View {
             }
         }
         .frame(width: 700, height: 620)
-        .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(title)
     }
 }

@@ -435,13 +435,11 @@ struct SettingsPage<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
-/// Shared grouped surface used by the other task editors (queues, categories
-/// and batch downloads). It intentionally shares the settings page's spacing
-/// and material without coupling those editors to `SettingsView` state.
+/// Shared grouped surface used by task editors. The low-opacity fill separates
+/// controls from the window without introducing another glass layer.
 struct SettingsSectionView<Content: View>: View {
     let title: String
     let description: String
@@ -462,7 +460,7 @@ struct SettingsSectionView<Content: View>: View {
                 content()
             }
             .padding(16)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous))
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous)
                     .stroke(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
@@ -484,7 +482,7 @@ struct NativeSettingsGroup<Content: View>: View {
             VStack(spacing: 0) {
                 content()
             }
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous))
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous)
                     .stroke(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
@@ -781,7 +779,7 @@ struct SettingsActionBar: View {
     let onSave: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
+        NativePageActionBar {
             Spacer()
             Button("恢复默认", action: onReset)
                 .buttonStyle(.bordered)
@@ -793,13 +791,6 @@ struct SettingsActionBar: View {
             .keyboardShortcut(.defaultAction)
             .disabled(isSaving)
             .controlSize(.regular)
-        }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 13)
-        .frame(height: SettingsWindowLayout.actionBarHeight)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Divider()
         }
     }
 }

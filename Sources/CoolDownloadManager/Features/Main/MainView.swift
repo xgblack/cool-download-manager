@@ -33,7 +33,14 @@ struct MainView: View {
             .frame(minWidth: 760, minHeight: 520)
         }
         .navigationSplitViewStyle(.balanced)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .toolbar {
+            workspaceToolbar
+        }
+        .searchable(
+            text: $downloadList.searchText,
+            placement: .toolbar,
+            prompt: "搜索名称或地址"
+        )
         .sheet(item: $coordinator.mainSheet) { sheet in
             sheetView(sheet)
         }
@@ -83,10 +90,10 @@ struct MainView: View {
                 viewState.folderURL = URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true)
             }
         }
-        .onChange(of: store.settings.mergeTopBarWithTitleBar) { _ in
+        .onChange(of: store.settings.mergeTopBarWithTitleBar) {
             coordinator.applyWindowSettings()
         }
-        .onChange(of: store.downloadList.completedID) { id in
+        .onChange(of: store.downloadList.completedID) { _, id in
             guard let id, let record = store.downloadList.record(id: id) else { return }
             coordinator.closeProgressPanel(for: id)
             if !(record.taskSettings?.showCompletionDialog ?? store.settings.showDownloadCompletionDialog) {
@@ -98,7 +105,7 @@ struct MainView: View {
                 )
             }
         }
-        .onChange(of: store.downloadList.progressID) { id in
+        .onChange(of: store.downloadList.progressID) { _, id in
             guard let id else { return }
             store.downloadList.acknowledgeProgress()
             guard store.settings.showDownloadProgressDialog else { return }
@@ -111,13 +118,13 @@ struct MainView: View {
                 focus: store.settings.focusDownloadProgressDialogOnStart
             )
         }
-        .onChange(of: store.downloadList.downloads) { downloads in
+        .onChange(of: store.downloadList.downloads) { _, downloads in
             guard case .downloadDetail(let id) = coordinator.mainPath.last,
                   !downloads.contains(where: { $0.id == id }) else { return }
             coordinator.closeDetail()
             coordinator.showNotice("下载记录已删除。")
         }
-        .onChange(of: store.downloadList.failedID) { id in
+        .onChange(of: store.downloadList.failedID) { _, id in
             guard id != nil else { return }
             store.downloadList.acknowledgeFailure()
         }
@@ -136,11 +143,10 @@ struct MainView: View {
 
     private var rootContent: some View {
         VStack(spacing: 0) {
-            workspaceToolbar
-            Divider()
             downloadTable
             footer
         }
+        .navigationTitle("下载")
     }
 
     @ViewBuilder
@@ -284,116 +290,64 @@ struct MainView: View {
         }
     }
 
-    private var workspaceToolbar: some View {
-        NativePageHeader(
-            title: "下载",
-            subtitle: String(downloadList.visibleDownloads.count) + " 个任务",
-            systemImage: "arrow.down.circle.fill",
-            tint: .accentColor
-        ) {
-            HStack(spacing: 8) {
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("搜索名称或地址", text: $downloadList.searchText)
-                        .textFieldStyle(.plain)
-                        .frame(width: 160)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
-                }
-
-                Menu {
-                    ForEach(DownloadSort.allCases, id: \.self) { sort in
-                        Button {
-                            downloadList.sort = sort
-                        } label: {
-                            Label(sort.title, systemImage: downloadList.sort == sort ? "checkmark" : "")
-                        }
+    @ToolbarContentBuilder
+    private var workspaceToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .automatic) {
+            Menu {
+                ForEach(DownloadSort.allCases, id: \.self) { sort in
+                    Button {
+                        downloadList.sort = sort
+                    } label: {
+                        Label(sort.title, systemImage: downloadList.sort == sort ? "checkmark" : "arrow.up.arrow.down")
                     }
-                } label: {
-                    Label("排序", systemImage: "arrow.up.arrow.down")
                 }
-                .menuStyle(.borderlessButton)
-                .help("选择列表排序")
-
-                if downloadList.hasSelection {
-                    Label("已选 " + String(downloadList.selectedIDs.count), systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(Color.accentColor)
-                }
-
-                Button {
-                    downloadList.selectAllVisible()
-                } label: {
-                    Image(systemName: "checkmark.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("全选当前列表")
-                .accessibilityLabel("全选当前列表")
-
-                Button {
-                    downloadList.clearSelection()
-                } label: {
-                    Image(systemName: "xmark.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("清除选择")
-                .accessibilityLabel("清除选择")
-
-                Divider()
-                    .frame(height: 20)
-
-                Button {
-                    coordinator.presentQueues()
-                } label: {
-                    Label("队列", systemImage: "list.bullet.rectangle")
-                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                }
-                .buttonStyle(.borderless)
-                .help("管理下载队列")
-                .accessibilityLabel("队列")
-
-                Button {
-                    coordinator.presentCategories()
-                } label: {
-                    Label("分类", systemImage: "folder")
-                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                }
-                .buttonStyle(.borderless)
-                .help("管理下载分类")
-                .accessibilityLabel("分类")
-
-                Button {
-                    coordinator.presentBatchDownload()
-                } label: {
-                    Label("批量下载", systemImage: "square.stack.3d.up")
-                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    coordinator.presentAddDownload()
-                } label: {
-                    Label("新建下载", systemImage: "plus")
-                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    coordinator.presentSettings()
-                } label: {
-                    Label("设置", systemImage: "gearshape")
-                        .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-                }
-                .buttonStyle(.borderless)
-                .help("打开设置")
-                .accessibilityLabel("设置")
+            } label: {
+                Label("排序", systemImage: "arrow.up.arrow.down")
             }
+            .help("选择列表排序")
+
+            Menu {
+                Button("全选当前列表", systemImage: "checkmark.circle") {
+                    downloadList.selectAllVisible()
+                }
+                Button("清除选择", systemImage: "xmark.circle") {
+                    downloadList.clearSelection()
+                }
+                .disabled(!downloadList.hasSelection)
+                Divider()
+                Button("队列", systemImage: "list.bullet.rectangle") {
+                    coordinator.presentQueues()
+                }
+                Button("分类", systemImage: "folder") {
+                    coordinator.presentCategories()
+                }
+                Button("设置", systemImage: "gearshape") {
+                    coordinator.presentSettings()
+                }
+            } label: {
+                Label("管理", systemImage: "ellipsis.circle")
+                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+            }
+            .help("管理下载和应用设置")
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                coordinator.presentBatchDownload()
+            } label: {
+                Label("批量下载", systemImage: "square.stack.3d.up")
+                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+            }
+            .help("批量新建下载")
+
+            Button {
+                coordinator.presentAddDownload()
+            } label: {
+                Label("新建下载", systemImage: "plus")
+                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
+            }
+            .buttonStyle(.glassProminent)
+            .help("新建下载")
         }
     }
 
@@ -443,7 +397,6 @@ struct MainView: View {
                         }
                     }
                 }
-                .background(Color(nsColor: .windowBackgroundColor))
                 .scrollContentBackground(.hidden)
             }
         }
@@ -701,7 +654,6 @@ private struct SidebarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     private func sidebarItem(_ filter: DownloadFilter, title: String? = nil, image: String? = nil) -> some View {

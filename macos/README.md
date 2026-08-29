@@ -1,5 +1,7 @@
 # 酷的下载管理器 macOS 原生版本
 
+运行时最低支持 macOS 26；发布构建使用 Xcode 27 SDK，以启用 macOS 27 的 Liquid Glass，同时保留 macOS 26 的静态玻璃回退。
+
 The root Swift package is the native macOS implementation.
 It contains:
 

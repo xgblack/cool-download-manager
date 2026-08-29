@@ -72,7 +72,6 @@ struct ChecksumView: View {
                 .keyboardShortcut(.cancelAction)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .frame(width: 1_000, height: 580)
         .navigationTitle("验证文件完整性")
     }

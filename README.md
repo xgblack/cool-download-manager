@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="macOS 13 及以上" src="https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white">
+  <img alt="macOS 26 及以上" src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white">
   <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
   <img alt="Apache 2.0 许可证" src="https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF%E8%AF%81-Apache--2.0-blue.svg">
 </p>
@@ -129,7 +129,7 @@ Range 请求使用明确的文件偏移直接写入同一个临时文件，不�
 
 ### 环境要求
 
-- macOS 13 或更高版本。
+- macOS 26 或更高版本（优先适配 macOS 27 的 Liquid Glass）。
 - Swift 6 工具链；建议使用完整 Xcode。
 - 仅在生成 DMG 时需要 Homebrew 的 `create-dmg`。
 

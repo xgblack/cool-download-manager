@@ -54,7 +54,6 @@ struct DownloadDetailSheet: View {
             }
             actionBar
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

@@ -22,16 +22,15 @@ struct PerHostSettingsView: View {
             actionBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             if !state.isDirty {
                 state.replaceItems(store.perHostSettings)
             }
         }
-        .onChange(of: store.perHostSettings) { items in
+        .onChange(of: store.perHostSettings) { _, items in
             if !state.isDirty { state.replaceItems(items) }
         }
-        .onChange(of: state.selectedHost) { _ in
+        .onChange(of: state.selectedHost) {
             state.selectionChanged()
         }
         .alert("操作失败", isPresented: Binding(
@@ -92,9 +91,7 @@ struct PerHostSettingsView: View {
             .buttonStyle(.borderless)
             .padding(.horizontal, 12)
             .frame(height: 42)
-            .background(.bar)
         }
-        .background(.regularMaterial)
     }
 
     private func save() {

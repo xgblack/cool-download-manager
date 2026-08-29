@@ -42,7 +42,7 @@ struct CategoryView: View {
                 state.replaceItems(store.categories)
             }
         }
-        .onChange(of: store.categories) { categories in
+        .onChange(of: store.categories) { _, categories in
             if !state.isDirty {
                 state.replaceItems(categories)
             } else if state.pendingNew {
@@ -173,9 +173,7 @@ struct CategoryView: View {
             }
             .buttonStyle(.borderless)
             .padding(10)
-            .background(.bar)
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42))
     }
 
     private var categorySelection: Binding<DownloadID?> {

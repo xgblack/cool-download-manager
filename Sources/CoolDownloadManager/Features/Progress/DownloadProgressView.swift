@@ -93,9 +93,8 @@ struct DownloadProgressView: View {
             }
             actionBar
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 820, maxWidth: .infinity, minHeight: 540, maxHeight: .infinity)
-        .onChange(of: currentRecord.status) { status in
+        .onChange(of: currentRecord.status) { _, status in
             if status == .completed {
                 onClose()
             }
@@ -301,7 +300,7 @@ struct DownloadProgressView: View {
     }
 
     private var actionBar: some View {
-        NativePageActionBar {
+        NativePageActionBar(usesGlass: false) {
             switch currentRecord.status {
             case .preparing, .downloading, .retrying:
                 Button("暂停", systemImage: "pause.fill") {

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGURATION="Release"
+MACOS_DEPLOYMENT_TARGET="26.0"
 OUTPUT_DIR="$ROOT_DIR/dist"
 DERIVED_DATA_DIR="$ROOT_DIR/.build/XcodePackageData"
 SIGNING_IDENTITY="${CDM_SIGNING_IDENTITY:--}"
@@ -18,6 +19,8 @@ Usage: scripts/package-macos.sh [options]
 
 Builds the SwiftPM macOS executable with Xcode and creates:
   dist/酷的下载管理器.app
+
+The deployment target is fixed at macOS 26.0.
 
 Options:
   --configuration <Debug|Release>  Build configuration (default: Release)
@@ -142,6 +145,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
             -configuration "$CONFIGURATION" \
             -destination "platform=macOS" \
             -derivedDataPath "$DERIVED_DATA_DIR" \
+            MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
             CODE_SIGNING_ALLOWED=NO \
             build
     done

@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import Foundation
 import PackageDescription
 
@@ -29,7 +29,7 @@ let testLinkerSettings: [LinkerSetting] = needsCommandLineToolsTestingWorkaround
 
 let package = Package(
     name: "CoolDownloadManagerMacOS",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v26)],
     products: [
         .library(name: "CoolDownloadCore", targets: ["CoolDownloadCore"]),
         .library(name: "CoolDownloadIntegration", targets: ["CoolDownloadIntegration"]),

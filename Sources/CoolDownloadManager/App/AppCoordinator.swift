@@ -88,14 +88,17 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func applyWindowSettings() {
         guard let window = mainWindow else { return }
+        window.titlebarSeparatorStyle = .automatic
         if store.settings.mergeTopBarWithTitleBar {
+            window.styleMask.insert(.fullSizeContentView)
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.toolbarStyle = .unifiedCompact
         } else {
+            window.styleMask.remove(.fullSizeContentView)
             window.titleVisibility = .visible
             window.titlebarAppearsTransparent = false
-            window.toolbarStyle = .automatic
+            window.toolbarStyle = .unified
         }
     }
 
@@ -139,18 +142,15 @@ final class AppCoordinator: NSObject, ObservableObject {
         settingsWindow = window
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.settings-window")
         window.title = "下载管理器"
-        // Keep the title bar native. Extending a custom SwiftUI surface below
-        // the traffic lights makes the left sidebar depend on safe-area and
-        // vibrancy behavior that varies between macOS releases. A standard
-        // title bar gives the window one continuous separator and leaves the
-        // settings content responsible only for its own layout.
+        // Keep the settings editor below the native title bar. Its custom
+        // section header contains navigation controls and must not overlap the
+        // traffic-light region when the window is resized.
         window.styleMask.remove(.fullSizeContentView)
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = false
-        window.toolbarStyle = .automatic
+        window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .automatic
         window.isMovableByWindowBackground = false
-        window.backgroundColor = .windowBackgroundColor
         window.minSize = NSSize(width: 920, height: 640)
         if focusSettingsWindowWhenRegistered {
             focusSettingsWindowWhenRegistered = false
@@ -426,9 +426,14 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.titlebarSeparatorStyle = .none
         panel.minSize = size
         panel.setContentSize(size)
-        panel.contentViewController = NSHostingController(rootView: AnyView(content))
+        panel.contentViewController = LiquidGlassPanelViewController(rootView: content)
         return panel
     }
 
