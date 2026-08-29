@@ -85,6 +85,11 @@ struct DownloadDetailSheet: View {
                     "已下载",
                     ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)
                 )
+                detailRow(
+                    "断点续传",
+                    ResumeSupportPresentation.text(record.supportsResume),
+                    valueColor: ResumeSupportPresentation.tint(record.supportsResume)
+                )
                 detailRow("保存路径", record.destinationURL.path)
                 sourceRow
                 if let etag = record.etag {
@@ -237,9 +242,15 @@ struct DownloadDetailSheet: View {
         }
     }
 
-    private func detailRow(_ title: String, _ value: String, showsDivider: Bool = true) -> some View {
+    private func detailRow(
+        _ title: String,
+        _ value: String,
+        showsDivider: Bool = true,
+        valueColor: Color = .primary
+    ) -> some View {
         NativeSettingsRow(title: title, showsDivider: showsDivider) {
             Text(value)
+                .foregroundStyle(valueColor)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .textSelection(.enabled)

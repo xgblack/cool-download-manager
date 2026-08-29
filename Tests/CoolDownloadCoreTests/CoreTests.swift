@@ -785,7 +785,20 @@ struct CoreTests {
         #expect(result.statusCode == 206)
         #expect(result.startOffset == 3)
         #expect(result.totalBytes == 6)
+        #expect(result.supportsResume == true)
         #expect(try await writer.length() == 6)
+
+        try await writer.truncate(to: 3)
+        transport.handler = { _ in
+            MemoryTransport.reply(status: 200, headers: [
+                "Content-Length": "6"
+            ], body: Data("abcdef".utf8))
+        }
+        let restarted = try await downloader.download(source: source, offset: 3, writer: writer)
+        #expect(restarted.statusCode == 200)
+        #expect(restarted.startOffset == 0)
+        #expect(restarted.supportsResume == false)
+        #expect(try Data(contentsOf: record.incompleteURL) == Data("abcdef".utf8))
 
         transport.handler = { _ in
             MemoryTransport.reply(status: 206, headers: [
@@ -1915,6 +1928,7 @@ struct CoreTests {
         let record = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
         #expect(record.status == .completed)
         #expect(record.parts.isEmpty)
+        #expect(record.supportsResume == nil)
         #expect(transport.recordedRequests().count == 1)
         #expect(transport.recordedRequests().allSatisfy {
             $0.value(forHTTPHeaderField: "Range") == nil
@@ -2071,9 +2085,66 @@ struct CoreTests {
 
         let record = try #require(completed)
         #expect(record.parts.isEmpty)
+        #expect(record.supportsResume == true)
         #expect(transport.requestCount() == 1)
         #expect(try Data(contentsOf: record.destinationURL) == content)
         #expect(transport.recordedRequests().contains { $0.value(forHTTPHeaderField: "Range") == nil })
+        await service.shutdown()
+    }
+
+    @Test("HTTP range probes persist an explicit unsupported resume capability")
+    func rangeProbePersistsUnsupportedResumeCapability() async throws {
+        let content = Data("ordinary-no-range".utf8)
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(
+                status: 200,
+                headers: [
+                    "Content-Length": String(content.count)
+                ],
+                body: content
+            )
+        }
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 8
+            )
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/no-range.bin",
+                suggestedName: "no-range.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        var completed: DownloadRecord?
+        while ContinuousClock.now < deadline {
+            completed = await service.snapshot().downloads.first {
+                $0.id == id && $0.status == .completed
+            }
+            if completed != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let record = try #require(completed)
+        #expect(record.supportsResume == false)
+        #expect(try Data(contentsOf: record.destinationURL) == content)
+        #expect(try await store.load().first?.supportsResume == false)
+        let requests = transport.recordedRequests()
+        #expect(requests.count == 2)
+        #expect(requests.first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
+        #expect(requests.last?.value(forHTTPHeaderField: "Range") == nil)
         await service.shutdown()
     }
 
@@ -3193,6 +3264,46 @@ struct CoreTests {
         #expect(try Data(contentsOf: record.destinationURL) == Data("onetwo".utf8))
     }
 
+    @Test("HLS service exposes resume support after the first persisted segment")
+    func hlsServicePersistsResumeSupport() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let service = DownloadService(
+            store: store,
+            hlsDownloader: HLSDownloader(transport: DelayedSecondHLSTransport()),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(maxConcurrentDownloads: 1)
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .hls,
+                link: "https://fixture.invalid/index.m3u8",
+                suggestedName: "video.ts"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        var observed: DownloadRecord?
+        while ContinuousClock.now < deadline {
+            observed = await service.snapshot().downloads.first { record in
+                record.id == id
+                    && record.status == .downloading
+                    && record.supportsResume == true
+                    && record.parts.contains { $0.id == 0 && $0.completed }
+            }
+            if observed != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let record = try #require(observed)
+        #expect(record.downloadedBytes == 3)
+        #expect(try await store.load().first?.supportsResume == true)
+        await service.shutdown()
+    }
+
     @Test("HLS downloader rejects encrypted playlists explicitly")
     func hlsEncryptionError() async throws {
         let transport = MemoryTransport()
@@ -3475,6 +3586,20 @@ struct CoreTests {
         #expect(decoded.record.lastModified == "Wed, 21 Oct 2015 07:28:00 GMT")
         #expect(decoded.record.taskSettings?.threadCount == 4)
         #expect(decoded.record.taskSettings?.speedLimit == 1024)
+        #expect(decoded.record.supportsResume == nil)
+
+        let supportData = Data("""
+        {
+          "type": "http",
+          "id": 43,
+          "link": "https://example.test/resume.bin",
+          "folder": "/tmp/downloads",
+          "name": "resume.bin",
+          "resumeSupport": false
+        }
+        """.utf8)
+        let supportDecoded = try LegacyJSONCodec.decodeRecord(data: supportData)
+        #expect(supportDecoded.record.supportsResume == false)
 
         var changed = decoded.record
         changed.status = .completed
@@ -3516,11 +3641,13 @@ struct CoreTests {
         let store = try DownloadStore(rootURL: root)
         var record = makeRecord(id: 9, folder: root)
         record.totalBytes = 8
+        record.supportsResume = true
         record.parts = [
             DownloadPart(id: 0, from: 0, to: 3, downloaded: 4, completed: true),
             DownloadPart(id: 1, from: 4, to: 7, downloaded: 0, completed: false)
         ]
         try await store.save(record)
+        #expect(try await store.load().first?.supportsResume == true)
 
         let partsURL = root.appendingPathComponent("config/download_db/parts/9.json")
         #expect(!FileManager.default.fileExists(atPath: partsURL.path))
@@ -3573,6 +3700,35 @@ private final class MemoryTransport: HTTPTransport, @unchecked Sendable {
 
     func recordedRequests() -> [URLRequest] {
         lock.withLock { requests }
+    }
+}
+
+private final class DelayedSecondHLSTransport: HTTPTransport, @unchecked Sendable {
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        let reply: MemoryTransport.Reply
+        switch request.url?.path {
+        case "/index.m3u8":
+            reply = MemoryTransport.reply(status: 200, headers: [:], body: Data("""
+            #EXTM3U
+            #EXTINF:1,
+            first.ts
+            #EXTINF:1,
+            second.ts
+            #EXT-X-ENDLIST
+            """.utf8))
+        case "/first.ts":
+            reply = MemoryTransport.reply(status: 200, headers: [:], body: Data("one".utf8))
+        case "/second.ts":
+            try await Task.sleep(for: .seconds(30))
+            reply = MemoryTransport.reply(status: 200, headers: [:], body: Data("two".utf8))
+        default:
+            reply = MemoryTransport.reply(status: 404, headers: [:], body: Data())
+        }
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.yield(reply.body)
+            continuation.finish()
+        }
+        return HTTPTransportResponse(statusCode: reply.status, headers: reply.headers, body: stream)
     }
 }
 

@@ -8,6 +8,10 @@ public struct HTTPDownloadResult: Sendable {
     public let etag: String?
     public let lastModified: String?
     public let fileName: String?
+    /// Capability evidence observed while servicing this request. A normal
+    /// response remains unknown because header advertisements alone do not
+    /// prove that a byte-range request will be honored.
+    public let supportsResume: Bool?
 
     public init(
         statusCode: Int,
@@ -16,7 +20,8 @@ public struct HTTPDownloadResult: Sendable {
         bytesWritten: Int64 = 0,
         etag: String? = nil,
         lastModified: String? = nil,
-        fileName: String? = nil
+        fileName: String? = nil,
+        supportsResume: Bool? = nil
     ) {
         self.statusCode = statusCode
         self.startOffset = startOffset
@@ -25,6 +30,7 @@ public struct HTTPDownloadResult: Sendable {
         self.etag = etag
         self.lastModified = lastModified
         self.fileName = fileName
+        self.supportsResume = supportsResume
     }
 }
 
@@ -358,6 +364,16 @@ public final class HTTPDownloader: @unchecked Sendable {
 
             let responseLength = responseContentLength
             let totalBytes = contentRangeTotal ?? responseLength.map { actualOffset + $0 }
+            let supportsResume: Bool? = {
+                if isResume {
+                    // A 200 response to a request carrying Range was handled
+                    // above by restarting from zero, so it is direct evidence
+                    // that this attempt could not resume.
+                    return statusCode == 206 ? true : (statusCode == 200 ? false : nil)
+                }
+                if statusCode == 206 { return true }
+                return nil
+            }()
             return HTTPDownloadResult(
                 statusCode: statusCode,
                 startOffset: actualOffset,
@@ -367,7 +383,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 lastModified: response.header("Last-Modified"),
                 fileName: DownloadFileNameResolver.fromContentDisposition(
                     response.header("Content-Disposition")
-                )
+                ),
+                supportsResume: supportsResume
             )
             }
         }
@@ -477,7 +494,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 lastModified: response.header("Last-Modified"),
                 fileName: DownloadFileNameResolver.fromContentDisposition(
                     response.header("Content-Disposition")
-                )
+                ),
+                supportsResume: true
             )
             }
         }

@@ -510,6 +510,7 @@ public actor DownloadService {
             record.totalBytes = nil
             record.etag = nil
             record.lastModified = nil
+            record.supportsResume = nil
             record.parts = []
             record.error = nil
             record.updatedAt = Date()
@@ -957,6 +958,7 @@ public actor DownloadService {
                         downloadID: id,
                         activity: requestActivityHandler(for: id)
                     )
+                    await updateResumeSupport(id: id, supported: true)
                     if let retryLease {
                         await retryBudget.release(retryLease)
                     }
@@ -980,9 +982,10 @@ public actor DownloadService {
                         fileDescriptorBudget: fileDescriptorBudget
                     )
                 } else {
+                    let requestedOffset = try await writer.length()
                     result = try await downloader.download(
                         source: source,
-                        offset: try await writer.length(),
+                        offset: requestedOffset,
                         writer: writer,
                         progress: { [weak self] bytes in
                             await self?.persistProgress(id: id, bytes: bytes)
@@ -995,6 +998,13 @@ public actor DownloadService {
                         fileDescriptorBudget: fileDescriptorBudget,
                         activity: requestActivityHandler(for: id)
                     )
+                    if let supportsResume = result.supportsResume {
+                        await updateResumeSupport(id: id, supported: supportsResume)
+                    } else if requestedOffset > 0, result.statusCode == 200 {
+                        // A 200 response to a resumed request means the
+                        // server ignored Range and the downloader restarted.
+                        await updateResumeSupport(id: id, supported: false)
+                    }
                 }
                 let totalBytes: Int64
                 if let responseTotal = result.totalBytes {
@@ -1020,6 +1030,10 @@ public actor DownloadService {
             } catch {
                 if let retryLease {
                     await retryBudget.release(retryLease)
+                }
+                if let coreError = error as? DownloadCoreError,
+                   coreError == .resumeNotSupported {
+                    await updateResumeSupport(id: id, supported: false)
                 }
                 guard !Task.isCancelled,
                       attempt < retryPolicy.maxAttempts,
@@ -1062,6 +1076,24 @@ public actor DownloadService {
         }
     }
 
+    /// Stores the last capability observation without making a filesystem
+    /// checkpoint failure turn a successful network attempt into a failed
+    /// download. The in-memory record is updated first so active UI clients
+    /// still receive the result when storage is temporarily unavailable.
+    private func updateResumeSupport(id: DownloadID, supported: Bool?) async {
+        guard var record = records[id], record.supportsResume != supported else { return }
+        record.supportsResume = supported
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        do {
+            try await store.save(record)
+        } catch {
+            reportPersistenceFailure("resume support", id: id, error: error)
+        }
+        emit(.updated(record))
+    }
+
     private func downloadHTTPWithRanges(
         id: DownloadID,
         source: DownloadSource,
@@ -1079,6 +1111,8 @@ public actor DownloadService {
             fileDescriptorBudget: fileDescriptorBudget,
             activity: requestActivityHandler(for: id)
         )
+        await updateResumeSupport(id: id, supported: metadata.supportsRanges)
+        record = records[id] ?? record
         guard let totalBytes = metadata.totalBytes, totalBytes >= 0 else {
             if record.parts.isEmpty {
                 return try await downloader.download(
@@ -1349,7 +1383,8 @@ public actor DownloadService {
             bytesWritten: totalBytes,
             etag: results.compactMap(\.etag).first ?? metadata.etag,
             lastModified: results.compactMap(\.lastModified).first ?? metadata.lastModified,
-            fileName: metadata.fileName ?? results.compactMap(\.fileName).first
+            fileName: metadata.fileName ?? results.compactMap(\.fileName).first,
+            supportsResume: true
         )
     }
 
@@ -1627,6 +1662,9 @@ public actor DownloadService {
         guard var record = records[id], record.status == .downloading else {
             return
         }
+        // A successfully written media segment is concrete evidence that this
+        // HLS task can resume at a persisted segment boundary.
+        record.supportsResume = true
         record.downloadedBytes = bytes
         let segmentStart = max(0, bytes - segmentBytes)
         if !record.parts.contains(where: { $0.id == segmentIndex }) {

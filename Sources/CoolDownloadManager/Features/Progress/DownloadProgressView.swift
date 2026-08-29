@@ -155,6 +155,16 @@ struct DownloadProgressView: View {
             }
             .padding(.vertical, 3)
 
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: ResumeSupportPresentation.systemImage(currentRecord.supportsResume))
+                    .foregroundStyle(ResumeSupportPresentation.tint(currentRecord.supportsResume))
+                metric(
+                    "断点续传",
+                    value: ResumeSupportPresentation.text(currentRecord.supportsResume),
+                    valueColor: ResumeSupportPresentation.tint(currentRecord.supportsResume)
+                )
+            }
+
             Text(currentRecord.source.link)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -332,13 +342,14 @@ struct DownloadProgressView: View {
         }.count
     }
 
-    private func metric(_ title: String, value: String) -> some View {
+    private func metric(_ title: String, value: String, valueColor: Color = .primary) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.callout.monospacedDigit())
+                .foregroundStyle(valueColor)
         }
     }
 

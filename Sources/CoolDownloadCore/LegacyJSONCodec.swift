@@ -102,6 +102,7 @@ public enum LegacyJSONCodec {
             .flatMap { $0 >= 0 ? $0 : nil }
         let etag = string(object, keys: ["etag", "eTag", "ETag"])
         let lastModified = string(object, keys: ["lastModified", "last-modified", "Last-Modified"])
+        let supportsResume = boolean(object, keys: ["supportsResume", "supportResume", "resumeSupport"])
         let createdAt = date(object, keys: ["dateAdded", "createdAt"]) ?? Date()
         let updatedAt = date(object, keys: ["updatedAt", "completeTime", "startTime"]) ?? createdAt
         let parts = parseParts(object["parts"])
@@ -139,6 +140,7 @@ public enum LegacyJSONCodec {
             totalBytes: totalBytes,
             etag: etag,
             lastModified: lastModified,
+            supportsResume: supportsResume,
             parts: parts,
             queueID: queueID,
             categoryID: categoryID,
@@ -201,6 +203,7 @@ public enum LegacyJSONCodec {
         object["contentLength"] = .number(String(record.totalBytes ?? -1))
         object["etag"] = record.etag.map(JSONValue.string) ?? .null
         object["lastModified"] = record.lastModified.map(JSONValue.string) ?? .null
+        object["supportsResume"] = record.supportsResume.map(JSONValue.bool) ?? .null
         object["dateAdded"] = .number(String(Int64(record.createdAt.timeIntervalSince1970 * 1000)))
         object["updatedAt"] = .number(String(Int64(record.updatedAt.timeIntervalSince1970 * 1000)))
         object["status"] = .string(legacyStatus(record.status))
@@ -244,6 +247,27 @@ public enum LegacyJSONCodec {
                 if let result = Int64(value) {
                     return result
                 }
+            default:
+                continue
+            }
+        }
+        return nil
+    }
+
+    private static func boolean(_ object: [String: JSONValue], keys: [String]) -> Bool? {
+        for key in keys {
+            switch object[key] {
+            case .bool(let value):
+                return value
+            case .string(let value):
+                switch value.lowercased() {
+                case "true", "yes", "1": return true
+                case "false", "no", "0": return false
+                default: continue
+                }
+            case .number(let value):
+                if value == "1" { return true }
+                if value == "0" { return false }
             default:
                 continue
             }

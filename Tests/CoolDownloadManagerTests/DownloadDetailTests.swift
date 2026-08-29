@@ -5,6 +5,16 @@ import CoolDownloadCore
 
 @Suite("下载详情")
 struct DownloadDetailTests {
+    @Test("断点续传状态使用是、否、未知三态文案和图标")
+    func presentsResumeSupportStates() {
+        #expect(ResumeSupportPresentation.text(true) == "是")
+        #expect(ResumeSupportPresentation.text(false) == "否")
+        #expect(ResumeSupportPresentation.text(nil) == "未知")
+        #expect(ResumeSupportPresentation.systemImage(true) == "checkmark.circle.fill")
+        #expect(ResumeSupportPresentation.systemImage(false) == "xmark.circle.fill")
+        #expect(ResumeSupportPresentation.systemImage(nil) == "questionmark.circle")
+    }
+
     @Test("修改时间使用中文年月日和二十四小时制")
     func formatsModificationDateInChinese() throws {
         let timeZone = try #require(TimeZone(secondsFromGMT: 8 * 60 * 60))

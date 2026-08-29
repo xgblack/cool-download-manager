@@ -180,6 +180,10 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var totalBytes: Int64?
     public var etag: String?
     public var lastModified: String?
+    /// The most recent resume-capability observation. `nil` means the
+    /// resource has not been probed yet or the probe could not establish an
+    /// answer (for example, because authentication failed).
+    public var supportsResume: Bool?
     public var parts: [DownloadPart]
     public var queueID: DownloadID?
     public var categoryID: DownloadID?
@@ -205,6 +209,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         totalBytes: Int64? = nil,
         etag: String? = nil,
         lastModified: String? = nil,
+        supportsResume: Bool? = nil,
         parts: [DownloadPart] = [],
         queueID: DownloadID? = nil,
         categoryID: DownloadID? = nil,
@@ -225,6 +230,7 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         self.totalBytes = totalBytes
         self.etag = etag
         self.lastModified = lastModified
+        self.supportsResume = supportsResume
         self.parts = parts
         self.queueID = queueID
         self.categoryID = categoryID
