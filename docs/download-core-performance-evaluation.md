@@ -1,6 +1,6 @@
 # 下载核心性能评估：Motrix 与 aria2
 
-> 更新日期：2026-08-28
+> 更新日期：2026-08-29
 > 评估对象：`feat/develop-swift` 分支上的 CoolDownloadManager Swift 下载核心，以及 Motrix Turbo `v2.0.0-beta.27` 和 aria2 当前源码。
 > 目标：判断 HTTP 分片下载的真实收益、系统代价，以及哪些设计值得在当前核心中借鉴。
 
@@ -9,10 +9,10 @@
 ## 结论先行
 
 1. **分片不是必然提速。** 当单连接已经接近链路、CDN 或服务端上限时，增加 Range 连接只会增加握手、调度、缓冲、写盘和服务端压力；单连接被限速、延迟较高或链路利用不足时，多个连接才可能近似叠加吞吐。
-2. **当前核心已形成“静态小工作单元 + 动态活动 worker”的最小反馈闭环。** `DownloadService` 会探测资源，按最小分片阈值创建比连接数更多的有界 Range 工作单元，再用 1/2/4/8 风格的活动 worker 档位按完成吞吐升降并受全局连接预算约束；它仍不是 aria2 那种可以迁移已写 segment、综合 RTT/错误率/CPU/I/O 的完整调度器。
-3. **本机基准显示“并发收益取决于服务端模型”，同时暴露出状态路径瓶颈。** 高速本机源中，1 连接约 89.7 MiB/s，8 连接约 67.3 MiB/s；每连接约 4 MiB/s 的受限源中，1/2/4/6 连接约为 2.87/5.90/11.80/17.89 MiB/s，8 连接又降至约 11.95 MiB/s。完整 `DownloadService` 的 256 MiB、6 分片基线约 70.9 MiB/s，而绕过状态持久化的等价 Range writer 约 385 MiB/s；后续阶段计时已去除新任务的冗余 sidecar 写入，但 checkpoint、JSON 原子替换、事件发布和 actor 往返仍需分开剖析，不能把一次前后差值全部归因于某个函数。
-4. **最值得借鉴的是 aria2 的“有限工作队列 + 反馈调度 + 资源预算”，而不是把默认连接数调到 64。** Motrix 的主要价值是引擎隔离、RPC 状态同步、进程监督和恢复；实际下载算法来自 aria2。
-5. **建议路线：默认单连接或低并发，满足条件后逐步升并发；预算、取消和任务轮转已经落地，下一步用压力矩阵复核边界。** 写盘合并或存储重构仍应等待 profiling 证据，不建议直接照搬 aria2 C++ 代码或把 aria2 作为 HTTP-only 的必需进程。
+2. **当前核心已经具备受约束的反馈闭环。** `DownloadService` 探测资源后创建有界 Range 工作块，worker 按 1/2/4/8 风格档位试探，实际请求受全局 lease、响应缓冲、重试和文件描述符预算约束；不满足收益或延迟条件时会回退。它仍不是 aria2 那种可迁移已写 segment、综合 RTT/CPU/I/O 的完整调度器。
+3. **正式本机矩阵不支持把默认并发提高到 16 或 64。** 系统 APFS 256 MiB 中位 goodput 为 1/2/4/8/16 连接的 `3655/2211/2153/2122/2092 MiB/s`；4 GiB 中位值为 `3593/2170/1946 MiB/s`（1/4/16 连接）。外置 USB APFS SSD 也从 `724 MiB/s`（1 连接）降到 `494-511 MiB/s`（2-16 连接）。多连接同时增加 Range 请求、峰值 FD 和 checkpoint 成本。
+4. **受限源和总带宽上限证明了“条件式收益”。** 每连接约 4 MiB/s 的夹具中，1/2/4/8/16 连接中位 goodput 为 `3.80/6.22/7.80/7.73/7.79 MiB/s`；总带宽固定为 16 MiB/s 时，各档均为 `15.86-15.95 MiB/s`。因此增加连接只能在单连接确实受限时带来收益，不能作为默认策略。
+5. **阶段 2～4 的最终决定是保留当前阈值、暂不增加反馈信号、暂不实现写缓存。** 16 MiB 在受限 A/B 中优于 32 MiB（`11.94` 对 `7.45 MiB/s`）；全局 16 与 8 lease 同负载中位吞吐相差约 1.8%，但 16 的服务端并发和 FD 更高，因此 16 只作为共享上限和余量，不是目标并发。项目继续保持纯 Swift HTTP/HLS 核心，aria2 仅作为设计研究对象。
 
 ## 1. 范围、版本与证据
 
@@ -20,7 +20,7 @@
 
 | 对象 | 取样版本 | 取样方式 |
 | --- | --- | --- |
-| CoolDownloadManager | `12e7b0df`，`feat/develop-swift` | 当前仓库源码 |
+| CoolDownloadManager | `248183be`，`feat/develop-swift` | 当前仓库源码 |
 | Motrix Turbo | `6a77297effcde5e72b1cb9f62a4b04cdf2a1db65`，`v2.0.0-beta.27` | `agalwood/Motrix` |
 | aria2 | `9e7273583f83e881e3ec067b523ba88724088d2f` | `aria2/aria2` |
 
@@ -32,9 +32,9 @@ Motrix 和 aria2 的源码快照分别见：
 ### 1.2 证据强度
 
 - **源码证据**：用于还原调用链、状态机、配置边界和资源管理。
-- **本机可控 HTTP 源基准**：仓库内 `CoolDownloadBenchmark` 使用生产 `DownloadService`、流式回环 HTTP/1.1 Range 源和独立子进程运行矩阵，校验输出内容并采集吞吐、TTFB、响应 p95、CPU、RSS、FD、checkpoint、协商协议和实际服务端并发；可证明回归趋势，不能代表公网 CDN、代理或真实磁盘。
-- **外部源基准**：同一工具支持 `--url`、可选 `--proxy-url`、挂载点 `--downloads-root` 和 SHA-256 校验；报告只保留协议/主机摘要，不写入完整 URL、查询参数、凭据或本机路径。HTTP/2 是否出现以 URLSession 任务指标为准，而不是由连接数推断。
-- **仍未覆盖**：公网多 CDN 的重复样本、跨地域 RTT 控制、真实代理供应商、外置 HDD/网络文件系统的完整重复矩阵、系统休眠和大量任务混跑。因此“默认值”和“收益阈值”仍需要产品基准矩阵确认。
+- **本机可控 HTTP 源基准**：仓库内 `CoolDownloadBenchmark` 使用生产 `DownloadService`、流式回环 HTTP/1.1 Range 源和独立子进程运行矩阵，校验输出内容并采集 goodput、TTFB、响应 p95、失败响应、重试、CPU、RSS、FD、checkpoint、协商协议和实际服务端并发。正式报告通常为 1 次 warmup 加 3 次测量；进程恢复报告是单次生命周期正确性检查。
+- **外部源基准**：同一工具支持 `--url`、可选 `--proxy-url`、挂载点 `--downloads-root` 和 SHA-256 校验；本轮使用 Cachefly（HTTP/2）和 OVH（HTTP/1.1）100 MiB 文件，并对 OVH 经过本机代理复测。报告只保留协议/主机摘要，不写入完整 URL、查询参数、凭据或本机路径。HTTP/2 是否出现以 URLSession 任务指标为准，而不是由连接数推断。
+- **证据边界**：系统 APFS 和外置 USB APFS SSD 已完成重复 A/B；USB HDD 与 NAS/NFS 目标目录在当前测试用户下不可写，因此明确记为“无法验证”。公网样本只有两个端点和一个本地代理路径，不能代表所有区域、供应商或生产代理。`responseP95Milliseconds` 是请求完整响应时长的 p95，不等同于网络 RTT；设备物理落盘量也未由内核进程写入计数代替。
 
 ## 2. 当前 Swift 核心基线
 
@@ -117,113 +117,87 @@ throughput(n) ≈ min(B, n × C) - connection_and_scheduling_overhead
 | 磁盘 | 多范围乱序写、稀疏文件 extent、原子替换、checkpoint fsync；密集分配还会预写零 | 内核按进程记账的写入增量、`synchronize()` 次数/耗时、物理占用、I/O wait |
 | 网络 | 更多握手、请求头、ACK、重试和服务端并发压力 | 请求数、重试率、RTT、429/5xx、实际连接数 |
 
-## 4. 当前本机基准
+## 4. 正式基准证据
 
-### 4.1 条件与复现方式
+### 4.1 条件、口径与报告索引
 
-- 仓库内 [Benchmarks/README.md](../Benchmarks/README.md) 提供 `CoolDownloadBenchmark`：默认是本机 `127.0.0.1` 流式 HTTP/1.1 Range 源，也可切换外部 HTTP(S) URL；生产 `DownloadService`、每次运行独立子进程、确定性内容/长度校验和结构化 JSON 报告（schema version 4）。报告额外记录记录文件和 parts sidecar 的 JSON 编码、写入、同步与原子替换阶段耗时，便于决定是否需要写缓存或存储重构。
-- 高速源用于观察并发上限；`--per-connection-mibps` 可模拟每条连接限速，`--tasks` 和 `--global-connections` 可验证多任务共享预算，`--max-open-fds` 可压低 FD 准入边界，`--fail-first-data-requests`、`--retry-attempts` 和 `--retry-delay-ms` 可复现有限重试压力。
-- 下表数值来自 2026-08-27 的临时 `Bench`/`DirectBench` probe，而不是当前正式 benchmark 的新基线。它们用于解释优化方向，不能作为当前提交或公网性能承诺。
-- 2026-08-28 已用 `CoolDownloadBenchmark` 完成多轮固定机器的单任务/多任务可控源矩阵；此前基线 JSON 保存在 `/tmp/cooldm-benchmark-highspeed.json`、`/tmp/cooldm-benchmark-limited-concurrent-formal.json` 和 `/tmp/cooldm-benchmark-multitask-concurrent-global16.json`，本轮回归保存在 `/tmp/cooldm-benchmark-priority-success.json`、`/tmp/cooldm-benchmark-priority-failure.json` 和 `/tmp/cooldm-benchmark-priority-1m.json`。这些结果仍只代表本机 HTTP/1.1 夹具，不足以调整 16 MiB 或全局 16 lease 默认值。
+- 正式报告位于 [Benchmarks/results/2026-08-29/](../Benchmarks/results/2026-08-29/)。普通矩阵为 schema 4，进程中止/恢复为 schema 1；每个普通矩阵均为 1 次 warmup 加 3 次测量，测量在独立子进程中完成。
+- 机器和系统由报告记录为 arm64、14 个逻辑处理器、macOS Version 27.0 (Build 26A5421a)。本机夹具是并发发送队列的流式 HTTP/1.1 Range 服务，输出按确定性内容或外部 SHA-256/长度校验；表中 goodput 是下载字节除以完整运行墙钟时间。
+- 下表使用同一报告内 3 次测量的中位数；MiB/s 保留两位小数，资源数值用于显示量级而非跨机器预算。responseP95Milliseconds 是完整 HTTP 请求从开始到结束的 p95，包含传输时间，不是 RTT。kernelAccountedWriteBytes 是进程被内核记账的写入增量，不是设备物理落盘量。
+- 主矩阵和尺度：[system-apfs-256m-final.json](../Benchmarks/results/2026-08-29/system-apfs-256m-final.json)、[system-apfs-4gib.json](../Benchmarks/results/2026-08-29/system-apfs-4gib.json)、[system-apfs-1mib.json](../Benchmarks/results/2026-08-29/system-apfs-1mib.json)。
+- 受限与预算：[system-apfs-64m-per-connection-4mibps.json](../Benchmarks/results/2026-08-29/system-apfs-64m-per-connection-4mibps.json)、[system-apfs-64m-global-16mibps.json](../Benchmarks/results/2026-08-29/system-apfs-64m-global-16mibps.json)、[system-apfs-256m-four-tasks-global8.json](../Benchmarks/results/2026-08-29/system-apfs-256m-four-tasks-global8.json)、[system-apfs-256m-four-tasks-global16.json](../Benchmarks/results/2026-08-29/system-apfs-256m-four-tasks-global16.json)。
+- 阈值与延迟：[system-apfs-256m-minpart-16-c8-limited.json](../Benchmarks/results/2026-08-29/system-apfs-256m-minpart-16-c8-limited.json)、[system-apfs-256m-minpart-32-c8-limited.json](../Benchmarks/results/2026-08-29/system-apfs-256m-minpart-32-c8-limited.json)、[system-apfs-64m-ttfb-200ms.json](../Benchmarks/results/2026-08-29/system-apfs-64m-ttfb-200ms.json)。
+- 存储与故障：[usb-ssd-apfs-256m-final.json](../Benchmarks/results/2026-08-29/usb-ssd-apfs-256m-final.json)、[system-apfs-256m-four-tasks.json](../Benchmarks/results/2026-08-29/system-apfs-256m-four-tasks.json)、[system-apfs-64m-four-task-retry-pressure.json](../Benchmarks/results/2026-08-29/system-apfs-64m-four-task-retry-pressure.json)、[system-apfs-256m-process-recovery.json](../Benchmarks/results/2026-08-29/system-apfs-256m-process-recovery.json)。
+- 公网与协议：[public-cachefly-100m-http2.json](../Benchmarks/results/2026-08-29/public-cachefly-100m-http2.json)、[public-ovh-100m-direct.json](../Benchmarks/results/2026-08-29/public-ovh-100m-direct.json)、[public-ovh-100m-local-proxy.json](../Benchmarks/results/2026-08-29/public-ovh-100m-local-proxy.json)。
 
-历史 probe 和原始输出未纳入仓库，因此当前表格只能作为方向性证据；后续回归应使用 `CoolDownloadBenchmark` 的 schema-versioned JSON，并固定硬件、电源模式、系统版本、负载、重复次数和冷热缓存条件。
+### 4.2 系统 APFS：并发增加没有稳定收益
 
-本轮基准夹具同时修正为并发发送队列；此前串行发送队列会把“每连接限速”错误地变成全局限速，修正前的受限源数字不作为结论。
+system-apfs-256m-final.json 为 256 MiB、最小工作块 16 MiB、单任务、连接上限 1/2/4/8/16。Range 请求数是实际 Range 数据请求数，不是连接数；server max 是夹具观察到的同时数据请求数。
 
-### 4.2 结果
+| 请求连接上限 | goodput 中位 (MiB/s) | Range 请求中位 | response p95 (ms) | checkpoint 总耗时中位 (ms) | 峰值 RSS (MiB) | 峰值 OS FD | server max |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3655.49 | 0 | 64.9 | 4.00 | 23.8 | 10 | 1 |
+| 2 | 2211.38 | 8 | 14.8 | 6.31 | 32.5 | 12 | 2 |
+| 4 | 2152.94 | 16 | 15.9 | 9.67 | 34.6 | 16 | 4 |
+| 8 | 2121.85 | 16 | 30.0 | 10.26 | 30.8 | 24 | 8 |
+| 16 | 2091.93 | 16 | 28.4 | 10.13 | 28.7 | 24 | 8 |
 
-**高速源：并发增加没有收益，且 RSS 上升。**
+所有 15 个测量均 verified=true、无失败响应和重试。16 的请求上限没有产生 16 个同时请求，控制器实际最高观察到 8；这说明“设置线程数”“Range 工作块数量”和“当前实际请求数”是三个不同指标。相对 1 连接，2/4/8/16 的 goodput 分别下降约 39.5%/41.1%/42.0%/42.8%，而 Range、FD 和 checkpoint 成本上升。
 
-| 逻辑连接数 | 吞吐 |
-| ---: | ---: |
-| 1 | 约 89.7 MiB/s |
-| 2 | 约 71.5 MiB/s |
-| 4 | 约 71.5 MiB/s |
-| 6 | 约 66.2 MiB/s |
-| 8 | 约 67.3 MiB/s |
+1 MiB 报告中 1/4/16 的 goodput 中位为 62.50/75.16/60.85 MiB/s，所有档位都只发普通 GET、没有 Range 数据请求；小文件不应为了“用满线程”强行分片。
 
-观测到 RSS 约从 62 MB 增加到 99 MB。这个结果支持“链路/服务端已是主要上限时，分片只增加开销”的判断。
+### 4.3 大文件与外置 APFS SSD
 
-**每连接约 4 MiB/s 的受限源：并发先近似叠加，超过最佳点后回落。**
+4 GiB 系统 APFS 报告的 goodput 中位为 3593.19/2169.73/1946.25 MiB/s（1/4/16 连接），均校验通过；4 和 16 连接分别只有 1/4 与 1/8 的实际并发。文件变大没有把并发劣势变成收益。
 
-| 逻辑连接数 | 吞吐 |
-| ---: | ---: |
-| 1 | 约 2.87 MiB/s |
-| 2 | 约 5.90 MiB/s |
-| 4 | 约 11.80 MiB/s |
-| 6 | 约 17.89 MiB/s |
-| 8 | 约 11.95 MiB/s |
+外置 USB APFS SSD 报告（256 MiB、同样 1/2/4/8/16 档）如下：
 
-6 连接相对 1 连接约 6.2 倍；8 连接回落到约 6 连接的 67%。这说明“更多连接”不是单调优化，必须允许探测后回退。
-
-**状态路径对比：**
-
-| 路径 | 负载 | 吞吐 |
-| --- | --- | ---: |
-| 完整 `DownloadService` | 256 MiB，6 分片，含记录保存、分片进度和事件 | 约 70.9 MiB/s |
-| 等价 Range writer | 256 MiB，6 个 Range，绕过状态持久化和进度事件 | 约 385 MiB/s |
-
-**2026-08-28 `CoolDownloadBenchmark` 回归：**
-
-| 场景 | 连接上限 | goodput（实测） | 观察 |
-| --- | ---: | ---: | --- |
-| 高速本机源，单任务，256 MiB | 1 | 约 1,819-1,926 MiB/s | 普通 GET 最高 |
-| 高速本机源，单任务，256 MiB | 2 | 约 1,793-1,797 MiB/s | 已低于单连接 |
-| 高速本机源，单任务，256 MiB | 4/8/16 | 约 1,618-1,696 MiB/s | 更多 Range 没有收益，checkpoint 约 31-34 ms |
-| 每连接 20 MiB/s，单任务，256 MiB | 1/2/4/8/16 | 约 15.0/24.0/39.9/48.6/48.2 MiB/s | 8 后平台化，16 未继续增加 |
-| 每连接 20 MiB/s，多任务 2，128 MiB/任务 | 4/8/16 | 约 82.5/99.4/99.5 MiB/s | 全局 16 lease 未成为瓶颈，峰值 FD 约 25-43 |
-
-所有 measured runs `verified=true`；服务端观测并发和请求数随 Range 增加，说明矩阵实际打到了并发路径。多任务全局上限压到 4 的补充运行总吞吐约 12.2 MiB/s，证明预算会收紧总吞吐；当前实现已对等待中的 Range、重试槽位和 FD reservation 按任务轮转。
-
-2026-08-28 新增失败压力选项后，4 个任务、FD 预算 4、首批 4 个数据请求返回 503 的本机运行仍全部 `verified=true`：1/2/4 连接 goodput 约 9.21/11.28/11.46 MiB/s，重试数和失败响应数均为 4，服务端失败计数为 4。该结果只证明预算和释放路径可运行，不代表公网错误率或尾延迟。
-
-同一夹具的长压扩展为 8 个任务、每任务 16 MiB、FD 预算 4、首批 4 个数据请求返回 503，1/2/4 连接运行约 14.092/14.145/12.275 秒，goodput 约 9.08/9.05/10.43 MiB/s，响应耗时 p95 约 3,543/433/212 ms，峰值 OS FD 约 15/15/17，全部 `verified=true`。OS FD 高于 reservation 是 URLSession 和测试进程本身的句柄；reservation 只负责限制核心主动持有的 part/request 槽位。
-
-**checkpoint 原子替换 A/B（2026-08-28，同一机器、64 MiB、最小分片 16 MiB、各 1 次）**：将记录和 sidecar 的同目录临时文件替换从 `FileManager.replaceItemAt` 改为 POSIX `rename` 后，阶段计时出现下降：
-
-| 连接 | checkpoint 总耗时（改前/改后） | 记录替换（改前/改后） | sidecar 替换（改前/改后） | goodput（改前/改后） |
+| 请求连接上限 | goodput 中位 (MiB/s) | checkpoint 总耗时中位 (ms) | 峰值 RSS (MiB) | 峰值 OS FD |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 6.16/2.52 ms | 4.12/0.55 ms | 不适用/不适用 | 1,250/1,755 MiB/s |
-| 4 | 12.47/7.22 ms | 5.07/0.97 ms | 1.81/0.55 ms | 1,275/1,308 MiB/s |
+| 1 | 723.87 | 6.09 | 31.5 | 10 |
+| 2 | 493.57 | 9.38 | 38.7 | 12 |
+| 4 | 498.89 | 13.63 | 39.5 | 16 |
+| 8 | 503.14 | 13.64 | 40.5 | 24 |
+| 16 | 511.12 | 14.31 | 41.3 | 24 |
 
-这是同负载隔离子进程的一次前后观测，不足以给出稳定收益承诺；它支持保留 `rename` 原子替换和分阶段指标，并继续用多次重复、外置卷和网络文件系统矩阵复核。尚未因此加入写缓存或改变 16 MiB/16 lease 默认值。
+系统卷和外置 SSD 都显示单连接最快；外置卷的 4/8/16 档 checkpoint 约为单连接的 2.2-2.4 倍。当前没有可写的 USB HDD 或 NAS/NFS 挂载点，因此这两类存储是**无法验证**，不能从 APFS 结果推断其最佳值。
 
-这不是严格的火焰图或单变量实验，不能把差值全部归因于一个函数；但它足以把“先剖析状态/持久化路径”排在“继续增加连接数”之前。
+### 4.4 受限源、总带宽和首字节延迟
 
-另一个重要观察是：URLSession 配置了 8 个逻辑并发时，实际同主机并发约为 6。连接池、协议版本和系统调度会改变物理连接数，不能把 `httpMaximumConnectionsPerHost` 或分片数直接当成真实 socket 数。
+- 每连接约 4 MiB/s（64 MiB、最小工作块 8 MiB）的 goodput 中位为 3.80/6.22/7.80/7.73/7.79 MiB/s（1/2/4/8/16）。收益在 4 连接附近平台化；所有输出校验通过，说明分片只有在单连接确实受限时才有条件收益。
+- 总带宽固定 16 MiB/s（生产全局限速器、1/2/4/8）的 goodput 中位为 15.95/15.89/15.86/15.90 MiB/s。增加请求没有突破总上限，且 Range 档位的 checkpoint 与响应等待更高。
+- 每个响应首字节延迟固定 200 ms（64 MiB、最小工作块 8 MiB）时，1/2/4/8/16 的 goodput 中位为 255.51/48.35/57.12/56.89/57.84 MiB/s；1 连接走普通 GET，只承担一次延迟，分片后每个 Range 都承担延迟。这是夹具模型，不是公网 RTT，但证明高首字节成本会改变最佳档位。
 
-### 4.3 公网源与协议观测
+### 4.5 最小工作块 A/B
 
-使用 `--url https://proof.ovh.net/files/100Mb.dat --size-mib 100 --connections 1,2,4 --minimum-part-mib 16` 在同一台机器各运行一次，结果均 `verified=true`：1/2/4 连接 goodput 约为 **1.12/1.65/1.43 MiB/s**；2 连接的协商协议指标为 **7 个请求均 `http/1.1`**，其中 5 个复用连接。该单次样本表明公网端点在本次网络路径上 2 连接优于 1 连接，但 4 连接回落，不能据此调整默认值。
+在同一 256 MiB、单任务、8 连接、每连接 4 MiB/s 的受限夹具中，只改变最小工作块：
 
-为验证 HTTP/2 协商和压缩表示，使用 `https://raw.githubusercontent.com/aria2/aria2/master/README.rst`（22,434 字节，SHA-256 校验）运行外部模式，结果 `verified=true`，协议指标为 **`h2`**。该响应通过 gzip 提供压缩 `Content-Length`，固定 `Accept-Encoding: identity` 后下载器按解压前的实际文件长度完成校验；此前未固定该请求头会出现“响应声明 7,805 字节但正文 22,434 字节”的长度错误。
+| 最小工作块 | goodput 中位 (MiB/s) | Range 请求中位 | checkpoint 总耗时中位 (ms) | server max | 校验 |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 16 MiB | 11.94 | 16 | 65.55 | 12 | 3/3 |
+| 32 MiB | 7.45 | 8 | 73.65 | 6 | 3/3 |
 
-以上公网结果只记录为当前网络环境的可重复起点：需要同一端点多次重复、不同 CDN/区域、代理开关和挂载点矩阵后，才能把协议或存储差异纳入自动升档条件。
+16 MiB 比 32 MiB 高约 60.2%，因此保留 16 MiB。高速本机源的 8/16/32 MiB 对比会受工作单元数量和控制器升降档共同影响，不能替代这个单变量受限 A/B。
 
-本轮针对同一 OVH 公网端点（`10Mb.dat`，10 MiB、每档 3 次、warmup 1）复测，1/2/4 连接平均 goodput 约为 **1.12/1.44/1.60 MiB/s**，对应请求均 `verified=true`；2/4 连接实际各发出 5 个 Range 数据请求并观察到 4 个复用连接，4 连接的 checkpoint 平均约 27.8 ms，高于 1 连接约 12.8 ms。该样本支持“满足单连接受限时分片有收益，但状态成本同步上升”的判断，不足以调整默认并发。原始报告为 `/tmp/cooldm-benchmark-priority-ovh10m.json`。
+### 4.6 全局 Range lease A/B
 
-同一轮对 GitHub Raw 的小文件外部模式（`README.rst`，每档 3 次）观测到协议指标稳定为 **`h2`**；1 连接直接普通 GET 平均约 0.047 MiB/s，2/4 连接因探测后仍按小文件单连接下载，平均约 0.032 MiB/s。它用于验证 HTTP/2 指标和 `Accept-Encoding: identity` 的长度一致性，不用于比较大文件吞吐。原始报告为 `/tmp/cooldm-benchmark-priority-h2.json`。
+system-apfs-256m-four-tasks-global8.json 与 global16.json 使用同一 4 任务、每任务请求上限 4、256 MiB 的负载，只改变全局 Range lease：
 
-### 4.4 存储挂载点初步观测
+| 全局 lease | aggregate goodput 中位 (MiB/s) | server max | 峰值 OS FD 中位 | 校验 |
+| ---: | ---: | ---: | ---: | --- |
+| 8 | 1600.64 | 8 | 27 | 3/3 |
+| 16 | 1572.39 | 16 | 43 | 3/3 |
 
-在同一台机器、同一 `127.0.0.1` 高速夹具、64 MiB 文件、1/4 连接、各 2 次测量下，系统 APFS（临时目录）与外置 APFS（`/Volumes/XG_SSD`）均完成内容校验：
+16 lease 比 8 lease 低约 1.8%，但服务端并发和 OS FD 明显更高。16 作为跨任务共享**安全上限和余量**保留，不是应该主动打满的并发目标；没有证据把它提高到 32 或 64。
 
-| 目标 | 连接 | goodput（两次） | checkpoint 总耗时（两次） | 峰值 RSS 范围 |
-| --- | ---: | ---: | ---: | ---: |
-| 系统 APFS | 1 | 1,623/1,342 MiB/s | 5.2/4.8 ms | 59/101 MiB |
-| 系统 APFS | 4 | 1,268/1,274 MiB/s | 12.6/13.4 ms | 62/72 MiB |
-| 外置 APFS | 1 | 645/584 MiB/s | 5.4/6.7 ms | 113/117 MiB |
-| 外置 APFS | 4 | 484/468 MiB/s | 18.6/18.2 ms | 72/89 MiB |
+### 4.7 多任务、公网协议与恢复
 
-这组结果显示外置卷在本机夹具上明显慢于系统卷，且 4 连接的 checkpoint 成本高于 1 连接；但样本少、缓存和卷状态未完全控制，不能把差异归因于 `PartFileWriter` 或 APFS 本身。当前证据支持继续保留有界 checkpoint 和低并发默认，不支持直接加入写缓存。OrbStack 的 NFS 挂载在本机对该测试用户不可写，未将权限失败伪装成网络文件系统性能结果；真正的 NAS/NFS A/B 需要可写的测试挂载点。
+- 4 个任务的系统 APFS 基准（256 MiB/任务、全局 16）aggregate goodput 中位为 4079.99/2955.60/2731.73/2696.23 MiB/s（每任务上限 1/2/4/8）。任务级完成统计显示 4 个任务均完成且校验通过；连接增加仍降低总吞吐并拉长完成 p95。
+- 低 FD/重试压力（4 任务、64 MiB/任务、全局 lease 8、FD reservation 8、首 4 个数据请求返回 503、最多 3 次尝试）每个档位的 3 次测量均为 4 个失败响应、4 次重试且最终 verified=true。该报告证明释放和重试预算路径正确，不代表公网错误率。
+- Cachefly 100 MiB 的 1/2/4 连接 goodput 中位为 5.06/4.97/5.13 MiB/s，所有请求协商 h2；OVH 直连 HTTP/1.1 为 5.08/5.22/5.14/5.32/5.33 MiB/s（1/2/4/8/16），OVH 本机代理为 5.46/5.36/5.22 MiB/s（1/2/4）。公网样本没有稳定的 10% 级收益，代理增加连接后反而下降，因此不改变默认值。报告只保存脱敏主机摘要，不能代表其他区域或供应商。
+- 进程恢复报告显示首进程以状态 9（SIGKILL）结束，中止前已持久化 16 MiB、记录状态为 downloading；新进程启动后将其识别为 paused，续传完成并校验通过。它是恢复正确性证据，不是吞吐基准。
 
-**优先级实施后的重复观测（2026-08-28）**：系统 APFS 高速夹具 64 MiB、单任务、每档 3 次（warmup 1）中，1/2/4/8/16 连接平均 goodput 约为 **1,582/1,260/1,150/1,125/1,142 MiB/s**；1 连接最高，16 连接比 1 连接低约 28%，所有输出均 `verified=true`。失败压力夹具（2 任务、全局 Range 预算 2、FD 预算 4、前 2 个数据请求返回 503）中，1/2/4 连接平均约 **741/623/581 MiB/s**，每档均观察到 2 个失败响应和 2 次重试且最终校验通过；4 连接 checkpoint 平均约 17.7 ms，高于 1 连接约 5.7 ms。
-
-外置 USB APFS SSD（`/Volumes/XG_SSD`）同负载每档 3 次时，1 连接平均约 **640 MiB/s**、checkpoint 约 **3.8 ms**，4 连接平均约 **472 MiB/s**、checkpoint 约 **13.2 ms**；峰值 RSS 分别约 108-127 MiB 与 95-100 MiB。该结果支持保留低并发和有界 checkpoint，不支持直接引入写缓存。`/Volumes/storage`（USB HDD）和 OrbStack NFS 在当前用户下不可写，未纳入伪造的“成功”样本。
-
-**兼容 sidecar 去除后的复测（2026-08-28）**：现代 Codable 记录将 `parts` 内嵌后，新任务不再同步第二份 sidecar。系统 APFS 高速夹具 64 MiB、单任务、每档 3 次（warmup 1）中，1/2/4/8/16 连接平均 goodput 约为 **1,604/1,126/1,244/1,201/1,170 MiB/s**，checkpoint 平均约 **2.6/5.0/5.8/5.0/4.9 ms**；对应 sidecar 阶段均为 0，所有输出均 `verified=true`。与同参数的前一轮观测相比，Range 档位 checkpoint 总耗时下降约 20%-35%，但 goodput 仍受本机高速源和调度噪声影响，不能把全部差值归因于 sidecar 优化。
-
-同一外置 USB APFS SSD、1/4 连接的平均 goodput 约为 **687/522 MiB/s**，checkpoint 约 **3.8/12.3 ms**，sidecar 阶段同样为 0，全部校验通过。该结果支持保留“现代记录内嵌 parts、旧格式/已有 sidecar 继续写回”的兼容策略；记录 JSON 编码、`synchronize()` 和真实 HDD/NFS 的物理 I/O 仍需独立 profiling，当前没有证据引入 WAL、任务级写缓存或相邻写合并。
+所有正式 JSON 均可解析，普通报告的每次完成输出均 verified=true；旧的 /tmp 临时 probe 不再作为本文数值依据。
 
 ## 5. Motrix 的实现原理与可借鉴点
 
@@ -318,143 +292,108 @@ CoolDM 不需要照搬 aria2 的公式，但应保留三个原则：
 
 ## 7. 对当前核心的逐项对比
 
-| 维度 | 当前 Swift | aria2/Motrix | 评估 |
+| 维度 | 当前 Swift | aria2/Motrix | 当前决定 |
 | --- | --- | --- | --- |
-| 引擎边界 | HTTP/HLS 直接在 Swift actor 内 | Motrix core 与独立 aria2 进程通过 adapter/RPC 隔离 | HTTP-only 继续原生更轻；需要 BT/Metalink/远程控制时再考虑引擎后端 |
-| Range 正确性 | 校验较完整，偏移写入 | piece/segment 状态、重试和校验成熟 | 保留当前校验，借鉴 piece 状态机 |
-| 分片布局 | 最小阈值下创建最多 `连接上限 × 4`、总计不超过 128 个静态工作单元 | `min-split-size` + PieceStorage 动态领取 | 已支持快 worker 多领未开始工作；尚不迁移部分写入的 Range |
-| in-flight 数量 | 1/2/4/8 风格活动 worker + 全局 Range lease | 命令按需领取，受全局/任务预算约束 | 已按 goodput/失败回退；尚未综合 RTT、CPU、I/O 和错误率窗口 |
-| 慢连接 | 通过额外未开始工作单元做粗粒度再平衡 | 空闲、未写入 segment 可被接管；完成后继续领新 segment | 已覆盖安全的第一步；单个进行中慢尾部仍不会被抢占 |
-| 主机经验 | 协议/主机/端口级画像，7 天 TTL、最多 256 条，不保存 URL 路径和凭据 | ServerStat 区分单/多连接速度并支持反馈选择 | 已用于自动任务起始档位，但不再充当永久硬上限 |
-| 限速 | 任务/主机本地 limiter 嵌套共享全局 limiter | aria2 有全局和单任务限速 | 全局值是 HTTP/HLS 活动任务的聚合硬上限；本地 `nil/0` 不能绕过它 |
-| 缓冲 | URLSession 通道每请求约 1 MiB 高水位，进程级响应预算 16 MiB | aria2 有界写磁盘缓存 | 网络背压和总响应预算已落地；任务级写缓存仍待 profiling |
-| 重试/FD | 重试槽位默认 2；part 文件与 HTTP 请求共享默认 128 个 FD reservation，均按任务轮转 | aria2 对连接、缓存和任务状态有多级资源控制 | 已防止重试风暴和请求/文件句柄无界增长；真实 OS FD 与代理场景仍需复核 |
-| 持久化 | JSON 原子替换；现代记录内嵌 `parts`，兼容 sidecar 仅对旧格式/已有文件维护；HTTP 进度约 2 s checkpoint、250 ms UI 事件 | SQLite WAL/预编译/行变更跳过 + aria2 session | 已去除新任务的固定 sidecar 写放大；记录 JSON/fsync 仍需 profiling，不能据此引入更重存储 |
-| 文件分配 | APFS 默认可稀疏，支持 dense | none/prealloc/falloc 等按环境选择 | 借鉴环境感知，不直接复制 Linux 策略 |
-| UI 状态 | AsyncStream 事件 | 1 秒活跃、10 秒空闲轮询，通知只作提示 | 事件应可合并，不能让 UI 反压下载循环 |
-| 进程恢复 | 同一进程重启后标记 paused | 引擎独立、PID 监督、GID 与数据库双向恢复 | 只在引入外部引擎时借鉴完整模型 |
+| 引擎边界 | HTTP/HLS 直接在 Swift actor 内 | Motrix core 与独立 aria2 进程通过 adapter/RPC 隔离 | 保持纯 Swift 单核心；aria2 只作设计参考，不增加 adapter、RPC 或第二套状态源 |
+| Range 正确性 | 校验状态码、范围、长度、验证器并按偏移写入 | piece/segment 状态、重试和校验成熟 | 保留现有校验，继续借鉴局部 piece 状态 |
+| 分片布局 | 最小阈值下创建有限工作单元，快 worker 可继续领取未开始单元 | min-split-size 加 PieceStorage 动态领取 | 已满足当前需求；暂不迁移已写入的进行中 Range |
+| 活动请求数 | 1/2/4/8 风格 worker，受任务上限和全局 lease 约束 | 命令按需领取，受多级预算约束 | 当前 goodput/请求占用时间/失败控制器足够；没有证据新增 RTT、CPU 或 I/O 信号 |
+| 慢连接 | 只对未开始工作做再平衡 | 空闲且未写入 segment 可接管 | 保持安全的粗粒度再平衡，避免重复写 |
+| 主机经验 | 协议/主机/端口画像，7 天 TTL、最多 256 条，不保存 URL 路径和凭据 | ServerStat 区分单/多连接速度 | 画像只作为自动任务初始档位，不永久压低可探测上限 |
+| 限速 | 任务/主机 limiter 叠加全局聚合 limiter | aria2 有全局和单任务限速 | 保持全局硬上限和本地附加上限语义 |
+| 缓冲 | 每请求约 1 MiB 高水位，进程级响应预算 16 MiB | aria2 有界写磁盘缓存 | 网络背压和响应预算已足够；任务级写缓存暂不实现 |
+| 重试与 FD | 重试槽位默认 2；part 文件和 HTTP 请求共享 FD reservation，按任务轮转 | aria2 有多级资源控制 | 本机低 FD/503 压力已验证；继续区分 reservation 与 OS 实际 FD |
+| 持久化 | JSON 原子替换；现代记录内嵌 parts，旧格式/已有 sidecar 才兼容写回 | SQLite WAL、预编译语句和 session | 保持轻量 JSON；没有存储 profiling 证据时不迁移 WAL/SQLite |
+| 文件分配 | APFS 默认可稀疏，支持 dense | 按环境选择 none/prealloc/falloc | 只记录环境建议，不把 Linux 策略直接复制到 macOS |
+| UI 状态 | AsyncStream 事件，约 250 ms 合并 | 活跃/空闲轮询，通知只作提示 | UI 更新不反压下载循环；当前连接数展示活动 HTTP 请求而非物理 socket |
+| 进程恢复 | 重启时将陈旧 downloading 标记为 paused，保留 part 文件 | PID 监督、GID 与数据库双向恢复 | 本地 SIGKILL/续传已验证；不引入外部引擎状态同步 |
 
-## 8. 建议实施路线
+## 8. 执行计划结果
 
-### P0：先修正收益/代价模型（已完成）
+### 阶段 1：补齐性能证据
 
-1. **把 `dynamicPartCreation` 改成真实语义。** 当前保留旧设置键以兼容已有配置，UI 已改为“启用 HTTP 分片”；实际语义仍是启用静态 Range 分片，后续可在配置迁移时改成更直观的内部名称。
-2. **加入最小分片阈值和连接预算。** 当前默认最小分片为 16 MiB、全局 Range 连接预算为 16；逻辑为：
+**状态：已完成可用环境验证；不可用环境明确留空。**
 
-   ```text
-   configured ceiling = task override
-                     ?? host override
-                     ?? global per-task setting
-   initial active stage = learned host profile (automatic jobs only)
-   worker count = min(configured ceiling,
-                      pending work units,
-                      global Range lease budget)
-   ```
+已完成固定机器上的单任务、多任务、1 MiB/256 MiB/4 GiB、1/2/4/8/16 连接、单连接限速、总带宽限速、首字节延迟、低 FD 与 503 重试、HTTP/2、HTTP/1.1、直连、代理、外置 APFS SSD 和进程中止恢复。所有正式报告均保留最终长度或摘要校验，普通矩阵每次完成均 verified=true。当前用户下 USB HDD 和 NAS/NFS 目标目录不可写，因此这两项结论为“无法验证”，不能用 APFS 结果替代。
 
-   新任务的连接上限为 1 时直接走普通 GET；资源大小未知、不支持 Range、经过不透明代理或响应不稳定时不要强行分片。若新任务上限大于 1，自动任务可以从画像档位开始并继续向上试探；已有 `parts` 的任务即使关闭开关也保留 Range 恢复路径。当前仍需通过真实基准确认 16 MiB 是否适合公网 CDN。
-3. **改为有限工作队列。** 当前只创建有限 worker，工作单元包含范围和已下载偏移，实际 Range 请求受全局 lease 约束；新布局会创建额外未开始工作单元，快 worker 可持续领取以缩小慢连接造成的静态尾部。失败会释放 lease，任务级重试重新从持久化进度构建队列。
-4. **分离三类状态。** HTTP 普通 GET/Range 路径的网络进度只更新内存，UI 事件约 250 ms 合并，checkpoint 约 2 秒、每新增约 64 MiB 或重要状态转换时保存；暂停、退出、分片完成、失败和完成仍强制刷盘。初始 8 MiB 阈值在隔离进程的高速回环基准中让 checkpoint 占墙钟时间约 29%-41%，因此先提高到 64 MiB；HLS 仍按分片完成回调保存，未纳入这次高频 HTTP 节流。
-5. **先测量再改写盘实现（阶段采集与首轮重复 A/B 已落地）。** 可选的 `DownloadMetricsSink` 已记录任务开始/结束资源快照、HTTP 普通 GET/Range/探测请求、收到响应头的首字节时间、重试、checkpoint 和事件发布耗时；`DownloadStore.save` 同时记录 JSON/sidecar 编码字节、逻辑写入字节、内核按进程记账的写入字节、`synchronize()` 次数和完整 checkpoint 耗时，并在启用指标时分别记录记录文件和兼容 sidecar 的编码、写入、同步、原子替换阶段耗时。现代 Codable 记录的 `parts` 已内嵌，新任务不会重复创建 sidecar；旧格式或已有 sidecar 仍保持写回。这个内核计数不是设备物理落盘量，也不能证明 fsync 已完成持久化。默认 sink 为 no-op；只有采样运行才承担额外开销。当前结果支持去除新任务的冗余 sidecar 写入，但仍不足以证明需要单文件 WAL/SQLite 或任务级写缓存。
+### 阶段 2：决定默认阈值与预算
 
-### P1：让并发具有反馈能力（最小闭环已完成）
+**状态：已完成，保留现值。**
 
-1. **慢连接再平衡（已完成第一阶段）。** 新任务按最多 `连接上限 × 4` 创建有界工作单元，快 worker 完成后继续领取尚未开始的单元；对已写入部分不做中途迁移，避免重复写和恢复状态竞态。
-2. **自适应并发（已完成最小控制器）。** 自动任务从 1 或主机画像档位开始，按完成工作单元的聚合 goodput 试探 2/4/8...，但只在任务/主机/全局配置的连接上限内运行；候选档位至少提升 10% 才保留，并要求阶段最大请求耗时不超过稳定阶段的 2 倍。吞吐下降、耗时尾部恶化或可恢复失败时回退并冷却；永久性 HTTP 4xx 只让任务失败，不污染并发阶段。显式任务/主机线程设置优先作为硬上限和起始值。这里的耗时是取得 Range lease 后的请求占用时间，不等同于协议 RTT；p95 RTT、错误率窗口、CPU/I/O 压力反馈仍待稳定 profiling，10% 和 2 倍仍是实验门槛而非公网保证。
-3. **主机画像（已完成最小存储）。** `HostPerformanceStore` 保存协议、规范化主机、端口、稳定连接档位、EWMA goodput、成功/失败计数和时间戳；默认 7 天 TTL、最多 256 条。画像只作为没有显式覆盖时的初始活动档位，不能永久压低全局可探测上限。完整 URL、路径、查询、Cookie 和授权头不会写入画像；缓存损坏或写入失败不会阻止下载。
-4. **统一资源预算（已完成第一阶段）。** 实际 Range 请求受全局 lease 限制，HTTP/HLS 任务共享一个全局聚合速度 limiter；URLSession 响应正文再受进程级 16 MiB 缓冲 lease 约束；重试尝试受独立全局槽位限制；part 文件和 HTTP 请求受 FD reservation 限制，作用域返回或抛错前会确定性释放；Range、重试和 FD 等待均按任务轮转。任务或主机的本地限速只会额外收紧，默认值仍需压力矩阵复核。
-5. **写盘合并（未实现）。** 继续使用偏移直写和节流 checkpoint；只有磁盘 I/O profiling 证明相邻写合并或有限写缓存能带来净收益时再实现。
+- 最小工作块保留 16 MiB：在相同受限源 A/B 中为 11.94 MiB/s，32 MiB 为 7.45 MiB/s，16 MiB 优势约 60.2%，三次测量全部校验通过。
+- 全局 Range lease 保留 16：四任务同负载下，8 lease 中位 1600.64 MiB/s，16 lease 中位 1572.39 MiB/s；16 没有带来速度收益，却把 server max 从 8 提到 16、峰值 OS FD 从 27 提到 43。16 是共享安全上限和跨任务余量，不是目标并发。
+- 新安装默认单任务连接保留 1；已有用户设置不自动重置。受限源可在控制器试探到 2/4 后获得收益，但高速源、代理和外置 SSD 均未证明更高档位稳定更快。
 
-### P2：可选的引擎后端
+### 阶段 3：按证据完善在线反馈
 
-- 抽象 `DownloadEngine`/adapter，使 HTTP Swift、aria2 和未来 Rust 引擎共享任务模型；adapter 只负责能力报告、状态同步和生命周期。
-- 只有在需要 BT、Metalink piece hash、SFTP、远程 headless 或成熟协议覆盖时，才评估捆绑 aria2。HTTP-only 场景继续使用 Swift 核心可减少额外进程、RPC、跨语言状态和安装包体积。
-- 不复制 aria2 C++ 源码到 Apache-2.0 Swift 核心。aria2 是 GPLv2；若将其作为独立可执行文件随产品分发，需单独处理 GPL 文本、对应源码、第三方声明、构建和升级边界。
+**状态：本轮不触发，不新增代码。**
 
-## 9. 资源预算建议
+正式矩阵没有证明当前控制器稳定选错档位或回退过晚。公网和代理样本反而显示收益不稳定；现有 goodput、请求占用时间和可恢复失败信号已经能回退。未来若出现重复误判，应先离线分析协议指标、请求 p95 和错误窗口，再一次只加入一个信号。
 
-可以用下式做粗略预算，而不是把“线程数”当成唯一成本：
+### 阶段 4：按证据优化写盘路径
 
-```text
-peakMemory ~= baseRSS
-             + activeRequests × (responseBuffer + writerBuffer + protocolState)
-             + taskCache
-```
+**状态：本轮不触发，不新增代码。**
 
-初版应遵守以下约束：
+系统 APFS 和外置 APFS SSD 的 checkpoint 计时已可观测，现代记录也已去除固定 sidecar 写入；现有结果没有证明偏移写、JSON 或同步是稳定的首要瓶颈。没有可写 HDD/NAS/NFS 的设备级 I/O 证据前，不实现任务级写缓存、相邻写合并、WAL 或存储模型迁移。内核进程写入计数不能替代物理设备 profiling。
 
-| 项目 | 建议 |
+### P2：外部引擎后端
+
+**状态：取消。**
+
+不抽象 DownloadEngine adapter，不集成或分发 aria2，不增加外部 RPC、BT、Metalink、SFTP、远程 headless 或第二套任务状态。Motrix/aria2 源码只保留为有限工作队列、反馈调度、恢复和资源预算的研究依据。
+
+## 9. 当前资源与默认值
+
+| 项目 | 当前决定 |
 | --- | --- |
-| 新安装 HTTP 默认并发 | 1；已有配置不重置。确认资源大、Range 可用且单连接受限后再升到 2/4 |
-| 单任务硬上限 | 先保持 64 作为配置校验上限，但不作为默认目标；实际可用上限由全局预算裁剪 |
-| 最小单片 | 当前默认 16 MiB；小于两个最小单片的资源直接单连接，后续按基准调节 |
-| 响应缓冲 | URLSession 每请求约 1 MiB 高水位，并由进程级 16 MiB lease 预算约束；仍需在真实代理/HTTP2 场景复核 |
-| 任务级缓存 | 先从 16-64 MiB 的有界缓存做 A/B，不让缓存无限跟随吞吐增长 |
-| checkpoint | HTTP 路径约 2 秒；UI 事件约 250 ms；暂停、退出、分片完成、失败和完成强制保存 |
-| 全局连接 | 当前 Range lease 默认上限 16，运行时可更新；仍需结合系统 FD 和多任务基准调节 |
-| 全局限速 | 所有活动 HTTP/HLS 任务共享同一个聚合预算；`0` 表示不设置全局上限 |
-| 任务/主机限速 | 作为本地附加上限；空值或 `0` 只取消本地上限，不能绕过非零全局上限 |
-| 重试与公平 | 重试槽位默认 2；Range、重试和 FD reservation 按任务轮转；本机多任务失败压力已覆盖，公网/代理长时尾延迟仍需复核 |
-| FD 低预算 | 每个活动任务至少预留 part 文件和一个请求各 1 个单位，调度上限自动收紧到 `floor(FD 预算 / 2)`；运行时下降会暂停最新的超额任务，避免所有任务同时等待请求槽位 |
-| 物理文件 | macOS/APFS 默认稀疏；密集预分配仅在测得碎片或空间策略收益时启用 |
+| 新安装 HTTP 默认连接 | 1；已有配置不重置 |
+| 单任务配置上限 | 64 仅作为校验硬上限，不是默认目标；实际活动请求受工作单元和全局 lease 裁剪 |
+| 最小 Range 工作块 | 16 MiB；小文件或不满足 Range 条件时走普通 GET |
+| 全局 Range lease | 16；跨任务共享安全上限，不主动打满，也不提高到 32/64 |
+| 响应缓冲 | 每请求约 1 MiB 高水位，进程级总预算 16 MiB；等待预算的请求不创建 socket |
+| 任务级写缓存 | 暂不实现，等待可写 HDD/NAS/NFS 或大文件 profiling |
+| HTTP checkpoint | 约 2 秒、或新增约 64 MiB、或重要状态转换；暂停、退出、分片完成、失败和完成强制保存 |
+| UI 事件 | 约 250 ms 合并；显示当前活动 HTTP 请求数与设置上限，不宣称物理 TCP 连接数 |
+| 全局限速 | 所有 HTTP/HLS 活动任务共享聚合上限；0 表示不设置全局上限 |
+| 重试与公平 | 重试槽位默认 2；Range、重试和 FD 等待按任务轮转 |
+| FD 低预算 | 每个活动任务至少保留一个 part 文件和一个请求 reservation，活动任务上限按 FD 预算自动收紧 |
+| 文件准备 | macOS/APFS 默认稀疏；密集预分配只在有碎片或空间策略证据时启用 |
 
-## 10. 验证矩阵与验收标准
+16 和 16 MiB 都是当前证据下的保守可解释值，不是物理定律或全场景最优值。重新调整必须使用同负载、至少三次测量、最终内容校验和资源边界同时满足的 A/B 证据。
 
-### 10.1 必测场景
+## 10. 验证与验收
 
-| 类别 | 场景 |
-| --- | --- |
-| 协议 | Range 支持/不支持、`Content-Length` 缺失、HTTP/1.1、HTTP/2、代理 |
-| 规模 | 1 MiB、64 MiB、256 MiB、4 GiB 以上；已完成前缀和中间空洞恢复 |
-| 服务端 | 单连接限速、总带宽限速、每连接限速、首字节延迟、慢尾部、429/503 |
-| 正确性 | ETag 变化、错误 `Content-Range`、短响应、超长响应、连接中途断开 |
-| 存储 | APFS SSD、外置 HDD、网络文件系统；稀疏和密集文件 |
-| 调度 | 1/2/4/8/16 连接、多个任务混跑、暂停/恢复、进程中止后恢复 |
-| 资源 | 峰值 RSS、CPU、FD、内核按进程记账的写入字节、`synchronize()` 次数/耗时、事件队列积压 |
+### 10.1 正式报告
 
-### 10.2 每次 A/B 应记录
+正式目录包含 27 个脱敏 JSON：26 个 schema 4 普通矩阵和 1 个 schema 1 恢复报告。每个普通矩阵都有 1 次 warmup 和 3 次测量；所有完成输出 verified=true。报告已记录 goodput、首字节时间、完整请求 p95、请求/重试/失败计数、协议、checkpoint 分阶段耗时、CPU、RSS、FD、内核记账写入和夹具服务端并发。
 
-- 总耗时、goodput、启动到首字节时间、速度 p50/p95；
-- 实际 socket/HTTP stream 数、请求数、重试数、状态码分布；
-- user/system CPU、峰值 RSS、打开 FD、I/O wait、内核按进程记账的写入字节；需要设备物理写入时另用磁盘 profiling 获取；
-- checkpoint 次数和耗时、事件发布/消费耗时；
-- 中断恢复后重新下载的字节数、最终 SHA-256 和目标文件大小。
+旧的 schema 4 报告缺失新增配置、协议、分阶段 checkpoint 或任务统计字段时，解码器使用与新运行一致的空值/默认值；这保证历史报告仍能用于纵向比较。
 
-### 10.3 初始判定口径
+### 10.2 已验证与无法验证
 
-分片策略只有在同一负载下同时满足以下条件才算“值得启用”：
+- **已验证**：本机 APFS、外置 USB APFS SSD、受限/总限速/延迟/失败压力、HTTP/1.1、HTTP/2、OVH 直连、OVH 本机代理、低 FD 预算、暂停/取消边界和 SIGKILL 后续传。
+- **无法验证**：当前测试用户没有可写 USB HDD 和 NAS/NFS 挂载点；因此没有把存储类型自动调优或写缓存结论写成实现。
+- **不适用**：物理 TCP 连接数和设备实际落盘量不能由逻辑 Range 请求数、URLSession 配置或进程内核写入计数直接推出。
 
-1. goodput 相对单连接有稳定、可重复的提升；实验阶段可先用 **至少 10%** 作为升档门槛；
-2. 峰值 RSS、CPU、FD 和内核记账写入增量没有超过产品预算；设备级写入另以 profiling 复核；
-3. 没有新增错误响应、资源错配、数据损坏或恢复丢失；
-4. 在提升不再出现或资源超预算时能自动回退到较低并发。
+### 10.3 代码验证命令
 
-“连接数变多”或“某次测试更快”都不构成性能优化证据。
+在完整 Xcode-beta 下执行：
 
-### 10.4 当前实现验证
+    DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift test --disable-sandbox
+    DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift build --disable-sandbox
+    git diff --check
 
-在完整 Xcode-beta（`/Applications/Xcode-beta.app`）下，当前 P0/P1 最小闭环及本轮生命周期修复已通过：
-
-```text
-CoolDownloadCore: 97 tests passed
-CoolDownloadIntegration: 12 tests passed
-CoolDownloadManager: 10 tests passed
-swift build passed
-```
-
-核心测试覆盖小资源普通 GET、关闭分片回退、有限工作队列、自适应升降档、主机画像优先级与隐私边界、全局连接/速度预算、多任务聚合限速、重试槽位、FD reservation、运行时降低 FD 后暂停超额任务、任务轮转公平、进度事件合并、恢复和取消，以及 URLSession metrics 缺失/乱序和晚到指标观察回归；这些是正确性回归，不替代公网 CDN、代理、HTTP/2、HDD/网络文件系统的性能 A/B。
+测试需要覆盖普通 GET、Range 校验、调度升降档、预算/重试/FD、公平性、持久化、恢复和取消；性能报告不替代这些正确性测试。
 
 ## 11. 最终建议
 
-当前阶段的后续优先顺序应是（P0/P1 最小闭环、FD 动态收缩和本机成功/失败压力基线已落地，但 16 MiB/16 lease 尚无正式公网矩阵结论）：
+本轮执行已完成所有有条件的阶段，当前不再有需要立即修改的性能算法：
 
-```text
-固定机器运行 CoolDownloadBenchmark，保存成功与失败压力 JSON 基线（已完成，多轮）
-  -> 公网 CDN、HTTP/2、代理、HDD/NAS 矩阵 A/B（已完成小样本 CDN/HTTP2；代理与可写 NAS 仍缺环境）
-  -> 持久化/事件热路径 profiling（阶段计时与系统 APFS/外置 SSD 重复观测已完成）
-  -> 重复存储 A/B，确认记录 JSON/fsync 是否仍需进一步减少写入次数（系统 APFS/外置 SSD 已复测；HDD/NFS 仍缺可写环境）
-  -> 用稳定 profiling 结果决定是否把 RTT、错误率窗口、CPU/I/O 压力纳入在线升档
-  -> 有证据时再做磁盘缓存/相邻写合并
-  -> 按需引入独立 aria2 后端
-```
+1. 保持新安装单连接、16 MiB 最小工作块和全局 16 lease；不要因为设置允许 16 或 64 就主动创建同等数量的 Range 请求。
+2. 保持现有自适应 worker、背压、全局限速、重试/FD 预算、轮转公平和节流 checkpoint；这些机制解决的是“收益出现时可用、收益消失时回退”。
+3. 将正式 JSON 作为后续回归基线。新增公网区域、代理供应商、可写 HDD/NAS/NFS 或不同 macOS 版本时，先复跑同一矩阵，再决定是否改变阈值。
+4. 只有重复 profiling 证明写盘路径限制 goodput，才选择一种有界写优化并重新验证恢复；在此之前不加入缓存或更重的存储层。
+5. 只有重复证据显示控制器持续选错档位，才新增一个在线反馈信号；不为理论上的 RTT/CPU/I/O 优化预先增加复杂度。
+6. aria2 后端及 P2 协议扩展保持取消状态，避免把性能问题重新包装成引擎集成问题。
 
-结论不是“分片无效”，而是“分片必须成为受约束、可反馈、可回退的策略”。aria2 已经证明了这条路线；Motrix 已经证明了将成熟引擎与 UI、任务和恢复逻辑隔离的工程价值。CoolDM 可以先在 Swift 核心中实现这两类思想的最小子集，再用真实 CDN、代理、磁盘和多任务矩阵决定是否需要更重的引擎。
+结论仍然是：分片不是越多越快。它应当是受资源预算约束、由实测收益驱动、可以回退且能通过内容校验的策略。

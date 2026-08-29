@@ -8,6 +8,49 @@ final class RangeFixtureServer: @unchecked Sendable {
         var failedDataRequestCount: Int
         var maximumConcurrentDataRequests: Int
         var bytesSent: Int64
+
+        init(
+            requestCount: Int,
+            dataRequestCount: Int,
+            failedDataRequestCount: Int,
+            maximumConcurrentDataRequests: Int,
+            bytesSent: Int64
+        ) {
+            self.requestCount = requestCount
+            self.dataRequestCount = dataRequestCount
+            self.failedDataRequestCount = failedDataRequestCount
+            self.maximumConcurrentDataRequests = maximumConcurrentDataRequests
+            self.bytesSent = bytesSent
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestCount
+            case dataRequestCount
+            case failedDataRequestCount
+            case maximumConcurrentDataRequests
+            case bytesSent
+        }
+
+        /// Early schema-1 reports did not record failed fixture responses.
+        /// Missing counters are observational and default to zero so those
+        /// reports remain decodable after the schema-4 metrics were added.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            requestCount = try container.decodeIfPresent(Int.self, forKey: .requestCount) ?? 0
+            dataRequestCount = try container.decodeIfPresent(
+                Int.self,
+                forKey: .dataRequestCount
+            ) ?? 0
+            failedDataRequestCount = try container.decodeIfPresent(
+                Int.self,
+                forKey: .failedDataRequestCount
+            ) ?? 0
+            maximumConcurrentDataRequests = try container.decodeIfPresent(
+                Int.self,
+                forKey: .maximumConcurrentDataRequests
+            ) ?? 0
+            bytesSent = try container.decodeIfPresent(Int64.self, forKey: .bytesSent) ?? 0
+        }
     }
 
     private struct MutableStatistics {

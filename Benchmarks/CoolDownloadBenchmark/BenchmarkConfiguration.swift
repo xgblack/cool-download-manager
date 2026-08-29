@@ -20,6 +20,10 @@ struct BenchmarkConfiguration: Codable, Sendable {
     var maxOpenFileDescriptors = 128
     var minimumPartSizeBytes: Int64 = 16 * 1024 * 1024
     var perConnectionBytesPerSecond: Int64 = 0
+    /// Optional aggregate application speed cap used by the local fixture
+    /// matrix. This is passed to the production global rate limiter so a
+    /// total-bandwidth scenario does not need a second server implementation.
+    var globalBytesPerSecond: Int64 = 0
     var firstByteDelayMilliseconds = 0
     var failFirstDataRequests = 0
     var retryAttempts = 1
@@ -32,6 +36,116 @@ struct BenchmarkConfiguration: Codable, Sendable {
     var downloadsRootPath: String?
     var keepFiles = false
     var outputPath: String?
+    /// Runs the benchmark-only process-kill/resume scenario instead of the
+    /// normal connection matrix. The value is the delay after the first
+    /// child has created its persisted task.
+    var interruptionAfterMilliseconds: Int?
+    /// Internal-only path used by the recovery child processes. It is never
+    /// written to a public report.
+    var fixedRunRootPath: String?
+    /// Internal-only flag telling `runOnce` to resume records already on disk.
+    var resumeExisting = false
+
+    private enum CodingKeys: String, CodingKey {
+        case sizeBytes
+        case expectedSizeBytes
+        case sourceURL
+        case expectedSHA256
+        case connections
+        case repetitions
+        case warmups
+        case taskCount
+        case globalConnections
+        case maxOpenFileDescriptors
+        case minimumPartSizeBytes
+        case perConnectionBytesPerSecond
+        case globalBytesPerSecond
+        case firstByteDelayMilliseconds
+        case failFirstDataRequests
+        case retryAttempts
+        case retryDelayMilliseconds
+        case timeoutSeconds
+        case proxyURL
+        case downloadsRootPath
+        case keepFiles
+        case outputPath
+        case interruptionAfterMilliseconds
+        case fixedRunRootPath
+        case resumeExisting
+    }
+
+    init() {}
+
+    /// Reports are intentionally schema-versioned, but schema version 4 was
+    /// already used before optional benchmark dimensions were added. Decode
+    /// those fields with the same defaults used by a fresh invocation so old
+    /// reports remain useful for longitudinal comparisons.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = Self()
+        sizeBytes = try container.decodeIfPresent(Int64.self, forKey: .sizeBytes)
+            ?? defaults.sizeBytes
+        expectedSizeBytes = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .expectedSizeBytes
+        )
+        sourceURL = try container.decodeIfPresent(String.self, forKey: .sourceURL)
+        expectedSHA256 = try container.decodeIfPresent(String.self, forKey: .expectedSHA256)
+        connections = try container.decodeIfPresent([Int].self, forKey: .connections)
+            ?? defaults.connections
+        repetitions = try container.decodeIfPresent(Int.self, forKey: .repetitions)
+            ?? defaults.repetitions
+        warmups = try container.decodeIfPresent(Int.self, forKey: .warmups)
+            ?? defaults.warmups
+        taskCount = try container.decodeIfPresent(Int.self, forKey: .taskCount)
+            ?? defaults.taskCount
+        globalConnections = try container.decodeIfPresent(Int.self, forKey: .globalConnections)
+            ?? defaults.globalConnections
+        maxOpenFileDescriptors = try container.decodeIfPresent(
+            Int.self,
+            forKey: .maxOpenFileDescriptors
+        ) ?? defaults.maxOpenFileDescriptors
+        minimumPartSizeBytes = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .minimumPartSizeBytes
+        ) ?? defaults.minimumPartSizeBytes
+        perConnectionBytesPerSecond = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .perConnectionBytesPerSecond
+        ) ?? defaults.perConnectionBytesPerSecond
+        globalBytesPerSecond = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .globalBytesPerSecond
+        ) ?? defaults.globalBytesPerSecond
+        firstByteDelayMilliseconds = try container.decodeIfPresent(
+            Int.self,
+            forKey: .firstByteDelayMilliseconds
+        ) ?? defaults.firstByteDelayMilliseconds
+        failFirstDataRequests = try container.decodeIfPresent(
+            Int.self,
+            forKey: .failFirstDataRequests
+        ) ?? defaults.failFirstDataRequests
+        retryAttempts = try container.decodeIfPresent(Int.self, forKey: .retryAttempts)
+            ?? defaults.retryAttempts
+        retryDelayMilliseconds = try container.decodeIfPresent(
+            Int.self,
+            forKey: .retryDelayMilliseconds
+        ) ?? defaults.retryDelayMilliseconds
+        timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+            ?? defaults.timeoutSeconds
+        proxyURL = try container.decodeIfPresent(String.self, forKey: .proxyURL)
+        downloadsRootPath = try container.decodeIfPresent(String.self, forKey: .downloadsRootPath)
+        keepFiles = try container.decodeIfPresent(Bool.self, forKey: .keepFiles)
+            ?? defaults.keepFiles
+        outputPath = try container.decodeIfPresent(String.self, forKey: .outputPath)
+        interruptionAfterMilliseconds = try container.decodeIfPresent(
+            Int.self,
+            forKey: .interruptionAfterMilliseconds
+        )
+        fixedRunRootPath = try container.decodeIfPresent(String.self, forKey: .fixedRunRootPath)
+        resumeExisting = try container.decodeIfPresent(Bool.self, forKey: .resumeExisting)
+            ?? defaults.resumeExisting
+    }
 
     static func parse(arguments: [String]) throws -> Self {
         var configuration = Self()
@@ -108,6 +222,12 @@ struct BenchmarkConfiguration: Codable, Sendable {
                     throw BenchmarkCLIError.invalidValue(argument, raw)
                 }
                 configuration.perConnectionBytesPerSecond = Int64(value * 1024 * 1024)
+            case "--global-mibps":
+                let raw = try nextValue()
+                guard let value = Double(raw), value >= 0 else {
+                    throw BenchmarkCLIError.invalidValue(argument, raw)
+                }
+                configuration.globalBytesPerSecond = Int64(value * 1024 * 1024)
             case "--first-byte-ms":
                 let raw = try nextValue()
                 guard let value = Int(raw), value >= 0 else {
@@ -151,6 +271,12 @@ struct BenchmarkConfiguration: Codable, Sendable {
                 configuration.timeoutSeconds = try positiveInt(nextValue(), option: argument)
             case "--output":
                 configuration.outputPath = try nextValue()
+            case "--interrupt-after-ms":
+                let raw = try nextValue()
+                guard let value = Int(raw), value > 0 else {
+                    throw BenchmarkCLIError.invalidValue(argument, raw)
+                }
+                configuration.interruptionAfterMilliseconds = value
             default:
                 throw BenchmarkCLIError.unknownOption(argument)
             }
@@ -178,6 +304,16 @@ struct BenchmarkConfiguration: Codable, Sendable {
                 "--per-connection-mibps, --first-byte-ms and --fail-first-data-requests are local-fixture options"
             )
         }
+        if configuration.interruptionAfterMilliseconds != nil {
+            guard configuration.sourceURL == nil,
+                  configuration.taskCount == 1,
+                  configuration.connections.count == 1,
+                  configuration.perConnectionBytesPerSecond > 0 else {
+                throw BenchmarkCLIError.invalidCombination(
+                    "--interrupt-after-ms requires one local task, one connection value and --per-connection-mibps"
+                )
+            }
+        }
         return configuration
     }
 
@@ -201,6 +337,8 @@ struct BenchmarkConfiguration: Codable, Sendable {
         if downloadsRootPath != nil {
             copy.downloadsRootPath = "<redacted>"
         }
+        copy.fixedRunRootPath = nil
+        copy.resumeExisting = false
         copy.outputPath = nil
         return copy
     }
@@ -238,6 +376,7 @@ struct BenchmarkConfiguration: Codable, Sendable {
       --max-open-fds N              Download FD reservation budget (default: 128)
       --minimum-part-mib N         Minimum persisted Range size (default: 16)
       --per-connection-mibps N     Per-stream server throttle; 0 is unlimited
+      --global-mibps N             Aggregate production speed cap; 0 is unlimited
       --first-byte-ms N            Delay before response headers (default: 0)
       --fail-first-data-requests N Deterministically fail the first N data requests (default: 0)
       --retry-attempts N           Maximum attempts per task (default: 1)
@@ -247,6 +386,7 @@ struct BenchmarkConfiguration: Codable, Sendable {
       --keep-files                  Keep isolated run directories under --downloads-root
       --timeout-seconds N          Per-run timeout (default: 300)
       --output PATH                Also write the JSON report to PATH
+      --interrupt-after-ms N       Kill a local child and verify process resume
       --help                       Show this help
 
     Progress is written to stderr. The final machine-readable report is written

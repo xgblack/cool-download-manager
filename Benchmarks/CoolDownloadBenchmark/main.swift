@@ -1,6 +1,10 @@
 import CoolDownloadCore
 import Foundation
 
+#if canImport(Darwin)
+import Darwin
+#endif
+
 @main
 struct CoolDownloadBenchmarkMain {
     static func main() async {
@@ -10,13 +14,37 @@ struct CoolDownloadBenchmarkMain {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             let arguments = Array(CommandLine.arguments.dropFirst())
             if let invocation = try InternalInvocation.parse(arguments: arguments) {
-                let run = try await runSingle(invocation: invocation)
-                FileHandle.standardOutput.write(try encoder.encode(run))
+                switch invocation.mode {
+                case .normal:
+                    let run = try await runSingle(invocation: invocation)
+                    FileHandle.standardOutput.write(try encoder.encode(run))
+                case .recoveryInterrupt:
+                    try await runUntilInterrupted(invocation: invocation)
+                case .recoveryResume:
+                    let result = try await runRecoveryResume(invocation: invocation)
+                    FileHandle.standardOutput.write(try encoder.encode(result))
+                }
                 FileHandle.standardOutput.write(Data("\n".utf8))
                 return
             }
 
             let configuration = try BenchmarkConfiguration.parse(arguments: arguments)
+            if configuration.interruptionAfterMilliseconds != nil {
+                let report = try await runRecoveryScenario(configuration: configuration)
+                let data = try encoder.encode(report)
+                if let outputPath = configuration.outputPath {
+                    let outputURL = URL(fileURLWithPath: outputPath).standardizedFileURL
+                    try FileManager.default.createDirectory(
+                        at: outputURL.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try data.write(to: outputURL, options: .atomic)
+                    fputs("report: \(outputURL.path)\n", stderr)
+                }
+                FileHandle.standardOutput.write(data)
+                FileHandle.standardOutput.write(Data("\n".utf8))
+                return
+            }
             let report = try runIsolatedMatrix(configuration: configuration)
             let data = try encoder.encode(report)
             if let outputPath = configuration.outputPath {
@@ -83,11 +111,376 @@ struct CoolDownloadBenchmarkMain {
         )
     }
 
+    private static func runRecoveryScenario(
+        configuration: BenchmarkConfiguration
+    ) async throws -> BenchmarkRecoveryReport {
+        guard let interruptionAfterMilliseconds = configuration.interruptionAfterMilliseconds,
+              let requestedConnections = configuration.connections.first else {
+            throw BenchmarkRunError.invalidRecoveryConfiguration
+        }
+
+        let server = try RangeFixtureServer(
+            contentLength: configuration.sizeBytes,
+            bytesPerSecond: configuration.perConnectionBytesPerSecond,
+            firstByteDelayMilliseconds: configuration.firstByteDelayMilliseconds,
+            failFirstDataRequests: configuration.failFirstDataRequests
+        )
+        let sourceURL = try await server.start()
+        defer { server.stop() }
+
+        let parent = configuration.downloadsRootPath.map {
+            URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
+        } ?? FileManager.default.temporaryDirectory
+        let root = parent.appendingPathComponent(
+            "cooldm-recovery-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var childConfiguration = configuration
+        childConfiguration.sourceURL = sourceURL.absoluteString
+        childConfiguration.expectedSizeBytes = configuration.sizeBytes
+        childConfiguration.downloadsRootPath = nil
+        childConfiguration.fixedRunRootPath = root.path
+        childConfiguration.keepFiles = true
+        childConfiguration.outputPath = nil
+        childConfiguration.interruptionAfterMilliseconds = nil
+        childConfiguration.resumeExisting = false
+
+        fputs(
+            "recovery: start child, wait \(interruptionAfterMilliseconds) ms after persisted task\n",
+            stderr
+        )
+        let firstChild = try launchChildProcess(
+            configuration: childConfiguration,
+            requestedConnections: requestedConnections,
+            repetition: 1,
+            mode: .recoveryInterrupt
+        )
+
+        let persistedBeforeKill = try await waitForPersistedTask(
+            root: root,
+            process: firstChild.process,
+            delayAfterCreation: .milliseconds(interruptionAfterMilliseconds),
+            timeout: .seconds(configuration.timeoutSeconds)
+        )
+        guard firstChild.process.isRunning == false || persistedBeforeKill != nil else {
+            throw BenchmarkRunError.recoveryTaskWasNotPersisted
+        }
+        if firstChild.process.isRunning {
+            #if canImport(Darwin)
+            _ = Darwin.kill(firstChild.process.processIdentifier, SIGKILL)
+            #else
+            firstChild.process.terminate()
+            #endif
+            firstChild.process.waitUntilExit()
+        }
+
+        let firstError = firstChild.errorPipe.fileHandleForReading.readDataToEndOfFile()
+        if !firstError.isEmpty {
+            FileHandle.standardError.write(firstError)
+        }
+        let persisted = readPersistedTask(at: root) ?? persistedBeforeKill
+        guard let persisted else {
+            throw BenchmarkRunError.recoveryTaskWasNotPersisted
+        }
+        guard persisted.status != DownloadStatus.completed.rawValue else {
+            throw BenchmarkRunError.recoveryCompletedBeforeInterruption
+        }
+
+        // Keep the server counters for the resumed phase separate from the
+        // intentionally killed first phase.
+        server.resetStatistics()
+        childConfiguration.resumeExisting = true
+        fputs("recovery: restart child and resume id=\(persisted.id)\n", stderr)
+        let resumeOutput = try runChildProcessOutput(
+            configuration: childConfiguration,
+            requestedConnections: requestedConnections,
+            repetition: 1,
+            mode: .recoveryResume
+        )
+        let resumed: BenchmarkRecoveryChildResult
+        do {
+            resumed = try JSONDecoder().decode(
+                BenchmarkRecoveryChildResult.self,
+                from: resumeOutput.output
+            )
+        } catch {
+            let rawOutput = String(data: resumeOutput.output, encoding: .utf8)
+                ?? "<non-UTF8 output>"
+            throw BenchmarkRunError.invalidChildOutput(rawOutput)
+        }
+
+        let serverStatistics = server.statistics()
+        let verified = resumed.bootRecoveredPausedState
+            && resumed.run.verified
+            && serverStatistics.bytesSent > 0
+        return BenchmarkRecoveryReport(
+            schemaVersion: 1,
+            generatedAt: Date(),
+            environment: .current,
+            configuration: configuration.redactedForReport(),
+            requestedConnectionsPerTask: requestedConnections,
+            firstProcessTerminationStatus: firstChild.process.terminationStatus,
+            persistedStatusBeforeRestart: persisted.status,
+            persistedBytesBeforeRestart: persisted.downloadedBytes,
+            bootRecoveredPausedState: resumed.bootRecoveredPausedState,
+            resumedRun: resumed.run,
+            server: serverStatistics,
+            verified: verified
+        )
+    }
+
+    private static func runUntilInterrupted(
+        invocation: InternalInvocation
+    ) async throws {
+        let configuration = invocation.configuration
+        guard let rootPath = configuration.fixedRunRootPath,
+              let rawURL = configuration.sourceURL,
+              let sourceURL = URL(string: rawURL) else {
+            throw BenchmarkRunError.invalidRecoveryConfiguration
+        }
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+        let downloads = root.appendingPathComponent("downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let service = try makeService(
+            configuration: configuration,
+            requestedConnections: invocation.requestedConnections,
+            root: root,
+            downloads: downloads,
+            networkConfiguration: try configuration.networkConfiguration(),
+            metrics: NoopDownloadMetricsSink()
+        )
+        try await service.boot()
+        _ = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: sourceURL.absoluteString,
+                suggestedName: "recovery.bin"
+            ),
+            folder: downloads.path,
+            name: "recovery.bin",
+            start: true
+        ))
+        // The parent deliberately terminates this process. Keeping the task
+        // alive after completion also lets the parent detect an unexpectedly
+        // fast fixture instead of silently claiming a recovery run.
+        while true {
+            try await Task.sleep(for: .seconds(60))
+        }
+    }
+
+    private static func runRecoveryResume(
+        invocation: InternalInvocation
+    ) async throws -> BenchmarkRecoveryChildResult {
+        let configuration = invocation.configuration
+        guard let rootPath = configuration.fixedRunRootPath,
+              let rawURL = configuration.sourceURL,
+              let sourceURL = URL(string: rawURL) else {
+            throw BenchmarkRunError.invalidRecoveryConfiguration
+        }
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+        let downloads = root.appendingPathComponent("downloads", isDirectory: true)
+
+        // Boot once only to capture the state transition caused by a previous
+        // process. The helper's scope releases its store lock before the
+        // actual measured resume creates a fresh service below.
+        let bootState = try await inspectRecoveryBoot(
+            configuration: configuration,
+            requestedConnections: invocation.requestedConnections,
+            root: root,
+            downloads: downloads
+        )
+
+        var measuredConfiguration = configuration
+        measuredConfiguration.resumeExisting = true
+        let run = try await runOnce(
+            configuration: measuredConfiguration,
+            requestedConnections: invocation.requestedConnections,
+            repetition: invocation.repetition,
+            sourceURL: sourceURL,
+            server: nil,
+            networkConfiguration: try measuredConfiguration.networkConfiguration()
+        )
+        return BenchmarkRecoveryChildResult(
+            bootRecoveredPausedState: bootState.recoveredPaused,
+            persistedBytesAtBoot: bootState.persistedBytes,
+            run: run
+        )
+    }
+
+    private static func inspectRecoveryBoot(
+        configuration: BenchmarkConfiguration,
+        requestedConnections: Int,
+        root: URL,
+        downloads: URL
+    ) async throws -> (recoveredPaused: Bool, persistedBytes: Int64) {
+        let service = try makeService(
+            configuration: configuration,
+            requestedConnections: requestedConnections,
+            root: root,
+            downloads: downloads,
+            networkConfiguration: try configuration.networkConfiguration(),
+            metrics: NoopDownloadMetricsSink()
+        )
+        try await service.boot()
+        let bootRecords = await service.snapshot().downloads
+        guard let bootRecord = bootRecords.first(where: {
+            $0.status != .completed && $0.status != .cancelled
+        }) else {
+            await service.shutdown()
+            throw BenchmarkRunError.recoveryTaskWasNotPersisted
+        }
+        let result = (
+            recoveredPaused: bootRecord.status == .paused,
+            persistedBytes: bootRecord.downloadedBytes
+        )
+        await service.shutdown()
+        return result
+    }
+
+    private static func waitForPersistedTask(
+        root: URL,
+        process: Process,
+        delayAfterCreation: Duration,
+        timeout: Duration
+    ) async throws -> PersistedTaskSnapshot? {
+        let deadline = ContinuousClock.now + timeout
+        var snapshot: PersistedTaskSnapshot?
+        while process.isRunning,
+              ContinuousClock.now < deadline,
+              snapshot == nil {
+            snapshot = readPersistedTask(at: root)
+            if snapshot == nil {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        guard snapshot != nil else { return readPersistedTask(at: root) }
+
+        let killAt = ContinuousClock.now + delayAfterCreation
+        while process.isRunning, ContinuousClock.now < killAt {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return readPersistedTask(at: root) ?? snapshot
+    }
+
+    private static func readPersistedTask(at root: URL) -> PersistedTaskSnapshot? {
+        let recordsURL = root
+            .appendingPathComponent("config", isDirectory: true)
+            .appendingPathComponent("download_db", isDirectory: true)
+            .appendingPathComponent("downloadlist", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: recordsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let dictionary = object as? [String: Any],
+                  let id = (dictionary["id"] as? NSNumber)?.int64Value,
+                  let status = dictionary["status"] as? String else {
+                continue
+            }
+            let downloadedBytes = (dictionary["downloadedBytes"] as? NSNumber)?.int64Value ?? 0
+            return PersistedTaskSnapshot(
+                id: id,
+                status: status,
+                downloadedBytes: downloadedBytes
+            )
+        }
+        return nil
+    }
+
+    private static func makeService(
+        configuration: BenchmarkConfiguration,
+        requestedConnections: Int,
+        root: URL,
+        downloads: URL,
+        networkConfiguration: HTTPNetworkConfiguration,
+        metrics: any DownloadMetricsSink
+    ) throws -> DownloadService {
+        DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(networkConfiguration: networkConfiguration),
+            hlsDownloader: HLSDownloader(networkConfiguration: networkConfiguration),
+            defaultFolder: downloads,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: configuration.taskCount,
+                maxConnectionsPerDownload: requestedConnections,
+                dynamicPartCreation: true,
+                minimumPartSize: configuration.minimumPartSizeBytes,
+                maxTotalConnections: configuration.globalConnections,
+                maxOpenFileDescriptors: configuration.maxOpenFileDescriptors,
+                useSparseFileAllocation: true,
+                speedLimit: configuration.globalBytesPerSecond
+            ),
+            retryPolicy: DownloadRetryPolicy(
+                maxAttempts: configuration.retryAttempts,
+                delay: .milliseconds(configuration.retryDelayMilliseconds)
+            ),
+            metrics: metrics
+        )
+    }
+
     private static func runChildProcess(
         configuration: BenchmarkConfiguration,
         requestedConnections: Int,
         repetition: Int
     ) throws -> BenchmarkRun {
+        let output = try runChildProcessOutput(
+            configuration: configuration,
+            requestedConnections: requestedConnections,
+            repetition: repetition,
+            mode: .normal
+        )
+        do {
+            return try JSONDecoder().decode(BenchmarkRun.self, from: output.output)
+        } catch {
+            let rawOutput = String(data: output.output, encoding: .utf8) ?? "<non-UTF8 output>"
+            throw BenchmarkRunError.invalidChildOutput(rawOutput)
+        }
+    }
+
+    private static func runChildProcessOutput(
+        configuration: BenchmarkConfiguration,
+        requestedConnections: Int,
+        repetition: Int,
+        mode: InternalInvocation.Mode
+    ) throws -> ChildProcessOutput {
+        let child = try launchChildProcess(
+            configuration: configuration,
+            requestedConnections: requestedConnections,
+            repetition: repetition,
+            mode: mode
+        )
+        child.process.waitUntilExit()
+
+        let output = child.outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorOutput = child.errorPipe.fileHandleForReading.readDataToEndOfFile()
+        guard child.process.terminationStatus == 0 else {
+            let message = String(data: errorOutput, encoding: .utf8)
+                ?? "child process exited with status \(child.process.terminationStatus)"
+            throw BenchmarkRunError.childProcessFailed(message)
+        }
+        if !errorOutput.isEmpty {
+            FileHandle.standardError.write(errorOutput)
+        }
+        return ChildProcessOutput(
+            output: output,
+            error: errorOutput,
+            terminationStatus: child.process.terminationStatus
+        )
+    }
+
+    private static func launchChildProcess(
+        configuration: BenchmarkConfiguration,
+        requestedConnections: Int,
+        repetition: Int,
+        mode: InternalInvocation.Mode
+    ) throws -> LaunchedChildProcess {
         let encoder = JSONEncoder()
         let encodedConfiguration = try encoder.encode(configuration).base64EncodedString()
         guard let executableURL = Bundle.main.executableURL else {
@@ -96,34 +489,30 @@ struct CoolDownloadBenchmarkMain {
 
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = [
+        var arguments = [
             "--internal-configuration", encodedConfiguration,
             "--internal-connections", String(requestedConnections),
             "--internal-repetition", String(repetition)
         ]
+        switch mode {
+        case .normal:
+            break
+        case .recoveryInterrupt:
+            arguments.append("--internal-recovery-interrupt")
+        case .recoveryResume:
+            arguments.append("--internal-recovery-resume")
+        }
+        process.arguments = arguments
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         try process.run()
-        process.waitUntilExit()
-
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorOutput = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            let message = String(data: errorOutput, encoding: .utf8)
-                ?? "child process exited with status \(process.terminationStatus)"
-            throw BenchmarkRunError.childProcessFailed(message)
-        }
-        if !errorOutput.isEmpty {
-            FileHandle.standardError.write(errorOutput)
-        }
-        do {
-            return try JSONDecoder().decode(BenchmarkRun.self, from: output)
-        } catch {
-            let rawOutput = String(data: output, encoding: .utf8) ?? "<non-UTF8 output>"
-            throw BenchmarkRunError.invalidChildOutput(rawOutput)
-        }
+        return LaunchedChildProcess(
+            process: process,
+            outputPipe: outputPipe,
+            errorPipe: errorPipe
+        )
     }
 
     private static func runSingle(invocation: InternalInvocation) async throws -> BenchmarkRun {
@@ -174,8 +563,12 @@ struct CoolDownloadBenchmarkMain {
         let parent = configuration.downloadsRootPath.map {
             URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
         } ?? FileManager.default.temporaryDirectory
-        let root = parent
-            .appendingPathComponent("cooldm-benchmark-\(UUID().uuidString)", isDirectory: true)
+        let root = configuration.fixedRunRootPath.map {
+            URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
+        } ?? parent.appendingPathComponent(
+            "cooldm-benchmark-\(UUID().uuidString)",
+            isDirectory: true
+        )
         let downloads = root.appendingPathComponent("downloads", isDirectory: true)
         try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
         let keepFiles = configuration.keepFiles
@@ -189,24 +582,12 @@ struct CoolDownloadBenchmarkMain {
         }
 
         let metrics = DownloadMetricsCollector(maximumEventCount: 100_000)
-        let service = DownloadService(
-            store: try DownloadStore(rootURL: root),
-            downloader: HTTPDownloader(networkConfiguration: networkConfiguration),
-            hlsDownloader: HLSDownloader(networkConfiguration: networkConfiguration),
-            defaultFolder: downloads,
-            schedulerConfiguration: DownloadSchedulerConfiguration(
-                maxConcurrentDownloads: configuration.taskCount,
-                maxConnectionsPerDownload: requestedConnections,
-                dynamicPartCreation: true,
-                minimumPartSize: configuration.minimumPartSizeBytes,
-                maxTotalConnections: configuration.globalConnections,
-                maxOpenFileDescriptors: configuration.maxOpenFileDescriptors,
-                useSparseFileAllocation: true
-            ),
-            retryPolicy: DownloadRetryPolicy(
-                maxAttempts: configuration.retryAttempts,
-                delay: .milliseconds(configuration.retryDelayMilliseconds)
-            ),
+        let service = try makeService(
+            configuration: configuration,
+            requestedConnections: requestedConnections,
+            root: root,
+            downloads: downloads,
+            networkConfiguration: networkConfiguration,
             metrics: metrics
         )
         try await service.boot()
@@ -225,29 +606,39 @@ struct CoolDownloadBenchmarkMain {
         let startedAt = ContinuousClock.now
         var ids: [DownloadID] = []
         do {
-            for taskIndex in 0..<configuration.taskCount {
-                let taskURL: URL
-                let suggestedName: String
-                if configuration.sourceURL == nil {
-                    taskURL = sourceURL
-                        .deletingLastPathComponent()
-                        .appendingPathComponent("fixture-\(taskIndex).bin")
-                    suggestedName = "fixture-\(taskIndex).bin"
-                } else {
-                    taskURL = sourceURL
-                    suggestedName = "external-\(taskIndex).bin"
+            if configuration.resumeExisting {
+                ids = (await service.snapshot().downloads)
+                    .filter { $0.status != .completed && $0.status != .cancelled }
+                    .map(\.id)
+                guard !ids.isEmpty else {
+                    throw BenchmarkRunError.recoveryTaskWasNotPersisted
                 }
-                let id = try await service.add(AddDownloadRequest(
-                    source: DownloadSource(
-                        kind: .http,
-                        link: taskURL.absoluteString,
-                        suggestedName: suggestedName
-                    ),
-                    folder: downloads.path,
-                    name: suggestedName,
-                    start: true
-                ))
-                ids.append(id)
+                try await service.resume(ids: ids)
+            } else {
+                for taskIndex in 0..<configuration.taskCount {
+                    let taskURL: URL
+                    let suggestedName: String
+                    if configuration.sourceURL == nil {
+                        taskURL = sourceURL
+                            .deletingLastPathComponent()
+                            .appendingPathComponent("fixture-\(taskIndex).bin")
+                        suggestedName = "fixture-\(taskIndex).bin"
+                    } else {
+                        taskURL = sourceURL
+                        suggestedName = "external-\(taskIndex).bin"
+                    }
+                    let id = try await service.add(AddDownloadRequest(
+                        source: DownloadSource(
+                            kind: .http,
+                            link: taskURL.absoluteString,
+                            suggestedName: suggestedName
+                        ),
+                        folder: downloads.path,
+                        name: suggestedName,
+                        start: true
+                    ))
+                    ids.append(id)
+                }
             }
             try await waitForCompletion(
                 ids: Set(ids),
@@ -322,6 +713,7 @@ struct CoolDownloadBenchmarkMain {
             checkpointMetrics: BenchmarkMetricSummarizer.summarizeCheckpoints(events),
             checkpointPhaseMetrics: BenchmarkMetricSummarizer.summarizeCheckpointPhases(events),
             eventMetrics: BenchmarkMetricSummarizer.summarizeEvents(events),
+            taskMetrics: BenchmarkMetricSummarizer.summarizeTasks(events),
             resources: ResourceMetricSummary(
                 userCPUMilliseconds: nanosecondsDelta(
                     endResources.userCPUTimeNanoseconds,
@@ -392,14 +784,62 @@ struct CoolDownloadBenchmarkMain {
         guard (attributes[.size] as? NSNumber)?.int64Value == expectedBytes else { return false }
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
+        // Keep validation bounded and out of the Foundation autorelease pool:
+        // repeatedly calling read(upToCount:) on a multi-gigabyte file can
+        // retain every temporary Data object until the process exits. The
+        // fixture's byte pattern repeats every 251 bytes, so each chunk can
+        // be checked with a small number of C-level comparisons.
+        let chunkSize = 4 * 1024 * 1024
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        let pattern = (0..<251).map(UInt8.init)
         var offset: Int64 = 0
-        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
-            for (index, byte) in data.enumerated() {
-                if byte != UInt8((offset + Int64(index)) % 251) {
-                    return false
+        while offset < expectedBytes {
+            let bytesRead: Int
+            while true {
+                let result = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+                    guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+                    return Darwin.read(handle.fileDescriptor, baseAddress, rawBuffer.count)
+                }
+                if result >= 0 {
+                    bytesRead = result
+                    break
+                }
+                if errno == EINTR {
+                    continue
+                }
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(errno),
+                    userInfo: [NSFilePathErrorKey: fileURL.path]
+                )
+            }
+            guard bytesRead > 0 else { return false }
+
+            let valid = buffer.withUnsafeBytes { rawBuffer in
+                pattern.withUnsafeBufferPointer { patternBuffer in
+                    guard let dataBase = rawBuffer.baseAddress,
+                          let patternBase = patternBuffer.baseAddress else {
+                        return false
+                    }
+                    var compared = 0
+                    var patternOffset = Int(offset % 251)
+                    while compared < bytesRead {
+                        let count = min(bytesRead - compared, 251 - patternOffset)
+                        if memcmp(
+                            dataBase.advanced(by: compared),
+                            patternBase.advanced(by: patternOffset),
+                            count
+                        ) != 0 {
+                            return false
+                        }
+                        compared += count
+                        patternOffset = 0
+                    }
+                    return true
                 }
             }
-            offset += Int64(data.count)
+            guard valid else { return false }
+            offset += Int64(bytesRead)
         }
         return offset == expectedBytes
     }
@@ -422,6 +862,9 @@ enum BenchmarkRunError: Error, LocalizedError {
     case timedOut
     case downloadFailed(String)
     case contentMismatch
+    case invalidRecoveryConfiguration
+    case recoveryTaskWasNotPersisted
+    case recoveryCompletedBeforeInterruption
     case missingExecutable
     case childProcessFailed(String)
     case invalidChildOutput(String)
@@ -435,6 +878,12 @@ enum BenchmarkRunError: Error, LocalizedError {
             return "Benchmark download failed: \(message)"
         case .contentMismatch:
             return "Downloaded bytes do not match the deterministic fixture"
+        case .invalidRecoveryConfiguration:
+            return "Invalid process-recovery benchmark configuration"
+        case .recoveryTaskWasNotPersisted:
+            return "Recovery benchmark did not find a persisted resumable task"
+        case .recoveryCompletedBeforeInterruption:
+            return "Recovery benchmark completed before the child could be interrupted"
         case .missingExecutable:
             return "Unable to locate the benchmark executable for process isolation"
         case .childProcessFailed(let message):
@@ -448,9 +897,16 @@ enum BenchmarkRunError: Error, LocalizedError {
 }
 
 private struct InternalInvocation {
+    enum Mode {
+        case normal
+        case recoveryInterrupt
+        case recoveryResume
+    }
+
     let configuration: BenchmarkConfiguration
     let requestedConnections: Int
     let repetition: Int
+    let mode: Mode
 
     static func parse(arguments: [String]) throws -> Self? {
         guard let configurationIndex = arguments.firstIndex(of: "--internal-configuration") else {
@@ -466,13 +922,40 @@ private struct InternalInvocation {
               let repetition = Int(arguments[repetitionIndex + 1]) else {
             throw BenchmarkRunError.invalidChildOutput("invalid internal invocation")
         }
+        let mode: Mode
+        if arguments.contains("--internal-recovery-interrupt") {
+            mode = .recoveryInterrupt
+        } else if arguments.contains("--internal-recovery-resume") {
+            mode = .recoveryResume
+        } else {
+            mode = .normal
+        }
         return Self(
             configuration: try JSONDecoder().decode(
                 BenchmarkConfiguration.self,
                 from: configurationData
             ),
             requestedConnections: requestedConnections,
-            repetition: repetition
+            repetition: repetition,
+            mode: mode
         )
     }
+}
+
+private struct PersistedTaskSnapshot {
+    let id: DownloadID
+    let status: String
+    let downloadedBytes: Int64
+}
+
+private struct LaunchedChildProcess {
+    let process: Process
+    let outputPipe: Pipe
+    let errorPipe: Pipe
+}
+
+private struct ChildProcessOutput {
+    let output: Data
+    let error: Data
+    let terminationStatus: Int32
 }

@@ -1,0 +1,307 @@
+{
+  "configuration" : {
+    "connections" : [
+      4
+    ],
+    "expectedSizeBytes" : 268435456,
+    "failFirstDataRequests" : 0,
+    "firstByteDelayMilliseconds" : 0,
+    "globalConnections" : 16,
+    "keepFiles" : false,
+    "maxOpenFileDescriptors" : 128,
+    "minimumPartSizeBytes" : 8388608,
+    "perConnectionBytesPerSecond" : 0,
+    "repetitions" : 3,
+    "retryAttempts" : 1,
+    "retryDelayMilliseconds" : 1000,
+    "sizeBytes" : 268435456,
+    "taskCount" : 1,
+    "timeoutSeconds" : 300,
+    "warmups" : 1
+  },
+  "environment" : {
+    "architecture" : "arm64",
+    "operatingSystem" : "Version 27.0 (Build 26A5421a)",
+    "processorCount" : 14
+  },
+  "generatedAt" : "2026-08-29T01:27:39Z",
+  "runs" : [
+    {
+      "aggregateGoodputMiBPerSecond" : 1647.340891290443,
+      "bytesPerTask" : 268435456,
+      "checkpointMetrics" : {
+        "count" : 22,
+        "encodedBytes" : 33057,
+        "failedCount" : 0,
+        "kernelAccountedWriteBytes" : 90112,
+        "logicalWriteBytes" : 33057,
+        "p95Milliseconds" : 0.746042,
+        "synchronizeCount" : 22,
+        "totalMilliseconds" : 12.242127
+      },
+      "checkpointPhaseMetrics" : {
+        "recordEncode" : {
+          "bytes" : 33057,
+          "count" : 22,
+          "p95Milliseconds" : 0.063917,
+          "totalMilliseconds" : 1.0198749999999999
+        },
+        "recordReplace" : {
+          "bytes" : 0,
+          "count" : 22,
+          "p95Milliseconds" : 0.168584,
+          "totalMilliseconds" : 2.678085
+        },
+        "recordSynchronize" : {
+          "bytes" : 0,
+          "count" : 22,
+          "p95Milliseconds" : 0.0575,
+          "totalMilliseconds" : 0.899544
+        },
+        "recordWrite" : {
+          "bytes" : 33057,
+          "count" : 22,
+          "p95Milliseconds" : 0.025,
+          "totalMilliseconds" : 0.383499
+        }
+      },
+      "elapsedSeconds" : 0.155401958,
+      "eventMetrics" : {
+        "count" : 56,
+        "totalMilliseconds" : 0.04070800000000002
+      },
+      "protocolMetrics" : {
+        "observedRequestCount" : 17,
+        "protocolCounts" : {
+          "http/1.1" : 17
+        },
+        "reusedConnectionCount" : 0
+      },
+      "repetition" : 1,
+      "requestMetrics" : {
+        "failedResponseCount" : 0,
+        "firstByteAverageMilliseconds" : 1.8499338823529412,
+        "firstByteP95Milliseconds" : 3.520417,
+        "ordinaryGetCount" : 0,
+        "probeCount" : 1,
+        "rangeCount" : 16,
+        "responseP95Milliseconds" : 22.382708,
+        "retryCount" : 0,
+        "totalResponseBytes" : 268435457
+      },
+      "requestedConnectionsPerTask" : 4,
+      "resources" : {
+        "kernelAccountedWriteBytes" : 268525568,
+        "peakOpenFileDescriptorCount" : 16,
+        "peakResidentMemoryBytes" : 38617088,
+        "peakResidentMemoryDeltaBytes" : 24215552,
+        "startingResidentMemoryBytes" : 14401536,
+        "systemCPUMilliseconds" : 3.712528,
+        "userCPUMilliseconds" : 1.441519
+      },
+      "server" : {
+        "bytesSent" : 268435457,
+        "dataRequestCount" : 16,
+        "failedDataRequestCount" : 0,
+        "maximumConcurrentDataRequests" : 4,
+        "requestCount" : 17
+      },
+      "taskCount" : 1,
+      "taskMetrics" : {
+        "completedTaskCount" : 1,
+        "completionElapsedP95Milliseconds" : 145.340167,
+        "completionFairnessRatio" : 1,
+        "failedTaskCount" : 0,
+        "maximumGoodputMiBPerSecond" : 1761.3850684511738,
+        "medianGoodputMiBPerSecond" : 1761.3850684511738,
+        "minimumGoodputMiBPerSecond" : 1761.3850684511738
+      },
+      "verified" : true
+    },
+    {
+      "aggregateGoodputMiBPerSecond" : 1886.1616702108945,
+      "bytesPerTask" : 268435456,
+      "checkpointMetrics" : {
+        "count" : 22,
+        "encodedBytes" : 33009,
+        "failedCount" : 0,
+        "kernelAccountedWriteBytes" : 90112,
+        "logicalWriteBytes" : 33009,
+        "p95Milliseconds" : 0.886958,
+        "synchronizeCount" : 22,
+        "totalMilliseconds" : 13.312000000000001
+      },
+      "checkpointPhaseMetrics" : {
+        "recordEncode" : {
+          "bytes" : 33009,
+          "count" : 22,
+          "p95Milliseconds" : 0.059125,
+          "totalMilliseconds" : 1.004124
+        },
+        "recordReplace" : {
+          "bytes" : 0,
+          "count" : 22,
+          "p95Milliseconds" : 0.245125,
+          "totalMilliseconds" : 2.9916679999999998
+        },
+        "recordSynchronize" : {
+          "bytes" : 0,
+          "count" : 22,
+          "p95Milliseconds" : 0.045959,
+          "totalMilliseconds" : 0.7455430000000001
+        },
+        "recordWrite" : {
+          "bytes" : 33009,
+          "count" : 22,
+          "p95Milliseconds" : 0.022417,
+          "totalMilliseconds" : 0.37149999999999994
+        }
+      },
+      "elapsedSeconds" : 0.135725375,
+      "eventMetrics" : {
+        "count" : 56,
+        "totalMilliseconds" : 0.038629000000000024
+      },
+      "protocolMetrics" : {
+        "observedRequestCount" : 17,
+        "protocolCounts" : {
+          "http/1.1" : 17
+        },
+        "reusedConnectionCount" : 0
+      },
+      "repetition" : 2,
+      "requestMetrics" : {
+        "failedResponseCount" : 0,
+        "firstByteAverageMilliseconds" : 1.49263,
+        "firstByteP95Milliseconds" : 3.296833,
+        "ordinaryGetCount" : 0,
+        "probeCount" : 1,
+        "rangeCount" : 16,
+        "responseP95Milliseconds" : 20.277458,
+        "retryCount" : 0,
+        "totalResponseBytes" : 268435457
+      },
+      "requestedConnectionsPerTask" : 4,
+      "resources" : {
+        "kernelAccountedWriteBytes" : 268525568,
+        "peakOpenFileDescriptorCount" : 12,
+        "peakResidentMemoryBytes" : 30375936,
+        "peakResidentMemoryDeltaBytes" : 15925248,
+        "startingResidentMemoryBytes" : 14450688,
+        "systemCPUMilliseconds" : 3.168643,
+        "userCPUMilliseconds" : 1.309372
+      },
+      "server" : {
+        "bytesSent" : 268435457,
+        "dataRequestCount" : 16,
+        "failedDataRequestCount" : 0,
+        "maximumConcurrentDataRequests" : 4,
+        "requestCount" : 17
+      },
+      "taskCount" : 1,
+      "taskMetrics" : {
+        "completedTaskCount" : 1,
+        "completionElapsedP95Milliseconds" : 129.311333,
+        "completionFairnessRatio" : 1,
+        "failedTaskCount" : 0,
+        "maximumGoodputMiBPerSecond" : 1979.7182045907762,
+        "medianGoodputMiBPerSecond" : 1979.7182045907762,
+        "minimumGoodputMiBPerSecond" : 1979.7182045907762
+      },
+      "verified" : true
+    },
+    {
+      "aggregateGoodputMiBPerSecond" : 1920.4897296822935,
+      "bytesPerTask" : 268435456,
+      "checkpointMetrics" : {
+        "count" : 22,
+        "encodedBytes" : 33033,
+        "failedCount" : 0,
+        "kernelAccountedWriteBytes" : 90112,
+        "logicalWriteBytes" : 33033,
+        "p95Milliseconds" : 0.675125,
+        "synchronizeCount" : 22,
+        "totalMilliseconds" : 10.995708999999998
+      },
+      "checkpointPhaseMetrics" : {
+        "recordEncode" : {
+          "bytes" : 33033,
+          "count" : 22,
+          "p95Milliseconds" : 0.057916,
+          "totalMilliseconds" : 0.9883769999999998
+        },
+        "recordReplace" : {
+          "bytes" : 0,
+          "count" : 22,
+          "p95Milliseconds" : 0.154833,
+          "totalMilliseconds" : 2.443623
+        },
+        "recordSynchronize" : {
+          "bytes" : 0,
+          "count" : 22,
+          "p95Milliseconds" : 0.046208,
+          "totalMilliseconds" : 0.75054
+        },
+        "recordWrite" : {
+          "bytes" : 33033,
+          "count" : 22,
+          "p95Milliseconds" : 0.025875,
+          "totalMilliseconds" : 0.3632530000000001
+        }
+      },
+      "elapsedSeconds" : 0.133299333,
+      "eventMetrics" : {
+        "count" : 56,
+        "totalMilliseconds" : 0.04192100000000002
+      },
+      "protocolMetrics" : {
+        "observedRequestCount" : 17,
+        "protocolCounts" : {
+          "http/1.1" : 17
+        },
+        "reusedConnectionCount" : 0
+      },
+      "repetition" : 3,
+      "requestMetrics" : {
+        "failedResponseCount" : 0,
+        "firstByteAverageMilliseconds" : 1.5163384117647056,
+        "firstByteP95Milliseconds" : 3.558709,
+        "ordinaryGetCount" : 0,
+        "probeCount" : 1,
+        "rangeCount" : 16,
+        "responseP95Milliseconds" : 20.553167,
+        "retryCount" : 0,
+        "totalResponseBytes" : 268435457
+      },
+      "requestedConnectionsPerTask" : 4,
+      "resources" : {
+        "kernelAccountedWriteBytes" : 268525568,
+        "peakOpenFileDescriptorCount" : 14,
+        "peakResidentMemoryBytes" : 39845888,
+        "peakResidentMemoryDeltaBytes" : 25346048,
+        "startingResidentMemoryBytes" : 14499840,
+        "systemCPUMilliseconds" : 3.151122,
+        "userCPUMilliseconds" : 1.274203
+      },
+      "server" : {
+        "bytesSent" : 268435457,
+        "dataRequestCount" : 16,
+        "failedDataRequestCount" : 0,
+        "maximumConcurrentDataRequests" : 4,
+        "requestCount" : 17
+      },
+      "taskCount" : 1,
+      "taskMetrics" : {
+        "completedTaskCount" : 1,
+        "completionElapsedP95Milliseconds" : 130.988667,
+        "completionFairnessRatio" : 1,
+        "failedTaskCount" : 0,
+        "maximumGoodputMiBPerSecond" : 1954.3675484536384,
+        "medianGoodputMiBPerSecond" : 1954.3675484536384,
+        "minimumGoodputMiBPerSecond" : 1954.3675484536384
+      },
+      "verified" : true
+    }
+  ],
+  "schemaVersion" : 4
+}

@@ -42,6 +42,9 @@ struct BenchmarkRun: Codable, Sendable {
     let checkpointMetrics: CheckpointMetricSummary
     let checkpointPhaseMetrics: [String: CheckpointPhaseMetricSummary]
     let eventMetrics: EventMetricSummary
+    /// Optional for compatibility with schema-version 4 reports produced
+    /// before task-level completion statistics were added.
+    let taskMetrics: TaskMetricSummary?
     let resources: ResourceMetricSummary
     /// Local fixture counters are unavailable when `--url` targets an
     /// external source.
@@ -59,6 +62,51 @@ struct RequestMetricSummary: Codable, Sendable {
     let firstByteAverageMilliseconds: Double
     let firstByteP95Milliseconds: Double
     let responseP95Milliseconds: Double
+}
+
+extension RequestMetricSummary {
+    private enum CodingKeys: String, CodingKey {
+        case ordinaryGetCount
+        case rangeCount
+        case probeCount
+        case retryCount
+        case failedResponseCount
+        case totalResponseBytes
+        case firstByteAverageMilliseconds
+        case firstByteP95Milliseconds
+        case responseP95Milliseconds
+    }
+
+    /// The first schema-version 4 probe reports did not yet include failed
+    /// response and response-latency fields. Treat absent values as empty
+    /// observations instead of rejecting an otherwise valid report.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ordinaryGetCount = try container.decodeIfPresent(Int.self, forKey: .ordinaryGetCount) ?? 0
+        rangeCount = try container.decodeIfPresent(Int.self, forKey: .rangeCount) ?? 0
+        probeCount = try container.decodeIfPresent(Int.self, forKey: .probeCount) ?? 0
+        retryCount = try container.decodeIfPresent(Int.self, forKey: .retryCount) ?? 0
+        failedResponseCount = try container.decodeIfPresent(
+            Int.self,
+            forKey: .failedResponseCount
+        ) ?? 0
+        totalResponseBytes = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .totalResponseBytes
+        ) ?? 0
+        firstByteAverageMilliseconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .firstByteAverageMilliseconds
+        ) ?? 0
+        firstByteP95Milliseconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .firstByteP95Milliseconds
+        ) ?? 0
+        responseP95Milliseconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .responseP95Milliseconds
+        ) ?? 0
+    }
 }
 
 struct ProtocolMetricSummary: Codable, Sendable {
@@ -90,6 +138,19 @@ struct EventMetricSummary: Codable, Sendable {
     let totalMilliseconds: Double
 }
 
+/// Completion-level values make multi-task fairness visible without
+/// persisting task IDs, URLs or other user data.
+struct TaskMetricSummary: Codable, Sendable {
+    let completedTaskCount: Int
+    let failedTaskCount: Int
+    let minimumGoodputMiBPerSecond: Double
+    let medianGoodputMiBPerSecond: Double
+    let maximumGoodputMiBPerSecond: Double
+    /// 1.0 means all completed tasks observed the same completion goodput.
+    let completionFairnessRatio: Double
+    let completionElapsedP95Milliseconds: Double
+}
+
 struct ResourceMetricSummary: Codable, Sendable {
     let userCPUMilliseconds: Double
     let systemCPUMilliseconds: Double
@@ -98,6 +159,97 @@ struct ResourceMetricSummary: Codable, Sendable {
     let peakResidentMemoryDeltaBytes: UInt64
     let peakOpenFileDescriptorCount: Int
     let kernelAccountedWriteBytes: UInt64
+}
+
+extension BenchmarkRun {
+    private enum CodingKeys: String, CodingKey {
+        case requestedConnectionsPerTask
+        case repetition
+        case taskCount
+        case bytesPerTask
+        case elapsedSeconds
+        case aggregateGoodputMiBPerSecond
+        case requestMetrics
+        case protocolMetrics
+        case checkpointMetrics
+        case checkpointPhaseMetrics
+        case eventMetrics
+        case taskMetrics
+        case resources
+        case server
+        case verified
+    }
+
+    /// Protocol and checkpoint phase metrics were added after the first
+    /// schema-version 4 reports. They are observational fields, so an older
+    /// report can be decoded with empty summaries while retaining all core
+    /// throughput and correctness values.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requestedConnectionsPerTask = try container.decode(
+            Int.self,
+            forKey: .requestedConnectionsPerTask
+        )
+        repetition = try container.decode(Int.self, forKey: .repetition)
+        taskCount = try container.decode(Int.self, forKey: .taskCount)
+        bytesPerTask = try container.decode(Int64.self, forKey: .bytesPerTask)
+        elapsedSeconds = try container.decode(Double.self, forKey: .elapsedSeconds)
+        aggregateGoodputMiBPerSecond = try container.decode(
+            Double.self,
+            forKey: .aggregateGoodputMiBPerSecond
+        )
+        requestMetrics = try container.decode(RequestMetricSummary.self, forKey: .requestMetrics)
+        protocolMetrics = try container.decodeIfPresent(
+            ProtocolMetricSummary.self,
+            forKey: .protocolMetrics
+        ) ?? ProtocolMetricSummary(
+            observedRequestCount: 0,
+            protocolCounts: [:],
+            reusedConnectionCount: 0
+        )
+        checkpointMetrics = try container.decode(
+            CheckpointMetricSummary.self,
+            forKey: .checkpointMetrics
+        )
+        checkpointPhaseMetrics = try container.decodeIfPresent(
+            [String: CheckpointPhaseMetricSummary].self,
+            forKey: .checkpointPhaseMetrics
+        ) ?? [:]
+        eventMetrics = try container.decode(EventMetricSummary.self, forKey: .eventMetrics)
+        taskMetrics = try container.decodeIfPresent(TaskMetricSummary.self, forKey: .taskMetrics)
+        resources = try container.decode(ResourceMetricSummary.self, forKey: .resources)
+        server = try container.decodeIfPresent(
+            RangeFixtureServer.Statistics.self,
+            forKey: .server
+        )
+        verified = try container.decode(Bool.self, forKey: .verified)
+    }
+}
+
+/// A small, benchmark-only report for a hard process interruption followed by
+/// a fresh service boot and resume. It intentionally keeps this lifecycle
+/// evidence separate from the normal throughput matrix.
+struct BenchmarkRecoveryReport: Codable, Sendable {
+    let schemaVersion: Int
+    let generatedAt: Date
+    let environment: BenchmarkEnvironment
+    let configuration: BenchmarkConfiguration
+    let requestedConnectionsPerTask: Int
+    let firstProcessTerminationStatus: Int32
+    let persistedStatusBeforeRestart: String?
+    let persistedBytesBeforeRestart: Int64
+    let bootRecoveredPausedState: Bool
+    let resumedRun: BenchmarkRun
+    let server: RangeFixtureServer.Statistics
+    let verified: Bool
+}
+
+/// Internal child output is kept separate so the public recovery report does
+/// not expose an on-disk path or a transient status payload.
+struct BenchmarkRecoveryChildResult: Codable, Sendable {
+    let bootRecoveredPausedState: Bool
+    let persistedBytesAtBoot: Int64
+    let run: BenchmarkRun
 }
 
 final class ResourcePeakRecorder: @unchecked Sendable {
@@ -260,6 +412,45 @@ enum BenchmarkMetricSummarizer {
             totalMilliseconds += milliseconds(elapsedNanoseconds)
         }
         return EventMetricSummary(count: count, totalMilliseconds: totalMilliseconds)
+    }
+
+    static func summarizeTasks(_ events: [DownloadMetricEvent]) -> TaskMetricSummary {
+        var completed = 0
+        var failed = 0
+        var rates: [Double] = []
+        var elapsedMilliseconds: [Double] = []
+
+        for event in events {
+            guard case .taskFinished(
+                _, let elapsedNanoseconds, let bytes, let succeeded, _
+            ) = event else { continue }
+            if succeeded {
+                completed += 1
+                let seconds = Double(elapsedNanoseconds) / 1_000_000_000
+                if seconds > 0, bytes >= 0 {
+                    rates.append(Double(bytes) / 1024 / 1024 / seconds)
+                }
+            } else {
+                failed += 1
+            }
+            elapsedMilliseconds.append(Double(elapsedNanoseconds) / 1_000_000)
+        }
+
+        let minimum = rates.min() ?? 0
+        let maximum = rates.max() ?? 0
+        let fairness = maximum > 0 ? minimum / maximum : 0
+        return TaskMetricSummary(
+            completedTaskCount: completed,
+            failedTaskCount: failed,
+            minimumGoodputMiBPerSecond: minimum,
+            medianGoodputMiBPerSecond: percentile(rates, percentile: 0.5),
+            maximumGoodputMiBPerSecond: maximum,
+            completionFairnessRatio: fairness,
+            completionElapsedP95Milliseconds: percentile(
+                elapsedMilliseconds,
+                percentile: 0.95
+            )
+        )
     }
 
     private static func milliseconds(_ nanoseconds: UInt64) -> Double {

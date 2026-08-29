@@ -246,7 +246,11 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
         case failed(Error)
     }
 
-    private let lock = NSLock()
+    // URLSession delegate callbacks are synchronous. Suspending a data task
+    // is only advisory and can leave already queued callbacks holding many
+    // megabytes. A condition makes the callback wait for consumer progress,
+    // providing real backpressure while keeping the queue bounded.
+    private let condition = NSCondition()
     private var chunks: [Data] = []
     private var bufferedBytes = 0
     private var waitingConsumer: CheckedContinuation<Data?, Error>?
@@ -260,16 +264,18 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
     private let lowWaterMark = 512 * 1024
 
     func setDrainHandler(_ handler: @escaping @Sendable () -> Void) {
-        lock.withLock {
-            drainHandler = handler
-        }
+        condition.lock()
+        defer { condition.unlock() }
+        drainHandler = handler
     }
 
     func attach(task: URLSessionDataTask) {
-        let shouldCancel = lock.withLock { () -> Bool in
+        condition.lock()
+        let shouldCancel = {
             self.task = task
             return completion != nil
-        }
+        }()
+        condition.unlock()
         if shouldCancel {
             task.cancel()
         }
@@ -277,8 +283,29 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
 
     func send(_ data: Data) {
         guard !data.isEmpty else { return }
+        // Contexts normally emit 256 KiB chunks. Keep this class safe for a
+        // transport that delivers a larger callback as well.
+        if data.count > highWaterMark {
+            var offset = 0
+            while offset < data.count {
+                let end = min(data.count, offset + highWaterMark)
+                send(Data(data[offset..<end]))
+                offset = end
+            }
+            return
+        }
+
         var consumer: CheckedContinuation<Data?, Error>?
-        lock.lock()
+        condition.lock()
+        while completion == nil,
+              waitingConsumer == nil,
+              bufferedBytes + data.count > highWaterMark {
+            if !taskIsSuspended, let task {
+                task.suspend()
+                taskIsSuspended = true
+            }
+            condition.wait()
+        }
         if completion == nil {
             if let waitingConsumer {
                 consumer = waitingConsumer
@@ -292,16 +319,16 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
                 }
             }
         }
-        lock.unlock()
+        condition.unlock()
         consumer?.resume(returning: data)
     }
 
     func finish(throwing error: Error? = nil) {
         var consumer: CheckedContinuation<Data?, Error>?
         var drained: (@Sendable () -> Void)?
-        lock.lock()
+        condition.lock()
         guard completion == nil else {
-            lock.unlock()
+            condition.unlock()
             return
         }
         completion = error.map(Completion.failed) ?? .finished
@@ -311,7 +338,8 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
             waitingConsumer = nil
             drained = markDrainedLocked()
         }
-        lock.unlock()
+        condition.broadcast()
+        condition.unlock()
 
         drained?()
         guard let consumer else { return }
@@ -327,7 +355,7 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
         var taskToCancel: URLSessionDataTask?
         var shouldResumeTask = false
         var drained: (@Sendable () -> Void)?
-        lock.lock()
+        condition.lock()
         if completion == nil || !chunks.isEmpty {
             completion = .failed(CancellationError())
             chunks.removeAll(keepingCapacity: false)
@@ -340,7 +368,8 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
             taskIsSuspended = false
             drained = markDrainedLocked()
         }
-        lock.unlock()
+        condition.broadcast()
+        condition.unlock()
 
         taskToCancel?.cancel()
         if shouldResumeTask {
@@ -355,13 +384,14 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 var immediate: Result<Data?, Error>?
+                var taskToResume: URLSessionDataTask?
                 var drained: (@Sendable () -> Void)?
-                lock.lock()
+                condition.lock()
                 if !chunks.isEmpty {
                     let data = chunks.removeFirst()
                     bufferedBytes -= data.count
                     if taskIsSuspended, bufferedBytes <= lowWaterMark {
-                        task?.resume()
+                        taskToResume = task
                         taskIsSuspended = false
                     }
                     if bufferedBytes == 0, completion != nil {
@@ -382,7 +412,9 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
                         DownloadCoreError.responseMismatch("响应正文不能被并发读取")
                     )
                 }
-                lock.unlock()
+                condition.broadcast()
+                condition.unlock()
+                taskToResume?.resume()
                 drained?()
                 if let immediate {
                     continuation.resume(with: immediate)
@@ -409,7 +441,6 @@ private final class URLSessionRequestContext: @unchecked Sendable {
     private var responseContinuation: CheckedContinuation<HTTPTransportResponse, Error>?
     private var responseResult: Result<HTTPTransportResponse, Error>?
     private var responseResolved = false
-    private var stagedData = Data()
     private var isTerminal = false
     private var lifecycle = URLSessionRequestLifecycle()
 
@@ -499,37 +530,34 @@ private final class URLSessionRequestContext: @unchecked Sendable {
     }
 
     func receive(data: Data) {
-        var outputs: [Data] = []
-        lock.lock()
-        if !isTerminal {
-            stagedData.append(data)
-            while stagedData.count >= outputChunkSize {
-                outputs.append(Data(stagedData.prefix(outputChunkSize)))
-                stagedData.removeFirst(outputChunkSize)
-            }
+        guard !data.isEmpty else { return }
+        let acceptsData = lock.withLock { !isTerminal }
+        guard acceptsData else { return }
+
+        // URLSession may deliver a callback larger than the consumer's
+        // bounded channel. Split it incrementally instead of appending to a
+        // staging Data and repeatedly removeFirst(), which copies the
+        // remainder and can make allocations grow with the whole download.
+        if data.count <= outputChunkSize {
+            bodyChannel.send(data)
+            return
         }
-        lock.unlock()
-        for output in outputs {
-            bodyChannel.send(output)
+        var offset = 0
+        while offset < data.count {
+            let end = min(data.count, offset + outputChunkSize)
+            bodyChannel.send(Data(data[offset..<end]))
+            offset = end
         }
     }
 
     func complete(error: Error?) -> Bool {
-        var output: Data?
         let shouldRemove: Bool
         lock.lock()
         shouldRemove = lifecycle.markComplete()
         if !isTerminal {
             isTerminal = true
-            if !stagedData.isEmpty {
-                output = stagedData
-                stagedData = Data()
-            }
         }
         lock.unlock()
-        if let output {
-            bodyChannel.send(output)
-        }
         bodyChannel.finish(throwing: error)
         resolveResponse(.failure(
             error ?? DownloadCoreError.responseMismatch("响应未返回 HTTP 标头")
@@ -540,7 +568,6 @@ private final class URLSessionRequestContext: @unchecked Sendable {
     func fail(_ error: Error) {
         lock.withLock {
             isTerminal = true
-            stagedData.removeAll(keepingCapacity: false)
         }
         resolveResponse(.failure(error))
         bodyChannel.finish(throwing: error)
@@ -549,7 +576,6 @@ private final class URLSessionRequestContext: @unchecked Sendable {
     func cancel() {
         lock.withLock {
             isTerminal = true
-            stagedData.removeAll(keepingCapacity: false)
         }
         resolveResponse(.failure(CancellationError()))
         bodyChannel.cancel()

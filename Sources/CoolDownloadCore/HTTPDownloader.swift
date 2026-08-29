@@ -320,14 +320,27 @@ public final class HTTPDownloader: @unchecked Sendable {
                         "接收的数据超过预期大小 \(expectedBodyLength) 字节"
                     )
                 }
-                buffer.append(chunk)
                 responseBodyBytes += Int64(chunk.count)
-                while buffer.count >= self.bufferSize {
-                    let output = buffer.prefix(self.bufferSize)
-                    try await writer.append(Data(output))
-                    writtenBytes += Int64(output.count)
+                if chunk.count >= self.bufferSize {
+                    if !buffer.isEmpty {
+                        let output = buffer
+                        buffer.removeAll(keepingCapacity: true)
+                        try await writer.append(output)
+                        writtenBytes += Int64(output.count)
+                        await progress?(writtenBytes)
+                    }
+                    try await writer.append(chunk)
+                    writtenBytes += Int64(chunk.count)
                     await progress?(writtenBytes)
-                    buffer.removeFirst(output.count)
+                } else {
+                    buffer.append(chunk)
+                    if buffer.count >= self.bufferSize {
+                        let output = buffer
+                        buffer.removeAll(keepingCapacity: true)
+                        try await writer.append(output)
+                        writtenBytes += Int64(output.count)
+                        await progress?(writtenBytes)
+                    }
                 }
             }
             if !buffer.isEmpty {

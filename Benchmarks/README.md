@@ -36,6 +36,21 @@ swift run --disable-sandbox CoolDownloadBenchmark \
   > /tmp/cooldm-limited-source.stdout.json
 ```
 
+To model a total application bandwidth cap (the value is enforced by the
+production global rate limiter and is shared by every task and Range request):
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
+swift run --disable-sandbox CoolDownloadBenchmark \
+  --size-mib 64 \
+  --connections 1,2,4,8 \
+  --global-mibps 16 \
+  --repetitions 3 \
+  --warmups 1 \
+  --output /tmp/cooldm-global-cap.json \
+  > /tmp/cooldm-global-cap.stdout.json
+```
+
 To exercise the retry and low-FD paths with four concurrent tasks:
 
 ```sh
@@ -74,6 +89,33 @@ network-filesystem testing.
 Every warmup and measured run executes in a fresh child process. This prevents
 retained URLSession buffers and allocator high-water marks from making later
 connection values appear to consume more memory merely because they ran later.
+
+## Process interruption and resume
+
+The benchmark also has a small local-fixture lifecycle check. It starts a
+child, waits until its task record is persisted, terminates that child with
+`SIGKILL`, then starts a second child against the same store and verifies that
+boot changes the stale `downloading` record to `paused` before resuming it.
+This is a recovery-correctness measurement, not a throughput A/B. Use one
+connection value and a finite per-stream throttle so the first child cannot
+finish before it is interrupted:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
+swift run --disable-sandbox CoolDownloadBenchmark \
+  --size-mib 256 \
+  --connections 4 \
+  --minimum-part-mib 16 \
+  --per-connection-mibps 4 \
+  --interrupt-after-ms 5000 \
+  --timeout-seconds 180 \
+  --output /tmp/cooldm-process-recovery.json \
+  > /tmp/cooldm-process-recovery.stdout.json
+```
+
+Recovery reports use their own `schemaVersion: 1`. Normal matrix reports keep
+`schemaVersion: 4`; `taskMetrics` is optional when decoding older version-4
+files created before task-level completion statistics were added.
 
 ## External source and storage matrix
 
