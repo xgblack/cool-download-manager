@@ -41,11 +41,19 @@ public actor SettingsStore {
 
     public init(dataRoot: URL) throws {
         let suiteName = Self.suiteName(for: dataRoot)
-        guard let defaults = UserDefaults(suiteName: suiteName) else {
-            throw SettingsStoreError.writeFailed(
-                dataRoot.appendingPathComponent("appSettings.json"),
-                "无法创建 UserDefaults 存储"
-            )
+        let defaults: UserDefaults
+        if suiteName == AppPaths.bundleIdentifier {
+            // An app's own bundle identifier is its standard defaults domain;
+            // passing it back as an additional suite is invalid in-app.
+            defaults = .standard
+        } else {
+            guard let suiteDefaults = UserDefaults(suiteName: suiteName) else {
+                throw SettingsStoreError.writeFailed(
+                    dataRoot.appendingPathComponent("appSettings.json"),
+                    "无法创建 UserDefaults 存储"
+                )
+            }
+            defaults = suiteDefaults
         }
         settingsURL = dataRoot.standardizedFileURL.appendingPathComponent("appSettings.json")
         self.defaults = TypedUserDefaults(defaults: defaults)

@@ -17,6 +17,12 @@ struct StoragePersistenceTests {
         #expect(!caches.path.contains("/.cooldm"))
     }
 
+    @Test("application preferences use the standard defaults domain")
+    func applicationPreferencesUseStandardDefaults() throws {
+        let store = try SettingsStore(dataRoot: AppPaths.applicationSupportDirectory())
+        #expect(store.defaults.defaults === UserDefaults.standard)
+    }
+
     @Test("metadata uses one SQLite store and preserves task relationships")
     func metadataStoreAndRelationships() async throws {
         let root = try makeRoot()

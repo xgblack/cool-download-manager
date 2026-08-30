@@ -21,7 +21,8 @@ final class AppStore: ObservableObject {
     var onBrowserDownloadRequest: ((AddDownloadsRequest) -> Void)?
     private let store: DownloadStore?
     private let settingsStore: SettingsStore?
-    private let settingsStoreErrorMessage: String?
+    private let settingsStoreInitializationError: SettingsStoreError?
+    private let settingsURL: URL
     private let queueStore: QueueStore?
     private let categoryStore: CategoryStore?
     private let perHostSettingsStore: PerHostSettingsStore?
@@ -38,21 +39,29 @@ final class AppStore: ObservableObject {
 
     init(
         dataRoot: URL = AppPaths.applicationSupportDirectory(),
-        cacheRoot: URL = AppPaths.cachesDirectory()
+        cacheRoot: URL = AppPaths.cachesDirectory(),
+        settingsStoreFactory: (URL) throws -> SettingsStore = { try SettingsStore(dataRoot: $0) }
     ) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let initialSettings = AppSettingsModel.defaults(home: home)
         let defaultFolder = URL(fileURLWithPath: initialSettings.defaultDownloadFolder, isDirectory: true)
         var loadedSettingsStore: SettingsStore?
-        var loadedSettingsStoreErrorMessage: String?
+        var loadedSettingsStoreError: SettingsStoreError?
         do {
-            loadedSettingsStore = try SettingsStore(dataRoot: dataRoot)
+            loadedSettingsStore = try settingsStoreFactory(dataRoot)
+        } catch let error as SettingsStoreError {
+            loadedSettingsStore = nil
+            loadedSettingsStoreError = error
         } catch {
             loadedSettingsStore = nil
-            loadedSettingsStoreErrorMessage = error.localizedDescription
+            loadedSettingsStoreError = .writeFailed(
+                dataRoot.appendingPathComponent("appSettings.json"),
+                error.localizedDescription
+            )
         }
         self.settingsStore = loadedSettingsStore
-        self.settingsStoreErrorMessage = loadedSettingsStoreErrorMessage
+        self.settingsStoreInitializationError = loadedSettingsStoreError
+        self.settingsURL = dataRoot.standardizedFileURL.appendingPathComponent("appSettings.json")
         self.settings = initialSettings
         let metadataDatabase: MetadataDatabase?
         let metadataDatabaseError: Error?
@@ -327,10 +336,8 @@ final class AppStore: ObservableObject {
 
     func saveSettings(_ updated: AppSettingsModel) async throws {
         guard let settingsStore else {
-            throw SettingsStoreError.writeFailed(
-                AppPaths.applicationSupportDirectory().appendingPathComponent("appSettings.json"),
-                settingsStoreErrorMessage ?? "设置存储尚未初始化"
-            )
+            throw settingsStoreInitializationError
+                ?? SettingsStoreError.writeFailed(settingsURL, "设置存储尚未初始化")
         }
 
         let saved = try await settingsStore.save(updated)
