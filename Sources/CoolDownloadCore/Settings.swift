@@ -49,7 +49,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
 
     public static func defaults(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Self {
         Self(
-            theme: "dark",
+            theme: "system",
             uiScale: nil,
             mergeTopBarWithTitleBar: true,
             showIconLabels: true,

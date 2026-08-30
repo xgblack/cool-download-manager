@@ -117,6 +117,18 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
     }
 
+    func applyTheme(_ rawValue: String, to window: NSWindow?) {
+        window?.appearance = AppTheme(rawValue).windowAppearance
+    }
+
+    func applyThemeToMainWindow(_ rawValue: String) {
+        applyTheme(rawValue, to: resolvedMainWindow())
+    }
+
+    func applyThemeToSettingsWindow(_ rawValue: String) {
+        applyTheme(rawValue, to: resolvedSettingsWindow())
+    }
+
     func configureMainWindowOpener(_ action: @escaping () -> Void) {
         openMainWindowAction = action
     }
@@ -141,6 +153,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         window.title = "酷的下载管理器"
         window.minSize = NSSize(width: 1_200, height: 640)
         applyWindowSettings()
+        applyTheme(store.settings.theme, to: window)
         if focusMainWindowWhenRegistered {
             focusMainWindowWhenRegistered = false
             focusMainWindow(window)
@@ -192,6 +205,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         window.titlebarSeparatorStyle = .automatic
         window.isMovableByWindowBackground = false
         window.minSize = NSSize(width: 920, height: 640)
+        applyTheme(store.settings.theme, to: window)
         if focusSettingsWindowWhenRegistered {
             focusSettingsWindowWhenRegistered = false
             focusSettingsWindow(window)

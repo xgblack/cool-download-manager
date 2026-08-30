@@ -58,9 +58,10 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 920, minHeight: 640)
-        .preferredColorScheme(preferredColorScheme)
+        .appTheme(viewState.model.theme)
         .background {
             WindowAccessor { window in
+                coordinator.applyTheme(viewState.model.theme, to: window)
                 windowGuard.attach(window, isDirty: {
                     viewState.isDirty
                 }, discard: {
@@ -91,6 +92,9 @@ struct SettingsView: View {
         .onChange(of: store.settings) { _, updated in
             guard !viewState.isDirty, !viewState.isSaving else { return }
             viewState.markModelSaved(updated)
+        }
+        .onChange(of: viewState.model.theme) { _, theme in
+            coordinator.applyThemeToSettingsWindow(theme)
         }
         .onChange(of: store.perHostSettings) { _, updated in
             guard !viewState.perHostState.isDirty else { return }
@@ -221,13 +225,6 @@ struct SettingsView: View {
         }
     }
 
-    private var preferredColorScheme: ColorScheme? {
-        switch viewState.model.theme.lowercased() {
-        case "dark": return .dark
-        case "light": return .light
-        default: return nil
-        }
-    }
 }
 
 enum SettingsSection: String, CaseIterable, Hashable {

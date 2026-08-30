@@ -93,6 +93,9 @@ struct MainView: View {
         .onChange(of: store.settings.mergeTopBarWithTitleBar) {
             coordinator.applyWindowSettings()
         }
+        .onChange(of: store.settings.theme) { _, theme in
+            coordinator.applyThemeToMainWindow(theme)
+        }
         .onChange(of: store.downloadList.progressID) { _, id in
             guard let id else { return }
             store.downloadList.acknowledgeProgress()
@@ -125,7 +128,7 @@ struct MainView: View {
                 viewState.folderURL = url
             }
         }
-        .preferredColorScheme(preferredColorScheme)
+        .appTheme(store.settings.theme)
         .environment(\.dynamicTypeSize, dynamicTypeSize)
     }
 
@@ -256,14 +259,6 @@ struct MainView: View {
                     }
                 }
             }
-        }
-    }
-
-    private var preferredColorScheme: ColorScheme? {
-        switch store.settings.theme.lowercased() {
-        case "dark": return .dark
-        case "light": return .light
-        default: return nil
         }
     }
 
