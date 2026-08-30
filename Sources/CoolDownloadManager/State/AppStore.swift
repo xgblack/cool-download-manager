@@ -21,6 +21,7 @@ final class AppStore: ObservableObject {
     var onBrowserDownloadRequest: ((AddDownloadsRequest) -> Void)?
     private let store: DownloadStore?
     private let settingsStore: SettingsStore?
+    private let settingsStoreErrorMessage: String?
     private let queueStore: QueueStore?
     private let categoryStore: CategoryStore?
     private let perHostSettingsStore: PerHostSettingsStore?
@@ -35,21 +36,33 @@ final class AppStore: ObservableObject {
     private var notificationStatuses: [DownloadID: DownloadStatus] = [:]
     private var isShuttingDown = false
 
-    init() {
+    init(
+        dataRoot: URL = AppPaths.applicationSupportDirectory(),
+        cacheRoot: URL = AppPaths.cachesDirectory()
+    ) {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataRoot = AppPaths.applicationSupportDirectory()
-        let cacheRoot = AppPaths.cachesDirectory()
         let initialSettings = AppSettingsModel.defaults(home: home)
         let defaultFolder = URL(fileURLWithPath: initialSettings.defaultDownloadFolder, isDirectory: true)
         var loadedSettingsStore: SettingsStore?
+        var loadedSettingsStoreErrorMessage: String?
         do {
             loadedSettingsStore = try SettingsStore(dataRoot: dataRoot)
         } catch {
             loadedSettingsStore = nil
+            loadedSettingsStoreErrorMessage = error.localizedDescription
         }
         self.settingsStore = loadedSettingsStore
+        self.settingsStoreErrorMessage = loadedSettingsStoreErrorMessage
         self.settings = initialSettings
-        let metadataDatabase = try? MetadataDatabase.shared(rootURL: dataRoot)
+        let metadataDatabase: MetadataDatabase?
+        let metadataDatabaseError: Error?
+        do {
+            metadataDatabase = try MetadataDatabase.shared(rootURL: dataRoot)
+            metadataDatabaseError = nil
+        } catch {
+            metadataDatabase = nil
+            metadataDatabaseError = error
+        }
         self.perHostSettingsStore = metadataDatabase.flatMap {
             try? PerHostSettingsStore(dataRoot: dataRoot, database: $0)
         }
@@ -57,6 +70,9 @@ final class AppStore: ObservableObject {
 
         do {
             guard let metadataDatabase else {
+                if let metadataDatabaseError {
+                    throw metadataDatabaseError
+                }
                 throw MetadataDatabaseError.loadFailed(
                     dataRoot.appendingPathComponent("metadata.sqlite"),
                     "无法创建共享元数据数据库"
@@ -309,24 +325,31 @@ final class AppStore: ObservableObject {
         }
     }
 
-    @discardableResult
-    func saveSettings(_ updated: AppSettingsModel) async -> Bool {
-        guard let settingsStore, let service else {
-            errorMessage = "设置存储或下载核心尚未准备好"
-            return false
-        }
-        do {
-            let saved = try await settingsStore.save(updated)
-            settings = saved
-            await service.updateConfiguration(
-                schedulerConfiguration: schedulerConfiguration(for: saved),
-                retryPolicy: DownloadRetryPolicy(
-                    maxAttempts: max(1, saved.maxDownloadRetryCount),
-                    delay: .seconds(1)
-                ),
-                defaultFolder: URL(fileURLWithPath: saved.defaultDownloadFolder, isDirectory: true),
-                networkConfiguration: networkConfiguration(for: saved)
+    func saveSettings(_ updated: AppSettingsModel) async throws {
+        guard let settingsStore else {
+            throw SettingsStoreError.writeFailed(
+                AppPaths.applicationSupportDirectory().appendingPathComponent("appSettings.json"),
+                settingsStoreErrorMessage ?? "设置存储尚未初始化"
             )
+        }
+
+        let saved = try await settingsStore.save(updated)
+        settings = saved
+
+        // UserDefaults preferences remain durable even when Core Data could
+        // not initialize. The next healthy launch applies them to the core.
+        guard let service else { return }
+
+        await service.updateConfiguration(
+            schedulerConfiguration: schedulerConfiguration(for: saved),
+            retryPolicy: DownloadRetryPolicy(
+                maxAttempts: max(1, saved.maxDownloadRetryCount),
+                delay: .seconds(1)
+            ),
+            defaultFolder: URL(fileURLWithPath: saved.defaultDownloadFolder, isDirectory: true),
+            networkConfiguration: networkConfiguration(for: saved)
+        )
+        do {
             try applyAutoStartOnBoot(saved.autoStartOnBoot)
             if saved.trackDeletedFilesOnDisk {
                 await reconcileMissingFiles()
@@ -337,12 +360,9 @@ final class AppStore: ObservableObject {
             }
             stopIntegration()
             try startIntegration(service: service, settings: saved)
-            errorMessage = nil
-            return true
         } catch {
             refreshAutoStartStatus()
-            errorMessage = error.localizedDescription
-            return false
+            throw error
         }
     }
 

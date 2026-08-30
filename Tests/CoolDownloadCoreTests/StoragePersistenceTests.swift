@@ -60,6 +60,29 @@ struct StoragePersistenceTests {
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("metadata.sqlite").path))
     }
 
+    @Test("共享元数据数据库合并并发创建请求")
+    func sharedMetadataDatabaseCoalescesConcurrentCreation() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let databases = try await withThrowingTaskGroup(of: MetadataDatabase.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    try MetadataDatabase.shared(rootURL: root)
+                }
+            }
+
+            var values: [MetadataDatabase] = []
+            for try await database in group {
+                values.append(database)
+            }
+            return values
+        }
+
+        let first = try #require(databases.first)
+        #expect(databases.allSatisfy { $0 === first })
+    }
+
     @Test("built-in category paths use the persisted default folder before first load")
     func categoryDefaultsFollowSettings() async throws {
         let root = try makeRoot()

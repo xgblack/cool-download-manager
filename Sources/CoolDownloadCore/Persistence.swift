@@ -74,7 +74,17 @@ public final class MetadataDatabase: @unchecked Sendable {
             weak var value: MetadataDatabase?
             init(_ value: MetadataDatabase? = nil) { self.value = value }
         }
+        final class Pending {
+            let group = DispatchGroup()
+            var database: MetadataDatabase?
+            var error: Error?
+
+            init() {
+                group.enter()
+            }
+        }
         var values: [String: Box] = [:]
+        var pending: [String: Pending] = [:]
     }
 
     private static let registry = Registry()
@@ -96,17 +106,47 @@ public final class MetadataDatabase: @unchecked Sendable {
             registry.lock.unlock()
             return existing
         }
+
+        if let pending = registry.pending[key] {
+            registry.lock.unlock()
+            pending.group.wait()
+            registry.lock.lock()
+            let database = pending.database
+            let error = pending.error
+            registry.lock.unlock()
+            if let database {
+                return database
+            }
+            if let error {
+                throw error
+            }
+            throw MetadataDatabaseError.loadFailed(
+                rootURL.appendingPathComponent("metadata.sqlite"),
+                "共享元数据数据库初始化未返回结果"
+            )
+        }
+
+        let pending = Registry.Pending()
+        registry.pending[key] = pending
         registry.lock.unlock()
 
-        let created = try MetadataDatabase(rootURL: rootURL)
-        registry.lock.lock()
-        if let existing = registry.values[key]?.value {
+        do {
+            let created = try MetadataDatabase(rootURL: rootURL)
+            registry.lock.lock()
+            registry.values[key] = Registry.Box(created)
+            registry.pending[key] = nil
+            pending.database = created
             registry.lock.unlock()
-            return existing
+            pending.group.leave()
+            return created
+        } catch {
+            registry.lock.lock()
+            registry.pending[key] = nil
+            pending.error = error
+            registry.lock.unlock()
+            pending.group.leave()
+            throw error
         }
-        registry.values[key] = Registry.Box(created)
-        registry.lock.unlock()
-        return created
     }
 
     public init(rootURL: URL, readOnly: Bool = false) throws {

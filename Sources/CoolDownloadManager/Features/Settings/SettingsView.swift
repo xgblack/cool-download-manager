@@ -215,11 +215,11 @@ struct SettingsView: View {
         viewState.isSaving = true
         viewState.errorMessage = nil
         Task { @MainActor in
-            let success = await store.saveSettings(viewState.model)
-            if success {
+            do {
+                try await store.saveSettings(viewState.model)
                 viewState.markModelSaved(store.settings)
-            } else {
-                viewState.errorMessage = store.errorMessage ?? "设置保存失败"
+            } catch {
+                viewState.errorMessage = error.localizedDescription
             }
             viewState.isSaving = false
         }
