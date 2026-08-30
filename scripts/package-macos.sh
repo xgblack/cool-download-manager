@@ -129,6 +129,12 @@ if [[ ! -x "${DEVELOPER_DIR:-}/usr/bin/xcodebuild" ]]; then
     exit 1
 fi
 
+MACOS_SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+# Swift 6.4 forwards its SDK as --sysroot, which currently leaves the Mach-O
+# SDK field at the deployment target. Preserve macOS 26 compatibility while
+# recording the actual SDK used for linked-on behavior.
+PLATFORM_LINKER_FLAGS="-Xlinker -platform_version -Xlinker macos -Xlinker $MACOS_DEPLOYMENT_TARGET -Xlinker $MACOS_SDK_VERSION"
+
 PRODUCTS_DIR="$DERIVED_DATA_DIR/Build/Products/$CONFIGURATION"
 APP_NAME="酷的下载管理器.app"
 APP_DIR="$OUTPUT_DIR/$APP_NAME"
@@ -147,6 +153,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
             -derivedDataPath "$DERIVED_DATA_DIR" \
             MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
             CODE_SIGNING_ALLOWED=NO \
+            OTHER_LDFLAGS="$PLATFORM_LINKER_FLAGS" \
             build
     done
 fi

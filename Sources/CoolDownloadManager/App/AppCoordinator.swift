@@ -55,6 +55,7 @@ final class AppCoordinator: NSObject, ObservableObject {
     private weak var settingsWindow: NSWindow?
     private var openMainWindowAction: (() -> Void)?
     private var openSettingsWindowAction: (() -> Void)?
+    private var mainWindowCreationInFlight = false
     private var focusMainWindowWhenRegistered = false
     private var focusSettingsWindowWhenRegistered = false
     private var queuedBrowserRequests: [AddDownloadsRequest] = []
@@ -65,9 +66,23 @@ final class AppCoordinator: NSObject, ObservableObject {
         store.onBrowserDownloadRequest = { [weak self] request in
             self?.presentBrowserDownload(request)
         }
-        store.onDownloadCompleted = { [weak self] record in
-            self?.closeProgressPanel(for: record.id)
+        store.downloadList.onDownloadCompleted = { [weak self] record in
+            self?.handleDownloadCompleted(record)
         }
+    }
+
+    private func handleDownloadCompleted(_ record: DownloadRecord) {
+        closeProgressPanel(for: record.id)
+        let shouldShow = record.taskSettings?.showCompletionDialog
+            ?? store.settings.showDownloadCompletionDialog
+        guard shouldShow else {
+            store.downloadList.acknowledgeCompletion()
+            return
+        }
+        showCompletionPanel(
+            for: record,
+            focus: store.settings.focusDownloadCompletionDialogOnFinish
+        )
     }
 
     func attachMenuBar() {
@@ -112,8 +127,17 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func registerMainWindow(_ window: NSWindow?) {
         guard let window else { return }
+        mainWindowCreationInFlight = false
+        let mainWindowIdentifier = "com.cooldownloadmanager.main-window"
+        NSApp.windows
+            .filter {
+                $0 !== window
+                    && $0.windowNumber != 0
+                    && $0.identifier?.rawValue == mainWindowIdentifier
+            }
+            .forEach { $0.close() }
         mainWindow = window
-        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.main-window")
+        window.identifier = NSUserInterfaceItemIdentifier(mainWindowIdentifier)
         window.title = "酷的下载管理器"
         window.minSize = NSSize(width: 1_200, height: 640)
         applyWindowSettings()
@@ -124,17 +148,33 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 
     func showMainWindow() {
-        guard let window = resolvedMainWindow() else {
-            // WindowGroup can release its NSWindow after the user closes it.
-            // Ask SwiftUI to create a new one, then focus it after attachment.
-            focusMainWindowWhenRegistered = true
-            openMainWindowAction?()
-            DispatchQueue.main.async { [weak self] in
-                self?.focusMainWindow()
-            }
-            return
+        _ = handleApplicationReopen()
+    }
+
+    /// Handles a Dock/application reopen event when the SwiftUI scene is
+    /// already wired. Returning false lets the application delegate fall back
+    /// to SwiftUI's default scene creation during the initial launch race.
+    func handleApplicationReopen() -> Bool {
+        if let window = resolvedMainWindow() {
+            focusMainWindow(window)
+            return true
         }
-        focusMainWindow(window)
+
+        guard let openMainWindowAction else { return false }
+        guard !mainWindowCreationInFlight else { return true }
+        // WindowGroup can release its NSWindow after the user closes it.
+        // Ask SwiftUI to create a new one, then focus it after attachment.
+        mainWindowCreationInFlight = true
+        focusMainWindowWhenRegistered = true
+        openMainWindowAction()
+        DispatchQueue.main.async { [weak self] in
+            self?.focusMainWindow()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.resolvedMainWindow() == nil else { return }
+            self.mainWindowCreationInFlight = false
+        }
+        return true
     }
 
     func registerSettingsWindow(_ window: NSWindow?) {
@@ -164,7 +204,8 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
         settingsWindow = nil
         return NSApp.windows.first { window in
-            window.identifier?.rawValue == "com.cooldownloadmanager.settings-window"
+            window.windowNumber != 0
+                && window.identifier?.rawValue == "com.cooldownloadmanager.settings-window"
         }
     }
 
@@ -193,7 +234,8 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
         mainWindow = nil
         return NSApp.windows.first { window in
-            window.identifier?.rawValue == "com.cooldownloadmanager.main-window"
+            window.windowNumber != 0
+                && window.identifier?.rawValue == "com.cooldownloadmanager.main-window"
         }
     }
 
@@ -383,28 +425,27 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     }
 
     func showCompletion(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
+        let close: () -> Void = { [weak self, weak store] in
+            self?.hideCompletionPanel(store: store)
+        }
         let content = CompletionView(
             record: record,
             store: store,
             coordinator: coordinator,
-            onClose: { [weak self, weak store] in
-                store?.acknowledgeCompletion()
-                self?.completionPanel?.orderOut(nil)
-            }
+            onClose: close
         )
-        completionClose = { [weak self, weak store] in
-            store?.acknowledgeCompletion()
-            self?.completionPanel?.orderOut(nil)
-        }
+        completionClose = close
         let panel = panel(
             existing: completionPanel,
             title: "下载完成",
             size: NSSize(width: 640, height: 360),
-            floatsAboveNormalWindows: true,
+            floatsAboveNormalWindows: false,
             content: content
         )
         completionPanel = panel
-        present(panel, focus: focus)
+        // Put the completion panel in front once without keeping it at the
+        // floating window level. Later user activity can cover it normally.
+        present(panel, focus: focus, orderFrontRegardless: true)
     }
 
     private func panel<Content: View>(
@@ -437,14 +478,14 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         return panel
     }
 
-    private func present(_ panel: NSPanel, focus: Bool) {
+    private func present(_ panel: NSPanel, focus: Bool, orderFrontRegardless: Bool = false) {
         if !panel.isVisible {
             panel.center()
         }
         if focus {
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
-        } else if panel.isFloatingPanel {
+        } else if orderFrontRegardless {
             panel.orderFrontRegardless()
         } else {
             panel.orderFront(nil)
@@ -454,6 +495,12 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private func hideProgressPanel() {
         progressPanel?.orderOut(nil)
         progressRecordID = nil
+    }
+
+    private func hideCompletionPanel(store: DownloadListStore?) {
+        store?.acknowledgeCompletion()
+        completionPanel?.orderOut(nil)
+        completionClose = nil
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

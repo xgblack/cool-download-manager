@@ -202,4 +202,30 @@ struct DownloadDetailTests {
         stoppedStore.stopAll()
         #expect(stoppedStore.progressID == nil)
     }
+
+    @Test("完成状态只触发一次下载生命周期回调")
+    @MainActor
+    func completionLifecycleCallbackFiresOnce() {
+        let store = DownloadListStore(service: nil)
+        var record = DownloadRecord(
+            id: 13,
+            source: DownloadSource(kind: .http, link: "https://example.test/file.bin"),
+            folder: "/tmp",
+            name: "file.bin",
+            status: .added
+        )
+        store.apply([record], announceCompletion: false)
+
+        var completedIDs: [DownloadID] = []
+        store.onDownloadCompleted = { completedIDs.append($0.id) }
+
+        record.status = .completed
+        record.updatedAt = record.updatedAt.addingTimeInterval(1)
+        record.revision += 1
+        store.apply([record])
+        store.apply([record])
+
+        #expect(completedIDs == [record.id])
+        #expect(store.completedID == record.id)
+    }
 }

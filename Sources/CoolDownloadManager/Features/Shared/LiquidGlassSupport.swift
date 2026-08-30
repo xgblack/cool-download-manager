@@ -55,6 +55,8 @@ struct LiquidGlassActionSurface<Content: View>: View {
     }
 
     private var actionGlass: Glass {
+        // Keep the native glass untinted so the system remains responsible for
+        // its appearance. The Appearance slider has no public numeric API.
         if #available(macOS 27.0, *) {
             return .regular.interactive()
         }
@@ -90,6 +92,9 @@ final class LiquidGlassPanelViewController: NSViewController {
             let glass = NSGlassEffectView()
             glass.translatesAutoresizingMaskIntoConstraints = false
             glass.cornerRadius = LiquidGlassMetrics.panelCornerRadius
+            // A nil tint leaves the global Liquid Glass appearance under
+            // AppKit's control without depending on private defaults keys.
+            glass.tintColor = nil
             glass.style = .regular
             if #available(macOS 27.0, *) {
                 glass.effectIsInteractive = true

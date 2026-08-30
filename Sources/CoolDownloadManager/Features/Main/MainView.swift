@@ -93,18 +93,6 @@ struct MainView: View {
         .onChange(of: store.settings.mergeTopBarWithTitleBar) {
             coordinator.applyWindowSettings()
         }
-        .onChange(of: store.downloadList.completedID) { _, id in
-            guard let id, let record = store.downloadList.record(id: id) else { return }
-            coordinator.closeProgressPanel(for: id)
-            if !(record.taskSettings?.showCompletionDialog ?? store.settings.showDownloadCompletionDialog) {
-                store.downloadList.acknowledgeCompletion()
-            } else {
-                coordinator.showCompletionPanel(
-                    for: record,
-                    focus: store.settings.focusDownloadCompletionDialogOnFinish
-                )
-            }
-        }
         .onChange(of: store.downloadList.progressID) { _, id in
             guard let id else { return }
             store.downloadList.acknowledgeProgress()

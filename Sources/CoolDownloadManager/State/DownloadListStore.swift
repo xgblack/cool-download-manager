@@ -169,6 +169,11 @@ final class DownloadListStore: ObservableObject {
     /// Called after a snapshot no longer contains records that were visible
     /// before. AppStore uses this to prune queue/category indexes.
     var onRemovedIDs: ((Set<DownloadID>) -> Void)?
+    /// Called after a record has been applied and transitions to completed.
+    /// This callback belongs to the download lifecycle rather than a visible
+    /// SwiftUI window, so completion UI can still be presented when the main
+    /// window is closed.
+    var onDownloadCompleted: ((DownloadRecord) -> Void)?
     private var eventTask: Task<Void, Never>?
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
     private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
@@ -336,6 +341,7 @@ final class DownloadListStore: ObservableObject {
             record.status == .completed && previousStatuses[record.id] != .completed
         }) {
             completedID = completed.id
+            onDownloadCompleted?(completed)
         }
         if announceCompletion, let started = acceptedRecords.first(where: { record in
             (record.status == .preparing || record.status == .downloading)

@@ -33,8 +33,16 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        coordinator?.showMainWindow()
-        return true
+        // During very early launch SwiftUI may not have attached the scene
+        // content yet. Let its default behavior create the first window in
+        // that narrow interval; once the coordinator is wired, it owns all
+        // reopen/focus behavior to prevent a second WindowGroup instance.
+        guard let coordinator, coordinator.handleApplicationReopen() else {
+            return true
+        }
+        // The coordinator owns reopening. Returning true would also ask
+        // SwiftUI/AppKit to create a window and can produce a duplicate.
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -75,13 +83,13 @@ struct CoolDownloadManagerApp: App {
                 }
                 .onAppear {
                     appDelegate.coordinator = coordinator
-                coordinator.configureMainWindowOpener {
-                    openWindow(id: "main")
-                }
-                coordinator.configureSettingsWindowOpener {
-                    openWindow(id: "settings")
-                }
-                let currentStore = store
+                    coordinator.configureMainWindowOpener {
+                        openWindow(id: "main")
+                    }
+                    coordinator.configureSettingsWindowOpener {
+                        openWindow(id: "settings")
+                    }
+                    let currentStore = store
                     appDelegate.terminationHandler = { [currentStore] in
                         await currentStore.shutdown()
                     }

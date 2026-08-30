@@ -19,11 +19,6 @@ final class AppStore: ObservableObject {
     let service: DownloadService?
     var downloadList: DownloadListStore
     var onBrowserDownloadRequest: ((AddDownloadsRequest) -> Void)?
-    /// Called on the main actor when a task transitions into the completed state.
-    /// AppKit utility panels use this lifecycle callback even when the main
-    /// window is not currently visible.
-    var onDownloadCompleted: ((DownloadRecord) -> Void)?
-
     private let store: DownloadStore?
     private let settingsStore: SettingsStore?
     private let queueStore: QueueStore?
@@ -668,8 +663,9 @@ final class AppStore: ObservableObject {
     }
 
     /// Keeps completion/failure notifications alive even when the main window
-    /// has been closed. The UI still consumes the published IDs for dialogs,
-    /// but notification delivery belongs to the application lifecycle.
+    /// has been closed. Completion-panel presentation is handled by the
+    /// download-list lifecycle callback; notification delivery remains owned
+    /// by the application lifecycle.
     private func startDownloadEventMonitor() {
         guard downloadEventTask == nil, let service else { return }
         downloadEventTask = Task { @MainActor [weak self] in
@@ -688,7 +684,6 @@ final class AppStore: ObservableObject {
         case .updated(let record):
             let previous = notificationStatuses[record.id]
             if record.status == .completed, previous != .completed {
-                onDownloadCompleted?(record)
                 NotificationController.shared.notifyCompletion(
                     record: record,
                     soundEnabled: settings.notificationSound,
