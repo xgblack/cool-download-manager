@@ -807,7 +807,30 @@ public actor DownloadService {
         initialRecord: DownloadRecord
     ) async throws {
         var record = initialRecord
+        let hadIncompleteFile = FileManager.default.fileExists(atPath: record.incompleteURL.path)
         let writer = try PartFileWriter(record: record)
+
+        // Persisted parts describe bytes in the temporary file, not bytes in
+        // the final destination. If the part file was removed or truncated
+        // outside the manager, trusting the old metadata can make a retry
+        // skip every request and replace the destination with an empty file.
+        if !record.parts.isEmpty {
+            let physicalLength = try await writer.length()
+            let requiredLength = record.parts.reduce(into: Int64(0)) { result, part in
+                result = max(result, part.from + max(0, part.downloaded))
+            }
+            if !hadIncompleteFile || physicalLength < requiredLength {
+                try await writer.truncate()
+                record.parts = []
+                record.downloadedBytes = 0
+                record.updatedAt = Date()
+                record.revision += 1
+                records[id] = record
+                try await store.save(record)
+                emit(.updated(record))
+            }
+        }
+
         let diskLength: Int64
         if record.source.kind == .http, !record.parts.isEmpty {
             diskLength = try contiguousPartBytes(record.parts)
@@ -1845,9 +1868,9 @@ public actor DownloadService {
         )
     }
 
-    /// Produces a destination that cannot collide with an existing task,
-    /// completed file, or visible incomplete file. Existing history is left
-    /// untouched; this only affects newly created downloads.
+    /// Produces a destination that cannot collide with an existing filesystem
+    /// entry or an unfinished task reservation. Completed records only remain
+    /// relevant while their destination file is present on disk.
     private func availableFileName(
         for requestedName: String,
         in folder: URL,
@@ -1878,7 +1901,7 @@ public actor DownloadService {
         }
 
         return records.values.contains { record in
-            guard record.id != excludedID else { return false }
+            guard record.id != excludedID, record.status != .completed else { return false }
             let recordDestination = record.destinationURL.standardizedFileURL
             let recordIncomplete = record.incompleteURL.standardizedFileURL
             return recordDestination == destination

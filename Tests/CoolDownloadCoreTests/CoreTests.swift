@@ -867,6 +867,38 @@ struct CoreTests {
         #expect(downloads.first(where: { $0.id == secondID })?.name == "archive (3).tar.gz")
     }
 
+    @Test("missing completed destinations do not reserve their old filename")
+    func missingCompletedDestinationDoesNotReserveName() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let stale = DownloadRecord(
+            id: 1,
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/stale.bin",
+                suggestedName: "stale.bin"
+            ),
+            folder: root.path,
+            name: "stale.bin",
+            status: .completed
+        )
+        try await store.save(stale)
+
+        let service = DownloadService(store: store, defaultFolder: root)
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/new-stale.bin",
+                suggestedName: "stale.bin"
+            ),
+            folder: root.path
+        ))
+
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.name == "stale.bin")
+    }
+
     @Test("HTTP response exposes Content-Disposition filename")
     func httpResponseFilename() async throws {
         let transport = MemoryTransport()
@@ -1497,6 +1529,62 @@ struct CoreTests {
         let second = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
         #expect(second.status == .completed)
         #expect(try Data(contentsOf: second.destinationURL) == Data("ok".utf8))
+    }
+
+    @Test("retrying complete range metadata without its part file performs a real download")
+    func retryMissingCompleteRangePart() async throws {
+        let content = Data("abcdefgh".utf8)
+        let transport = RangeTransport(content: content)
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let source = DownloadSource(
+            kind: .http,
+            link: "https://fixture.invalid/retry-missing-part.bin",
+            suggestedName: "retry-missing-part.bin"
+        )
+        let record = DownloadRecord(
+            id: 1,
+            source: source,
+            folder: root.path,
+            name: "retry-missing-part.bin",
+            status: .failed,
+            downloadedBytes: 8,
+            totalBytes: 8,
+            etag: "\"v1\"",
+            parts: [DownloadPart(id: 0, from: 0, to: 7, downloaded: 8, completed: true)]
+        )
+        try await store.save(record)
+        try Data("old-data".utf8).write(to: record.destinationURL)
+
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            schedulerConfiguration: DownloadSchedulerConfiguration(
+                maxConcurrentDownloads: 1,
+                maxConnectionsPerDownload: 2,
+                minimumPartSize: 1
+            )
+        )
+        try await service.boot()
+        try await service.retry(ids: [record.id])
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == record.id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let completed = try #require(
+            await service.snapshot().downloads.first(where: { $0.id == record.id })
+        )
+        #expect(completed.status == .completed)
+        #expect(transport.recordedRequests().contains {
+            guard let range = $0.value(forHTTPHeaderField: "Range") else { return false }
+            return range != "bytes=0-0"
+        })
+        #expect(try Data(contentsOf: completed.destinationURL) == content)
     }
 
     @Test("range workers consume more persisted work items than active connections")
