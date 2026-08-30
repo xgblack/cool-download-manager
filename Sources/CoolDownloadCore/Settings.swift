@@ -246,18 +246,21 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
 public enum SettingsStoreError: Error, LocalizedError, Sendable, Equatable {
     case corrupt(URL, String)
     case invalid(String)
+    case readFailed(URL, String)
     case writeFailed(URL, String)
 
     public var errorDescription: String? {
         switch self {
         case .corrupt(let url, let reason): return "无法读取设置 \(url.path)：\(reason)"
         case .invalid(let reason): return reason
+        case .readFailed(let url, let reason): return "无法读取设置 \(url.path)：\(reason)"
         case .writeFailed(let url, let reason): return "无法保存设置 \(url.path)：\(reason)"
         }
     }
 }
 
-public actor SettingsStore {
+@available(*, deprecated, message: "Legacy JSON settings store is not used by the native runtime")
+public actor LegacyJSONSettingsStore {
     public nonisolated let settingsURL: URL
     private var rawObject: [String: JSONValue] = [:]
     private var loaded = false

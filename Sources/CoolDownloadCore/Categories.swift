@@ -72,7 +72,8 @@ public struct DownloadCategory: Codable, Equatable, Sendable, Identifiable {
         copy.acceptedURLPatterns = copy.acceptedURLPatterns
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        copy.items = Array(Set(copy.items)).sorted()
+        var seenItems = Set<DownloadID>()
+        copy.items = copy.items.filter { seenItems.insert($0).inserted }
         return copy
     }
 
@@ -114,7 +115,8 @@ public enum CategoryStoreError: Error, LocalizedError, Sendable, Equatable {
 /// Actor-isolated category persistence. Unknown JSON keys on each category
 /// are retained when a category is edited, matching the migration behavior of
 /// settings, queues and download records.
-public actor CategoryStore {
+@available(*, deprecated, message: "Legacy JSON category store is not used by the native runtime")
+public actor LegacyJSONCategoryStore {
     public nonisolated let categoriesURL: URL
     private let defaultFolder: URL
     private var rawObjects: [DownloadID: JSONValue] = [:]

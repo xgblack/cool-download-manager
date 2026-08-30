@@ -259,7 +259,8 @@ public enum QueueStoreError: Error, LocalizedError, Sendable, Equatable {
 /// Actor-isolated CRUD store for queue files. Unknown JSON keys are retained
 /// so upgrading the native client does not erase fields written by older
 /// releases.
-public actor QueueStore {
+@available(*, deprecated, message: "Legacy JSON queue store is not used by the native runtime")
+public actor LegacyJSONQueueStore {
     public nonisolated let queuesURL: URL
     private var rawObjects: [DownloadID: JSONValue] = [:]
     private var loaded = false

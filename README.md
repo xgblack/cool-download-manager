@@ -150,7 +150,7 @@ swift build --disable-sandbox
 swift run --disable-sandbox CoolDownloadManager
 ```
 
-默认数据目录为 `~/.cooldm`，默认下载目录为 `~/Downloads/CoolDM`，未完成文件使用 `.cooldm.part` 后缀。
+运行时元数据存储在 `~/Library/Application Support/com.cooldownloadmanager/metadata.sqlite`，Native Messaging 私有套接字位于同一目录；主机性能画像存储在 `~/Library/Caches/com.cooldownloadmanager/host-performance.json`。默认下载目录为 `~/Downloads/CoolDM`，未完成文件使用 `.cooldm.part` 后缀。新版本不读取或迁移旧版 `~/.cooldm`。
 
 ## 使用说明
 

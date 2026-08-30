@@ -1,131 +1,44 @@
 import Foundation
-import Darwin
+import CoreData
 
-@_silgen_name("flock")
-private func c_flock(_ descriptor: Int32, _ operation: Int32) -> Int32
-
-private final class SingleWriterLock: @unchecked Sendable {
-    private let fileDescriptor: Int32
-
-    init(url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        let descriptor = Darwin.open(
-            url.path,
-            O_CREAT | O_RDWR,
-            S_IRUSR | S_IWUSR
-        )
-        guard descriptor >= 0 else {
-            throw DownloadCoreError.permissionDenied(url.path)
-        }
-
-        if c_flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
-            _ = Darwin.close(descriptor)
-            if errno == EWOULDBLOCK || errno == EAGAIN {
-                throw DownloadCoreError.storageLocked(url)
-            }
-            throw DownloadCoreError.permissionDenied(url.path)
-        }
-
-        self.fileDescriptor = descriptor
-    }
-
-    deinit {
-        _ = c_flock(fileDescriptor, LOCK_UN)
-        _ = Darwin.close(fileDescriptor)
-    }
-}
-
+/// Core Data façade for download metadata. The actor owns the value-type
+/// cache used by `DownloadService`; managed objects never cross the actor
+/// boundary. File contents and `.cooldm.part` files remain outside this store.
 public actor DownloadStore {
     public let rootURL: URL
-    private let recordsURL: URL
-    private let partsURL: URL
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
-    private let lock: SingleWriterLock
+    public let metadataURL: URL
+
+    private let database: MetadataDatabase
     private var records: [DownloadID: DownloadRecord] = [:]
-    private var legacyObjects: [DownloadID: JSONValue] = [:]
-    /// Sidecars are only required for legacy records or records that already
-    /// had one. Modern Codable records persist their parts inline, so creating
-    /// a second synchronized file on every progress checkpoint is redundant.
-    private var sidecarRequiredIDs: Set<DownloadID> = []
+    private var loaded = false
     private var metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
     private var metricsEnabled = false
 
     public init(rootURL: URL) throws {
+        try self.init(rootURL: rootURL, database: MetadataDatabase.shared(rootURL: rootURL))
+    }
+
+    public init(rootURL: URL, database: MetadataDatabase) throws {
         self.rootURL = rootURL.standardizedFileURL
-        self.recordsURL = self.rootURL
-            .appendingPathComponent("config", isDirectory: true)
-            .appendingPathComponent("download_db", isDirectory: true)
-            .appendingPathComponent("downloadlist", isDirectory: true)
-        self.partsURL = self.rootURL
-            .appendingPathComponent("config", isDirectory: true)
-            .appendingPathComponent("download_db", isDirectory: true)
-            .appendingPathComponent("parts", isDirectory: true)
-        self.lock = try SingleWriterLock(
-            url: self.rootURL
-                .appendingPathComponent("config", isDirectory: true)
-                .appendingPathComponent("download.lock")
-        )
-
-        try FileManager.default.createDirectory(
-            at: self.recordsURL,
-            withIntermediateDirectories: true
-        )
-        try FileManager.default.createDirectory(
-            at: self.partsURL,
-            withIntermediateDirectories: true
-        )
-
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        encoder.outputFormatting = [.sortedKeys]
-        self.encoder = encoder
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .millisecondsSince1970
-        self.decoder = decoder
+        self.database = database
+        self.metadataURL = database.storeURL
+        try FileManager.default.createDirectory(at: self.rootURL, withIntermediateDirectories: true)
     }
 
     @discardableResult
     public func load() throws -> [DownloadRecord] {
-        let fileManager = FileManager.default
-        let files = try fileManager.contentsOfDirectory(
-            at: recordsURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        )
-        var loaded: [DownloadID: DownloadRecord] = [:]
-        var loadedSidecarIDs: Set<DownloadID> = []
-
-        for file in files where file.pathExtension == "json" {
+        let loadedRecords: [DownloadRecord] = try database.perform { context in
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
             do {
-                let data = try Data(contentsOf: file)
-                if var record = try? decoder.decode(DownloadRecord.self, from: data) {
-                    try loadSidecarParts(into: &record)
-                    loaded[record.id] = record
-                    legacyObjects[record.id] = nil
-                } else {
-                    let decoded = try LegacyJSONCodec.decodeRecord(data: data)
-                    var record = decoded.record
-                    try loadSidecarParts(into: &record)
-                    loaded[record.id] = record
-                    legacyObjects[decoded.record.id] = decoded.rawObject
-                }
+                return try context.fetch(request).map(Self.decodeRecord)
             } catch {
-                throw DownloadCoreError.corruptRecord(file, error.localizedDescription)
+                throw DownloadCoreError.corruptRecord(metadataURL, error.localizedDescription)
             }
         }
-
-        records = loaded
-        loadedSidecarIDs = Set(loaded.keys.filter { id in
-            FileManager.default.fileExists(
-                atPath: partsURL.appendingPathComponent("\(id).json").path
-            )
-        })
-        sidecarRequiredIDs = loadedSidecarIDs
-        return loaded.values.sorted { $0.id < $1.id }
+        records = Dictionary(uniqueKeysWithValues: loadedRecords.map { ($0.id, $0) })
+        loaded = true
+        return loadedRecords
     }
 
     public func all() -> [DownloadRecord] {
@@ -137,7 +50,13 @@ public actor DownloadStore {
     }
 
     public func nextID() -> DownloadID {
-        max(records.keys.max() ?? 0, 0) + 1
+        let maximum = (try? database.perform { context -> Int64 in
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+            request.fetchLimit = 1
+            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: false)]
+            return (try context.fetch(request).first?.value(forKey: "id") as? NSNumber)?.int64Value ?? 0
+        }) ?? records.keys.max() ?? 0
+        return max(maximum, records.keys.max() ?? 0) + 1
     }
 
     public func updateMetrics(_ metrics: any DownloadMetricsSink) {
@@ -146,267 +65,220 @@ public actor DownloadStore {
     }
 
     public func save(_ record: DownloadRecord) throws {
-        // DownloadService can be re-entered while a previous save is awaiting
-        // filesystem I/O. Never let an older progress event overwrite a newer
-        // pause, retry, or completion state.
         if let current = records[record.id], current.revision > record.revision {
             return
         }
-        let target = recordsURL.appendingPathComponent("\(record.id).json")
-        let temporary = recordsURL.appendingPathComponent(
-            ".\(record.id).json.\(UUID().uuidString).tmp"
-        )
-        let shouldRecordMetrics = metricsEnabled
-        let checkpointStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
-        let checkpointStartResources = shouldRecordMetrics
-            ? DownloadResourceSnapshot.capture()
-            : nil
-        var encodedBytes: Int64 = 0
-        var logicalWriteBytes: Int64 = 0
-        var synchronizeCount = 0
-
+        let startedAt = metricsEnabled ? downloadMetricsNow() : 0
+        let resources = metricsEnabled ? DownloadResourceSnapshot.capture() : nil
         do {
-            try FileManager.default.createDirectory(
-                at: recordsURL,
-                withIntermediateDirectories: true
-            )
-            let recordEncodeStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
-            let data: Data
-            if let legacyObject = legacyObjects[record.id] {
-                data = try LegacyJSONCodec.encodeRecord(record, preserving: legacyObject)
-            } else {
-                data = try encoder.encode(record)
+            let encodedBytes = try database.perform { context -> Int64 in
+                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.predicate = NSPredicate(format: "id == %lld", record.id)
+                request.fetchLimit = 1
+                let task = try context.fetch(request).first ?? NSEntityDescription.insertNewObject(
+                    forEntityName: "DownloadTask",
+                    into: context
+                )
+                try Self.encode(record, into: task, context: context)
+                try context.save()
+                return Int64(try MetadataJSON.encode(record).utf8.count)
             }
-            let recordBytes = Int64(data.count)
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .recordEncode,
-                startedAt: recordEncodeStartedAt,
-                bytes: recordBytes,
-                enabled: shouldRecordMetrics
-            )
-            encodedBytes += recordBytes
-            logicalWriteBytes += recordBytes
-
-            guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else {
-                throw DownloadCoreError.permissionDenied(temporary.path)
-            }
-            let handle = try FileHandle(forWritingTo: temporary)
-            let recordWriteStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
-            try handle.write(contentsOf: data)
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .recordWrite,
-                startedAt: recordWriteStartedAt,
-                bytes: recordBytes,
-                enabled: shouldRecordMetrics
-            )
-            let recordSynchronizeStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
-            try handle.synchronize()
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .recordSynchronize,
-                startedAt: recordSynchronizeStartedAt,
-                enabled: shouldRecordMetrics
-            )
-            synchronizeCount += 1
-            try handle.close()
-
-            let recordReplaceStartedAt = shouldRecordMetrics ? downloadMetricsNow() : 0
-            try atomicallyReplace(temporary, at: target)
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .recordReplace,
-                startedAt: recordReplaceStartedAt,
-                enabled: shouldRecordMetrics
-            )
             records[record.id] = record
-            let sidecar = try saveSidecarParts(
-                record,
-                metricsEnabled: shouldRecordMetrics,
-                required: shouldPersistSidecar(for: record)
-            )
-            encodedBytes += sidecar.encodedBytes
-            logicalWriteBytes += sidecar.encodedBytes
-            synchronizeCount += sidecar.synchronizeCount
-            recordCheckpointMetric(
-                id: record.id,
-                startedAt: checkpointStartedAt,
-                startResources: checkpointStartResources,
-                encodedBytes: encodedBytes,
-                logicalWriteBytes: logicalWriteBytes,
-                synchronizeCount: synchronizeCount,
-                succeeded: true,
-                enabled: shouldRecordMetrics
-            )
-        } catch {
-            try? FileManager.default.removeItem(at: temporary)
-            recordCheckpointMetric(
-                id: record.id,
-                startedAt: checkpointStartedAt,
-                startResources: checkpointStartResources,
-                encodedBytes: encodedBytes,
-                logicalWriteBytes: logicalWriteBytes,
-                synchronizeCount: synchronizeCount,
-                succeeded: false,
-                enabled: shouldRecordMetrics
-            )
-            if let error = error as? DownloadCoreError {
-                throw error
+            if metricsEnabled, let resources {
+                metrics.record(.checkpointPhase(
+                    id: record.id,
+                    phase: .recordEncode,
+                    elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
+                    bytes: encodedBytes
+                ))
+                metrics.record(.checkpoint(
+                    id: record.id,
+                    elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
+                    encodedBytes: encodedBytes,
+                    logicalWriteBytes: encodedBytes,
+                    kernelAccountedWriteBytes: DownloadResourceSnapshot.capture().diskWriteDelta(from: resources),
+                    synchronizeCount: 1,
+                    succeeded: true
+                ))
             }
-            throw DownloadCoreError.permissionDenied(target.path)
+        } catch let error as DownloadCoreError {
+            throw error
+        } catch {
+            if metricsEnabled, let resources {
+                metrics.record(.checkpoint(
+                    id: record.id,
+                    elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
+                    encodedBytes: 0,
+                    logicalWriteBytes: 0,
+                    kernelAccountedWriteBytes: DownloadResourceSnapshot.capture().diskWriteDelta(from: resources),
+                    synchronizeCount: 0,
+                    succeeded: false
+                ))
+            }
+            throw DownloadCoreError.permissionDenied(metadataURL.path)
         }
     }
 
     public func remove(id: DownloadID) throws {
-        guard records[id] != nil else {
-            throw DownloadCoreError.notFound(id)
-        }
-        let target = recordsURL.appendingPathComponent("\(id).json")
-        if FileManager.default.fileExists(atPath: target.path) {
-            try FileManager.default.removeItem(at: target)
-        }
-        let partsFile = partsURL.appendingPathComponent("\(id).json")
-        if FileManager.default.fileExists(atPath: partsFile.path) {
-            try FileManager.default.removeItem(at: partsFile)
-        }
-        records.removeValue(forKey: id)
-        legacyObjects.removeValue(forKey: id)
-        sidecarRequiredIDs.remove(id)
-    }
-
-    private func loadSidecarParts(into record: inout DownloadRecord) throws {
-        guard record.parts.isEmpty else { return }
-        let file = partsURL.appendingPathComponent("\(record.id).json")
-        guard FileManager.default.fileExists(atPath: file.path) else { return }
-        record.parts = try LegacyJSONCodec.decodeParts(data: Data(contentsOf: file))
-    }
-
-    private func saveSidecarParts(
-        _ record: DownloadRecord,
-        metricsEnabled: Bool,
-        required: Bool
-    ) throws -> (encodedBytes: Int64, synchronizeCount: Int) {
-        let target = partsURL.appendingPathComponent("\(record.id).json")
-        guard !record.parts.isEmpty else {
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
-            }
-            sidecarRequiredIDs.remove(record.id)
-            return (0, 0)
-        }
-        guard required else { return (0, 0) }
-        let temporary = partsURL.appendingPathComponent(".\(record.id).json.\(UUID().uuidString).tmp")
-        let sidecarEncodeStartedAt = metricsEnabled ? downloadMetricsNow() : 0
-        let data = try LegacyJSONCodec.encodeParts(record.parts, kind: record.source.kind)
-        let sidecarBytes = Int64(data.count)
-        recordCheckpointPhase(
-            id: record.id,
-            phase: .sidecarEncode,
-            startedAt: sidecarEncodeStartedAt,
-            bytes: sidecarBytes,
-            enabled: metricsEnabled
-        )
-        guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else {
-            throw DownloadCoreError.permissionDenied(temporary.path)
-        }
         do {
-            let handle = try FileHandle(forWritingTo: temporary)
-            let sidecarWriteStartedAt = metricsEnabled ? downloadMetricsNow() : 0
-            try handle.write(contentsOf: data)
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .sidecarWrite,
-                startedAt: sidecarWriteStartedAt,
-                bytes: sidecarBytes,
-                enabled: metricsEnabled
-            )
-            let sidecarSynchronizeStartedAt = metricsEnabled ? downloadMetricsNow() : 0
-            try handle.synchronize()
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .sidecarSynchronize,
-                startedAt: sidecarSynchronizeStartedAt,
-                enabled: metricsEnabled
-            )
-            try handle.close()
-            let sidecarReplaceStartedAt = metricsEnabled ? downloadMetricsNow() : 0
-            try atomicallyReplace(temporary, at: target)
-            sidecarRequiredIDs.insert(record.id)
-            recordCheckpointPhase(
-                id: record.id,
-                phase: .sidecarReplace,
-                startedAt: sidecarReplaceStartedAt,
-                enabled: metricsEnabled
-            )
-            return (sidecarBytes, 1)
+            try database.perform { context in
+                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.predicate = NSPredicate(format: "id == %lld", id)
+                request.fetchLimit = 1
+                guard let task = try context.fetch(request).first else {
+                    throw DownloadCoreError.notFound(id)
+                }
+                context.delete(task)
+                try context.save()
+            }
+            records[id] = nil
+        } catch let error as DownloadCoreError {
+            throw error
         } catch {
-            try? FileManager.default.removeItem(at: temporary)
-            throw DownloadCoreError.permissionDenied(target.path)
+            throw DownloadCoreError.permissionDenied(metadataURL.path)
         }
     }
 
-    private func shouldPersistSidecar(for record: DownloadRecord) -> Bool {
-        if legacyObjects[record.id] != nil || sidecarRequiredIDs.contains(record.id) {
-            return true
+    private static func decodeRecord(_ task: NSManagedObject) throws -> DownloadRecord {
+        guard let id = (task.value(forKey: "id") as? NSNumber)?.int64Value,
+              let sourceKind = task.value(forKey: "sourceKind") as? String,
+              let kind = DownloadKind(rawValue: sourceKind),
+              let link = task.value(forKey: "link") as? String,
+              let folder = task.value(forKey: "folder") as? String,
+              let name = task.value(forKey: "name") as? String,
+              let statusValue = task.value(forKey: "status") as? String,
+              let status = DownloadStatus(rawValue: statusValue),
+              let createdAt = task.value(forKey: "createdAt") as? Date,
+              let updatedAt = task.value(forKey: "updatedAt") as? Date else {
+            throw DownloadCoreError.corruptRecord(
+                URL(fileURLWithPath: "DownloadTask"),
+                "元数据字段缺失或类型无效"
+            )
         }
-        // A sidecar may have been created by an older process between loads.
-        // Preserve it rather than silently changing its compatibility mode.
-        return FileManager.default.fileExists(
-            atPath: partsURL.appendingPathComponent("\(record.id).json").path
+
+        let headers: [String: String]?
+        if let headersJSON = task.value(forKey: "headersJSON") as? String {
+            headers = try MetadataJSON.decode([String: String].self, from: headersJSON)
+        } else {
+            headers = nil
+        }
+        let taskSettings: DownloadTaskSettings?
+        if let settingsJSON = task.value(forKey: "taskSettingsJSON") as? String {
+            taskSettings = try MetadataJSON.decode(DownloadTaskSettings.self, from: settingsJSON)
+        } else {
+            taskSettings = nil
+        }
+        let source = DownloadSource(
+            kind: kind,
+            link: link,
+            headers: headers,
+            downloadPage: task.value(forKey: "downloadPage") as? String,
+            suggestedName: task.value(forKey: "suggestedName") as? String
+        )
+        let parts = ((task.value(forKey: "parts") as? NSSet)?.allObjects as? [NSManagedObject] ?? [])
+            .sorted {
+                (($0.value(forKey: "partID") as? NSNumber)?.int64Value ?? 0)
+                    < (($1.value(forKey: "partID") as? NSNumber)?.int64Value ?? 0)
+            }
+            .map { part in
+                DownloadPart(
+                    id: Int((part.value(forKey: "partID") as? NSNumber)?.int64Value ?? 0),
+                    from: (part.value(forKey: "from") as? NSNumber)?.int64Value ?? 0,
+                    to: (part.value(forKey: "to") as? NSNumber)?.int64Value,
+                    downloaded: (part.value(forKey: "downloaded") as? NSNumber)?.int64Value ?? 0,
+                    completed: (part.value(forKey: "completed") as? NSNumber)?.boolValue ?? false
+                )
+            }
+        let queueID = (task.value(forKey: "queue") as? NSManagedObject)
+            .flatMap { ($0.value(forKey: "id") as? NSNumber)?.int64Value }
+        let categoryID = (task.value(forKey: "category") as? NSManagedObject)
+            .flatMap { ($0.value(forKey: "id") as? NSNumber)?.int64Value }
+
+        return DownloadRecord(
+            id: id,
+            source: source,
+            folder: folder,
+            name: name,
+            status: status,
+            downloadedBytes: (task.value(forKey: "downloadedBytes") as? NSNumber)?.int64Value ?? 0,
+            totalBytes: (task.value(forKey: "totalBytes") as? NSNumber)?.int64Value,
+            etag: task.value(forKey: "etag") as? String,
+            lastModified: task.value(forKey: "lastModified") as? String,
+            supportsResume: (task.value(forKey: "supportsResume") as? NSNumber)?.boolValue,
+            parts: parts,
+            queueID: queueID,
+            categoryID: categoryID,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            error: task.value(forKey: "error") as? String,
+            fileChecksum: task.value(forKey: "fileChecksum") as? String,
+            taskSettings: taskSettings,
+            incompleteFileName: task.value(forKey: "incompleteFileName") as? String,
+            revision: (task.value(forKey: "revision") as? NSNumber)?.int64Value ?? 1
         )
     }
 
-    private func recordCheckpointMetric(
-        id: DownloadID,
-        startedAt: UInt64,
-        startResources: DownloadResourceSnapshot?,
-        encodedBytes: Int64,
-        logicalWriteBytes: Int64,
-        synchronizeCount: Int,
-        succeeded: Bool,
-        enabled: Bool
-    ) {
-        guard enabled, let startResources else { return }
-        let endResources = DownloadResourceSnapshot.capture()
-        metrics.record(.checkpoint(
-            id: id,
-            elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
-            encodedBytes: encodedBytes,
-            logicalWriteBytes: logicalWriteBytes,
-            kernelAccountedWriteBytes: endResources.diskWriteDelta(from: startResources),
-            synchronizeCount: synchronizeCount,
-            succeeded: succeeded
-        ))
-    }
+    private static func encode(
+        _ record: DownloadRecord,
+        into task: NSManagedObject,
+        context: NSManagedObjectContext
+    ) throws {
+        task.setValue(record.id, forKey: "id")
+        task.setValue(record.source.kind.rawValue, forKey: "sourceKind")
+        task.setValue(record.source.link, forKey: "link")
+        task.setValue(try record.source.headers.map(MetadataJSON.encode), forKey: "headersJSON")
+        task.setValue(record.source.downloadPage, forKey: "downloadPage")
+        task.setValue(record.source.suggestedName, forKey: "suggestedName")
+        task.setValue(record.folder, forKey: "folder")
+        task.setValue(record.name, forKey: "name")
+        task.setValue(record.status.rawValue, forKey: "status")
+        task.setValue(record.downloadedBytes, forKey: "downloadedBytes")
+        task.setValue(record.totalBytes, forKey: "totalBytes")
+        task.setValue(record.etag, forKey: "etag")
+        task.setValue(record.lastModified, forKey: "lastModified")
+        task.setValue(record.supportsResume, forKey: "supportsResume")
+        task.setValue(record.createdAt, forKey: "createdAt")
+        task.setValue(record.updatedAt, forKey: "updatedAt")
+        task.setValue(record.error, forKey: "error")
+        task.setValue(record.fileChecksum, forKey: "fileChecksum")
+        task.setValue(try record.taskSettings.map(MetadataJSON.encode), forKey: "taskSettingsJSON")
+        task.setValue(record.incompleteFileName, forKey: "incompleteFileName")
+        task.setValue(record.revision, forKey: "revision")
 
-    /// Both temporary files are created beside their target, so POSIX rename
-    /// provides an atomic same-volume replacement without Foundation's extra
-    /// metadata and backup handling.
-    private func atomicallyReplace(_ temporary: URL, at target: URL) throws {
-        let result = temporary.path.withCString { temporaryPath in
-            target.path.withCString { targetPath in
-                Darwin.rename(temporaryPath, targetPath)
-            }
+        let queue: NSManagedObject?
+        if let queueID = record.queueID {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadQueue")
+            request.predicate = NSPredicate(format: "id == %lld", queueID)
+            request.fetchLimit = 1
+            queue = try context.fetch(request).first
+        } else {
+            queue = nil
         }
-        guard result == 0 else {
-            throw DownloadCoreError.permissionDenied(target.path)
-        }
-    }
+        task.setValue(queue, forKey: "queue")
 
-    private func recordCheckpointPhase(
-        id: DownloadID,
-        phase: DownloadCheckpointPhase,
-        startedAt: UInt64,
-        bytes: Int64 = 0,
-        enabled: Bool
-    ) {
-        guard enabled else { return }
-        metrics.record(.checkpointPhase(
-            id: id,
-            phase: phase,
-            elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
-            bytes: bytes
-        ))
+        let category: NSManagedObject?
+        if let categoryID = record.categoryID {
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadCategory")
+            request.predicate = NSPredicate(format: "id == %lld", categoryID)
+            request.fetchLimit = 1
+            category = try context.fetch(request).first
+        } else {
+            category = nil
+        }
+        task.setValue(category, forKey: "category")
+
+        let oldParts = ((task.value(forKey: "parts") as? NSSet)?.allObjects as? [NSManagedObject] ?? [])
+        oldParts.forEach(context.delete)
+        let parts = record.parts.map { value -> NSManagedObject in
+            let object = NSEntityDescription.insertNewObject(forEntityName: "DownloadPart", into: context)
+            object.setValue(Int64(value.id), forKey: "partID")
+            object.setValue(value.from, forKey: "from")
+            object.setValue(value.to, forKey: "to")
+            object.setValue(value.downloaded, forKey: "downloaded")
+            object.setValue(value.completed, forKey: "completed")
+            object.setValue(task, forKey: "task")
+            return object
+        }
+        task.setValue(NSSet(array: parts), forKey: "parts")
     }
 }

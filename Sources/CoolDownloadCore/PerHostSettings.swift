@@ -91,7 +91,8 @@ public enum PerHostSettingsError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-public actor PerHostSettingsStore {
+@available(*, deprecated, message: "Legacy JSON per-host store is not used by the native runtime")
+public actor LegacyJSONPerHostSettingsStore {
     public nonisolated let settingsURL: URL
     private var values: [PerHostSettingsItem] = []
     private var loaded = false

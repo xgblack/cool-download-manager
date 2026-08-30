@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 import CoolDownloadCore
 @testable import CoolDownloadIntegration
@@ -102,6 +103,13 @@ struct IntegrationTests {
         let response = try client.send(PrivateSocketMessage(requestId: "B_1", action: "ping"))
         #expect(response.requestId == "B_1")
         #expect(response.payload == "true")
+        var socketStat = stat()
+        #expect(lstat(socketURL.path, &socketStat) == 0)
+        #expect((socketStat.st_mode & S_IFMT) == S_IFSOCK)
+        #expect((socketStat.st_mode & 0o777) == 0o600)
+        var directoryStat = stat()
+        #expect(lstat(root.path, &directoryStat) == 0)
+        #expect((directoryStat.st_mode & 0o777) == 0o700)
 
         let competingServer = PrivateSocketServer(socketURL: socketURL) { request in
             PrivateSocketMessage(requestId: request.requestId, action: request.action, payload: "false")

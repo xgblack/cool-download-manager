@@ -1,8 +1,8 @@
 import Foundation
+import CoolDownloadCore
 import CoolDownloadIntegration
 
-let socketURL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".cooldm/config/native-messaging.sock")
+let socketURL = AppPaths.nativeMessagingSocketURL()
 let client = PrivateSocketClient(socketURL: socketURL)
 let arguments = Array(CommandLine.arguments.dropFirst())
 

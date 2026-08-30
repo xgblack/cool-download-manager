@@ -1,5 +1,6 @@
 import CoolDownloadCore
 import Foundation
+import CoreData
 
 #if canImport(Darwin)
 import Darwin
@@ -365,33 +366,26 @@ struct CoolDownloadBenchmarkMain {
     }
 
     private static func readPersistedTask(at root: URL) -> PersistedTaskSnapshot? {
-        let recordsURL = root
-            .appendingPathComponent("config", isDirectory: true)
-            .appendingPathComponent("download_db", isDirectory: true)
-            .appendingPathComponent("downloadlist", isDirectory: true)
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: recordsURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
+        let storeURL = root.appendingPathComponent("metadata.sqlite")
+        guard FileManager.default.fileExists(atPath: storeURL.path),
+              let database = try? MetadataDatabase(rootURL: root, readOnly: true) else {
             return nil
         }
-        for file in files where file.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: file),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let dictionary = object as? [String: Any],
-                  let id = (dictionary["id"] as? NSNumber)?.int64Value,
-                  let status = dictionary["status"] as? String else {
-                continue
+        return try? database.perform { context in
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+            request.fetchLimit = 1
+            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
+            guard let task = try context.fetch(request).first,
+                  let id = (task.value(forKey: "id") as? NSNumber)?.int64Value,
+                  let status = task.value(forKey: "status") as? String else {
+                return nil
             }
-            let downloadedBytes = (dictionary["downloadedBytes"] as? NSNumber)?.int64Value ?? 0
             return PersistedTaskSnapshot(
                 id: id,
                 status: status,
-                downloadedBytes: downloadedBytes
+                downloadedBytes: (task.value(forKey: "downloadedBytes") as? NSNumber)?.int64Value ?? 0
             )
         }
-        return nil
     }
 
     private static func makeService(

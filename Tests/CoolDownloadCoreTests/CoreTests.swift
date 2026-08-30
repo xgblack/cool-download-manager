@@ -392,77 +392,57 @@ struct CoreTests {
         }
     }
 
-    @Test("queue store migrates legacy fields and preserves unknown fields")
+    @Test("queue metadata persists in SQLite and keeps task membership order")
     func queueStoreRoundTrip() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let directory = root.appendingPathComponent("config/download_db/queues", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data(#"{"id":12,"name":"Archive","maxConcurrent":4,"queueItems":[3,8],"futureField":{"keep":true}}"#.utf8)
-            .write(to: directory.appendingPathComponent("12.json"))
-
-        let store = try QueueStore(dataRoot: root)
-        let loaded = try await store.load()
-        #expect(loaded == [DownloadQueueModel(
-            id: 12,
-            name: "Archive",
-            maxConcurrent: 4,
-            queueItems: [3, 8]
-        )])
-        var changed = try await store.model(id: 12)
+        let database = try MetadataDatabase(rootURL: root)
+        let downloads = try DownloadStore(rootURL: root, database: database)
+        for id in [DownloadID(3), DownloadID(8)] {
+            try await downloads.save(makeRecord(id: id, folder: root))
+        }
+        let store = try QueueStore(dataRoot: root, database: database)
+        let created = try await store.create(name: "Archive")
+        var changed = created
+        changed.maxConcurrent = 4
+        changed.queueItems = [3, 8]
         changed.stopQueueOnEmpty = true
         _ = try await store.save(changed)
-        let object = try #require(
-            JSONSerialization.jsonObject(
-                with: Data(contentsOf: directory.appendingPathComponent("12.json"))
-            ) as? [String: Any]
-        )
-        #expect((object["futureField"] as? [String: Any])?["keep"] as? Bool == true)
-        #expect(object["stopQueueOnEmpty"] as? Bool == true)
-        #expect(
-            try FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            ).filter { $0.pathExtension == "tmp" }.isEmpty
-        )
+        let reopened = try QueueStore(dataRoot: root, database: database)
+        #expect(try await reopened.model(id: created.id) == changed)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("metadata.sqlite").path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("config/download_db/queues/\(created.id).json").path))
     }
 
-    @Test("queue store reads Kotlin weekday enum names")
+    @Test("queue schedule persists weekdays")
     func queueStoreReadsLegacyWeekdayNames() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let directory = root.appendingPathComponent("config/download_db/queues", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let legacyQueue = #"""
-        {
-          "id": 0,
-          "name": "Main",
-          "maxConcurrent": 2,
-          "queueItems": [],
-          "scheduledTimes": {
-            "daysOfWeek": ["MONDAY", "WEDNESDAY", "SUNDAY"],
-            "startTime": "02:30",
-            "endTime": "07:30",
-            "enabledStartTime": false,
-            "enabledEndTime": false
-          },
-          "stopQueueOnEmpty": false
-        }
-        """#
-        try Data(legacyQueue.utf8).write(to: directory.appendingPathComponent("0.json"))
-
-        let store = try QueueStore(dataRoot: root)
-        let loaded = try await store.load()
-        #expect(loaded.first?.id == 0)
-        #expect(loaded.first?.scheduledTimes.daysOfWeek == [1, 3, 7])
+        let database = try MetadataDatabase(rootURL: root)
+        let store = try QueueStore(dataRoot: root, database: database)
+        var queue = try await store.create(name: "Weekdays")
+        queue.scheduledTimes = QueueSchedule(
+            daysOfWeek: [1, 3, 7],
+            startTime: "02:30",
+            endTime: "07:30",
+            enabledStartTime: false,
+            enabledEndTime: false
+        )
+        _ = try await store.save(queue)
+        let reopened = try QueueStore(dataRoot: root, database: database)
+        #expect(try await reopened.model(id: queue.id).scheduledTimes.daysOfWeek == [1, 3, 7])
     }
 
     @Test("queue store creates, edits and protects the main queue")
     func queueStoreCRUD() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = try QueueStore(dataRoot: root)
+        let database = try MetadataDatabase(rootURL: root)
+        let downloads = try DownloadStore(rootURL: root, database: database)
+        for id in [DownloadID(4), DownloadID(5)] {
+            try await downloads.save(makeRecord(id: id, folder: root))
+        }
+        let store = try QueueStore(dataRoot: root, database: database)
         #expect(try await store.load().first?.id == 0)
         let created = try await store.create(name: "Nightly")
         #expect(created.id > 10)
@@ -492,12 +472,17 @@ struct CoreTests {
         }
     }
 
-    @Test("category store loads defaults, preserves fields and moves items")
+    @Test("category metadata persists in SQLite and moves task relationships")
     func categoryStoreCRUD() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let defaultFolder = root.appendingPathComponent("Downloads", isDirectory: true)
-        let store = try CategoryStore(dataRoot: root, defaultFolder: defaultFolder)
+        let database = try MetadataDatabase(rootURL: root)
+        let downloads = try DownloadStore(rootURL: root, database: database)
+        for id in [DownloadID(7), DownloadID(8)] {
+            try await downloads.save(makeRecord(id: id, folder: root))
+        }
+        let store = try CategoryStore(dataRoot: root, defaultFolder: defaultFolder, database: database)
 
         let defaults = try await store.load()
         #expect(defaults.count == 6)
@@ -516,51 +501,27 @@ struct CoreTests {
         #expect(try await store.model(id: custom.id).items == [7, 8])
         #expect(try await store.matchingCategory(fileName: "file.bin", url: "https://example.test/a")?.id == custom.id)
 
-        let raw = try #require(
-            JSONSerialization.jsonObject(with: Data(contentsOf: store.categoriesURL)) as? [[String: Any]]
-        )
-        #expect(raw.contains { ($0["id"] as? Int) == Int(custom.id) })
+        #expect(FileManager.default.fileExists(atPath: store.metadataURL.path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("config/download_db/categories/categories.json").path))
 
         try await store.assignItems([7], to: nil)
         #expect(try await store.model(id: custom.id).items == [8])
     }
 
-    @Test("category store localizes untouched English built-in names")
+    @Test("category store ignores legacy JSON files")
     func categoryStoreLocalizesEnglishBuiltInNames() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let defaultFolder = root.appendingPathComponent("Downloads", isDirectory: true)
-        let store = try CategoryStore(dataRoot: root, defaultFolder: defaultFolder)
-        let compressedPath = defaultFolder.appendingPathComponent("Compressed", isDirectory: true).path
-        let customProgramPath = defaultFolder.appendingPathComponent("CustomPrograms", isDirectory: true).path
-        let encoded = try JSONSerialization.data(withJSONObject: [
-            [
-                "id": 0,
-                "name": "Compressed",
-                "path": compressedPath,
-                "futureField": "preserved"
-            ],
-            [
-                "id": 1,
-                "name": "我的程序",
-                "path": customProgramPath
-            ]
-        ])
-        try encoded.write(to: store.categoriesURL)
+        let legacyURL = root.appendingPathComponent("config/download_db/categories/categories.json")
+        try FileManager.default.createDirectory(at: legacyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"[{"id":0,"name":"Compressed"}]"#.utf8).write(to: legacyURL)
 
+        let store = try CategoryStore(dataRoot: root, defaultFolder: defaultFolder)
         let categories = try await store.load()
         #expect(categories.first(where: { $0.id == 0 })?.name == "压缩文件")
-        #expect(categories.first(where: { $0.id == 0 })?.path == compressedPath)
-        #expect(categories.first(where: { $0.id == 1 })?.name == "我的程序")
-        #expect(categories.first(where: { $0.id == 1 })?.path == customProgramPath)
-
-        let persisted = try #require(
-            JSONSerialization.jsonObject(with: Data(contentsOf: store.categoriesURL)) as? [[String: Any]]
-        )
-        let compressed = try #require(persisted.first { ($0["id"] as? Int) == 0 })
-        #expect(compressed["name"] as? String == "压缩文件")
-        #expect(compressed["path"] as? String == compressedPath)
-        #expect(compressed["futureField"] as? String == "preserved")
+        #expect(FileManager.default.fileExists(atPath: legacyURL.path))
+        #expect(FileManager.default.fileExists(atPath: store.metadataURL.path))
     }
 
     @Test("queue schedule evaluates weekdays and overnight windows")
@@ -612,38 +573,23 @@ struct CoreTests {
         #expect(configuration.maxOpenFileDescriptors == 2)
     }
 
-    @Test("settings save round trips and preserves unknown fields")
+    @Test("typed settings round trip and keep secrets out of UserDefaults")
     func settingsRoundTrip() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let config = root.appendingPathComponent("config", isDirectory: true)
-        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
-        try Data(#"{"futureSetting":{"keep":true},"threadCount":12,"defaultDarkTheme":"dark","defaultLightTheme":"light","language":"zh-CN","font":"Helvetica","useNativeMenuBar":false,"useSystemTray":false,"dnsServers":["1.1.1.1"]}"#.utf8)
-            .write(to: config.appendingPathComponent("appSettings.json"))
-
         let store = try SettingsStore(dataRoot: root)
         var settings = try await store.load()
-        #expect(settings.threadCount == 12)
+        #expect(settings.threadCount == 8)
         settings.apiPort = 16200
         settings.proxyPassword = "secret-value"
+        settings.apiAuthKey = "plain-api-key"
         let saved = try await store.save(settings)
         #expect(saved == settings)
 
-        let object = try #require(
-            JSONSerialization.jsonObject(
-                with: Data(contentsOf: config.appendingPathComponent("appSettings.json"))
-            ) as? [String: Any]
-        )
-        #expect((object["futureSetting"] as? [String: Any])?["keep"] as? Bool == true)
-        #expect(object["apiPort"] as? Int == 16200)
-        #expect(object["proxyPassword"] as? String == "secret-value")
-        #expect(object["defaultDarkTheme"] == nil)
-        #expect(object["defaultLightTheme"] == nil)
-        #expect(object["language"] == nil)
-        #expect(object["font"] == nil)
-        #expect(object["useNativeMenuBar"] == nil)
-        #expect(object["useSystemTray"] == nil)
-        #expect(object["dnsServers"] == nil)
+        #expect(store.defaults.defaults.object(forKey: "apiPort") as? Int == 16200)
+        #expect(store.defaults.defaults.object(forKey: "apiAuthKey") as? String == "plain-api-key")
+        #expect(store.defaults.defaults.object(forKey: "proxyPassword") == nil)
+        #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))
 
         let reopened = try SettingsStore(dataRoot: root)
         #expect(try await reopened.load() == settings)
@@ -667,41 +613,39 @@ struct CoreTests {
         }
     }
 
-    @Test("corrupt settings are not cached as defaults")
+    @Test("legacy settings files are ignored and typed defaults remain usable")
     func corruptSettingsNotCached() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try SettingsStore(dataRoot: root)
         let settingsURL = store.settingsURL
         try Data("[]".utf8).write(to: settingsURL)
-        do {
-            _ = try await store.load()
-            Issue.record("a non-object settings root should be rejected")
-        } catch let error as SettingsStoreError {
-            #expect(error == .corrupt(settingsURL, "根值不是 JSON 对象"))
-        }
-        try Data(#"{"threadCount":4}"#.utf8).write(to: settingsURL)
-        #expect(try await store.load().threadCount == 4)
+        let defaults = try await store.load()
+        #expect(defaults.threadCount == 8)
+        #expect(FileManager.default.fileExists(atPath: settingsURL.path))
+        store.defaults.defaults.set(4, forKey: "threadCount")
+        let reopened = try SettingsStore(dataRoot: root)
+        #expect(try await reopened.load().threadCount == 4)
     }
 
-    @Test("store saves, loads and locks a data root")
+    @Test("metadata database saves, loads and locks a data root")
     func storeRoundTripAndLock() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        var store: DownloadStore? = try DownloadStore(rootURL: root)
+        let database = try MetadataDatabase(rootURL: root)
+        let store = try DownloadStore(rootURL: root, database: database)
         let record = makeRecord(id: 7, folder: root)
-        try await store?.save(record)
+        try await store.save(record)
 
-        #expect(throws: DownloadCoreError.storageLocked(root.appendingPathComponent("config/download.lock"))) {
-            _ = try DownloadStore(rootURL: root)
+        do {
+            _ = try MetadataDatabase(rootURL: root)
+            Issue.record("a second metadata writer should be rejected")
+        } catch let error as DownloadCoreError {
+            #expect(error == .storageLocked(root.appendingPathComponent("metadata.sqlite.lock")))
         }
-        let savedURL = root.appendingPathComponent("config/download_db/downloadlist/7.json")
-        #expect(FileManager.default.fileExists(atPath: savedURL.path))
-
-        store = nil
-        let reopened = try DownloadStore(rootURL: root)
-        let loaded = try await reopened.load()
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("metadata.sqlite").path))
+        let loaded = try await store.load()
         #expect(loaded.count == 1)
         #expect(loaded.first?.id == record.id)
         #expect(loaded.first?.source == record.source)
@@ -3698,7 +3642,7 @@ struct CoreTests {
         #expect(object?["preferredConnectionCount"] as? Int == 4)
     }
 
-    @Test("legacy parts sidecar is restored and written back")
+    @Test("legacy parts sidecars are ignored by the native metadata store")
     func partsSidecar() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -3706,20 +3650,18 @@ struct CoreTests {
         let record = makeRecord(id: 8, folder: root)
         try await store.save(record)
         let partsURL = root.appendingPathComponent("config/download_db/parts/8.json")
+        try FileManager.default.createDirectory(at: partsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("""
         {"type":"ranges","list":[{"from":0,"to":4,"current":5}]}
         """.utf8).write(to: partsURL)
         let loaded = try await store.load()
-        #expect(loaded.first?.parts.first?.completed == true)
-        #expect(loaded.first?.downloadedBytes == 0)
+        #expect(loaded.first?.parts.isEmpty == true)
+        let legacyData = try Data(contentsOf: partsURL)
         var updated = try #require(loaded.first)
-        updated.downloadedBytes = 5
+        updated.parts = [DownloadPart(id: 0, from: 0, to: 4, downloaded: 5, completed: true)]
         try await store.save(updated)
-        let savedParts = try String(contentsOf: partsURL, encoding: .utf8)
-        #expect(savedParts.contains("current"))
-        updated.parts = []
-        try await store.save(updated)
-        #expect(!FileManager.default.fileExists(atPath: partsURL.path))
+        #expect(try Data(contentsOf: partsURL) == legacyData)
+        #expect(FileManager.default.fileExists(atPath: partsURL.path))
     }
 
     @Test("modern records persist range parts inline without a redundant sidecar")

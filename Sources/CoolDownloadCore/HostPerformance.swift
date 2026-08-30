@@ -158,11 +158,9 @@ public actor HostPerformanceStore {
         self.ttl = max(0, ttl)
         self.maximumRecords = max(1, maximumRecords)
         self.now = now
-        let options = dataRoot.standardizedFileURL
-            .appendingPathComponent("config", isDirectory: true)
-            .appendingPathComponent("options", isDirectory: true)
-        try FileManager.default.createDirectory(at: options, withIntermediateDirectories: true)
-        settingsURL = options.appendingPathComponent("hostPerformance.json")
+        let cacheDirectory = dataRoot.standardizedFileURL
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        settingsURL = cacheDirectory.appendingPathComponent("host-performance.json")
     }
 
     public func load() throws -> [HostPerformanceRecord] {
@@ -183,11 +181,11 @@ public actor HostPerformanceStore {
             let normalized = try normalize(decoded, at: now())
             let changed = normalized.count != decoded.count
                 || normalized != decoded.sorted { $0.key.storageKey < $1.key.storageKey }
-            values = Dictionary(uniqueKeysWithValues: normalized.map { ($0.key, $0) })
-            loaded = true
             if changed {
                 try write(normalized)
             }
+            values = Dictionary(uniqueKeysWithValues: normalized.map { ($0.key, $0) })
+            loaded = true
             return sortedValues()
         } catch let error as HostPerformanceError {
             throw error

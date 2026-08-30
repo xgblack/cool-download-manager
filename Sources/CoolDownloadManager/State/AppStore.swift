@@ -37,9 +37,9 @@ final class AppStore: ObservableObject {
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataRoot = home.appendingPathComponent(".cooldm", isDirectory: true)
-        let defaultSettings = AppSettingsModel.defaults(home: home)
-        let initialSettings = Self.loadInitialSettings(dataRoot: dataRoot, fallback: defaultSettings)
+        let dataRoot = AppPaths.applicationSupportDirectory()
+        let cacheRoot = AppPaths.cachesDirectory()
+        let initialSettings = AppSettingsModel.defaults(home: home)
         let defaultFolder = URL(fileURLWithPath: initialSettings.defaultDownloadFolder, isDirectory: true)
         var loadedSettingsStore: SettingsStore?
         do {
@@ -49,11 +49,20 @@ final class AppStore: ObservableObject {
         }
         self.settingsStore = loadedSettingsStore
         self.settings = initialSettings
-        self.perHostSettingsStore = try? PerHostSettingsStore(dataRoot: dataRoot)
-        self.hostPerformanceStore = try? HostPerformanceStore(dataRoot: dataRoot)
+        let metadataDatabase = try? MetadataDatabase.shared(rootURL: dataRoot)
+        self.perHostSettingsStore = metadataDatabase.flatMap {
+            try? PerHostSettingsStore(dataRoot: dataRoot, database: $0)
+        }
+        self.hostPerformanceStore = try? HostPerformanceStore(dataRoot: cacheRoot)
 
         do {
-            let store = try DownloadStore(rootURL: dataRoot)
+            guard let metadataDatabase else {
+                throw MetadataDatabaseError.loadFailed(
+                    dataRoot.appendingPathComponent("metadata.sqlite"),
+                    "无法创建共享元数据数据库"
+                )
+            }
+            let store = try DownloadStore(rootURL: dataRoot, database: metadataDatabase)
             self.store = store
             let environment = ProcessInfo.processInfo.environment
             let maxConcurrent = environment["CDM_MAX_CONCURRENT_DOWNLOADS"].flatMap(Int.init) ?? 3
@@ -82,8 +91,12 @@ final class AppStore: ObservableObject {
         }
 
         self.downloadList = DownloadListStore(service: service)
-        self.queueStore = try? QueueStore(dataRoot: dataRoot)
-        self.categoryStore = try? CategoryStore(dataRoot: dataRoot, defaultFolder: defaultFolder)
+        self.queueStore = metadataDatabase.flatMap {
+            try? QueueStore(dataRoot: dataRoot, database: $0)
+        }
+        self.categoryStore = metadataDatabase.flatMap {
+            try? CategoryStore(dataRoot: dataRoot, defaultFolder: defaultFolder, database: $0)
+        }
         self.downloadList.onRemovedIDs = { [weak self] ids in
             self?.removeMetadataReferences(for: ids)
         }
@@ -100,20 +113,6 @@ final class AppStore: ObservableObject {
         missingFileTask?.cancel()
         integrationServer?.stop()
         privateSocketServer?.stop()
-    }
-
-    private static func loadInitialSettings(
-        dataRoot: URL,
-        fallback: AppSettingsModel
-    ) -> AppSettingsModel {
-        let settingsURL = dataRoot
-            .appendingPathComponent("config", isDirectory: true)
-            .appendingPathComponent("appSettings.json")
-        guard let data = try? Data(contentsOf: settingsURL),
-              let settings = try? JSONDecoder().decode(AppSettingsModel.self, from: data) else {
-            return fallback
-        }
-        return settings
     }
 
     func boot() async {
@@ -138,16 +137,8 @@ final class AppStore: ObservableObject {
                 uniqueKeysWithValues: initialSnapshot.downloads.map { ($0.id, $0.status) }
             )
             downloadList.beginObserving()
-            await reloadQueues()
-            await reloadCategories()
-            await pruneMetadataReferences()
-            await reloadQueues()
-            await reloadCategories()
             await reloadPerHostSettings()
             await service.updatePerHostSettings(perHostSettings)
-            startQueueScheduleMonitor()
-            startQueueEventMonitor()
-            startDownloadEventMonitor()
             do {
                 if let settingsStore {
                     do {
@@ -176,6 +167,17 @@ final class AppStore: ObservableObject {
                         errorMessage = error.localizedDescription
                     }
                 }
+                await categoryStore?.updateDefaultFolder(
+                    URL(fileURLWithPath: settings.defaultDownloadFolder, isDirectory: true)
+                )
+                await reloadQueues()
+                await reloadCategories()
+                await pruneMetadataReferences()
+                await reloadQueues()
+                await reloadCategories()
+                startQueueScheduleMonitor()
+                startQueueEventMonitor()
+                startDownloadEventMonitor()
                 try startIntegration(service: service, settings: settings)
             } catch {
                 errorMessage = error.localizedDescription
@@ -784,8 +786,7 @@ final class AppStore: ObservableObject {
             server = nil
         }
 
-        let socketURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cooldm/config/native-messaging.sock")
+        let socketURL = AppPaths.nativeMessagingSocketURL()
         let socketServer = PrivateSocketServer(socketURL: socketURL) { message in
             do {
                 switch message.action {
