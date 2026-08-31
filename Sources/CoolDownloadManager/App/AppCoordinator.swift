@@ -488,7 +488,9 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     ) -> NSPanel {
         let panel = existing ?? UtilityPanel(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable, .resizable, .utilityWindow],
+            // Keep the transparent title bar inside the glass surface so the
+            // traffic-light controls do not float above the panel boundary.
+            styleMask: [.titled, .closable, .resizable, .utilityWindow, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
