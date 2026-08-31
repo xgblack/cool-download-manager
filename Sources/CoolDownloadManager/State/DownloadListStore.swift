@@ -602,6 +602,23 @@ final class DownloadListStore: ObservableObject {
         await reload()
     }
 
+    @discardableResult
+    func patchSource(
+        id: DownloadID,
+        link: String,
+        headers: [String: String]?
+    ) async throws -> DownloadSourcePatchResult {
+        guard let service else {
+            throw DownloadCoreError.cancelled
+        }
+        let result = try await service.patchSource(
+            id: id,
+            patch: DownloadSourcePatch(link: link, headers: headers)
+        )
+        await reload()
+        return result
+    }
+
     func removeSelected(removeFiles: Bool = false) {
         perform(ids: Array(selectedIDs)) { service, ids in
             try await service.remove(ids: ids, removeFiles: removeFiles)
@@ -708,7 +725,7 @@ final class DownloadListStore: ObservableObject {
         case .completed:
             return record.status == .completed
         case .failed:
-            return record.status == .failed
+            return record.status == .failed || record.status == .waitingForSourceRefresh
         case .paused:
             return record.status == .paused
         case .queue(let id):
@@ -723,11 +740,12 @@ final class DownloadListStore: ObservableObject {
         case .downloading: return 0
         case .preparing: return 1
         case .retrying: return 2
-        case .paused: return 3
-        case .failed: return 4
-        case .added: return 5
-        case .cancelled: return 6
-        case .completed: return 7
+        case .waitingForSourceRefresh: return 3
+        case .paused: return 4
+        case .failed: return 5
+        case .added: return 6
+        case .cancelled: return 7
+        case .completed: return 8
         }
     }
 }

@@ -26,6 +26,13 @@ struct BenchmarkConfiguration: Codable, Sendable {
     var globalBytesPerSecond: Int64 = 0
     var firstByteDelayMilliseconds = 0
     var failFirstDataRequests = 0
+    /// Optional local-fixture impairment for one exact Range request. The
+    /// production downloader never receives these values.
+    var slowRangeOffsetBytes: Int64?
+    var slowRangeEndBytes: Int64?
+    var slowRangePrefixBytes: Int64 = 0
+    var slowRangeBytesPerSecond: Int64 = 0
+    var slowRangePauseMilliseconds = 0
     var retryAttempts = 1
     var retryDelayMilliseconds = 1_000
     var timeoutSeconds = 300
@@ -45,6 +52,12 @@ struct BenchmarkConfiguration: Codable, Sendable {
     var fixedRunRootPath: String?
     /// Internal-only flag telling `runOnce` to resume records already on disk.
     var resumeExisting = false
+    /// Runs the benchmark-only Core Data mutation comparison instead of an
+    /// HTTP download matrix.
+    var persistenceBenchmark = false
+    var persistenceTaskCount = 4
+    var persistencePartCount = 64
+    var persistenceIterations = 100
 
     private enum CodingKeys: String, CodingKey {
         case sizeBytes
@@ -62,6 +75,11 @@ struct BenchmarkConfiguration: Codable, Sendable {
         case globalBytesPerSecond
         case firstByteDelayMilliseconds
         case failFirstDataRequests
+        case slowRangeOffsetBytes
+        case slowRangeEndBytes
+        case slowRangePrefixBytes
+        case slowRangeBytesPerSecond
+        case slowRangePauseMilliseconds
         case retryAttempts
         case retryDelayMilliseconds
         case timeoutSeconds
@@ -72,12 +90,15 @@ struct BenchmarkConfiguration: Codable, Sendable {
         case interruptionAfterMilliseconds
         case fixedRunRootPath
         case resumeExisting
+        case persistenceBenchmark
+        case persistenceTaskCount
+        case persistencePartCount
+        case persistenceIterations
     }
 
     init() {}
 
-    /// Reports are intentionally schema-versioned, but schema version 4 was
-    /// already used before optional benchmark dimensions were added. Decode
+    /// Schema-version 4 reports predate optional benchmark dimensions. Decode
     /// those fields with the same defaults used by a fresh invocation so old
     /// reports remain useful for longitudinal comparisons.
     init(from decoder: Decoder) throws {
@@ -125,6 +146,26 @@ struct BenchmarkConfiguration: Codable, Sendable {
             Int.self,
             forKey: .failFirstDataRequests
         ) ?? defaults.failFirstDataRequests
+        slowRangeOffsetBytes = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .slowRangeOffsetBytes
+        )
+        slowRangeEndBytes = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .slowRangeEndBytes
+        )
+        slowRangePrefixBytes = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .slowRangePrefixBytes
+        ) ?? defaults.slowRangePrefixBytes
+        slowRangeBytesPerSecond = try container.decodeIfPresent(
+            Int64.self,
+            forKey: .slowRangeBytesPerSecond
+        ) ?? defaults.slowRangeBytesPerSecond
+        slowRangePauseMilliseconds = try container.decodeIfPresent(
+            Int.self,
+            forKey: .slowRangePauseMilliseconds
+        ) ?? defaults.slowRangePauseMilliseconds
         retryAttempts = try container.decodeIfPresent(Int.self, forKey: .retryAttempts)
             ?? defaults.retryAttempts
         retryDelayMilliseconds = try container.decodeIfPresent(
@@ -145,6 +186,22 @@ struct BenchmarkConfiguration: Codable, Sendable {
         fixedRunRootPath = try container.decodeIfPresent(String.self, forKey: .fixedRunRootPath)
         resumeExisting = try container.decodeIfPresent(Bool.self, forKey: .resumeExisting)
             ?? defaults.resumeExisting
+        persistenceBenchmark = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .persistenceBenchmark
+        ) ?? defaults.persistenceBenchmark
+        persistenceTaskCount = try container.decodeIfPresent(
+            Int.self,
+            forKey: .persistenceTaskCount
+        ) ?? defaults.persistenceTaskCount
+        persistencePartCount = try container.decodeIfPresent(
+            Int.self,
+            forKey: .persistencePartCount
+        ) ?? defaults.persistencePartCount
+        persistenceIterations = try container.decodeIfPresent(
+            Int.self,
+            forKey: .persistenceIterations
+        ) ?? defaults.persistenceIterations
     }
 
     static func parse(arguments: [String]) throws -> Self {
@@ -240,6 +297,27 @@ struct BenchmarkConfiguration: Codable, Sendable {
                     throw BenchmarkCLIError.invalidValue(argument, raw)
                 }
                 configuration.failFirstDataRequests = value
+            case "--slow-range-offset-mib":
+                configuration.slowRangeOffsetBytes = try mibValue(nextValue(), option: argument)
+            case "--slow-range-end-mib":
+                configuration.slowRangeEndBytes = try mibValue(nextValue(), option: argument)
+            case "--slow-range-prefix-mib":
+                configuration.slowRangePrefixBytes = try nonNegativeMibValue(
+                    nextValue(),
+                    option: argument
+                )
+            case "--slow-range-mibps":
+                let raw = try nextValue()
+                guard let value = Double(raw), value > 0 else {
+                    throw BenchmarkCLIError.invalidValue(argument, raw)
+                }
+                configuration.slowRangeBytesPerSecond = Int64(value * 1024 * 1024)
+            case "--slow-range-pause-ms":
+                let raw = try nextValue()
+                guard let value = Int(raw), value >= 0 else {
+                    throw BenchmarkCLIError.invalidValue(argument, raw)
+                }
+                configuration.slowRangePauseMilliseconds = value
             case "--retry-attempts":
                 configuration.retryAttempts = try positiveInt(nextValue(), option: argument)
             case "--retry-delay-ms":
@@ -277,6 +355,14 @@ struct BenchmarkConfiguration: Codable, Sendable {
                     throw BenchmarkCLIError.invalidValue(argument, raw)
                 }
                 configuration.interruptionAfterMilliseconds = value
+            case "--persistence-benchmark":
+                configuration.persistenceBenchmark = true
+            case "--persistence-tasks":
+                configuration.persistenceTaskCount = try positiveInt(nextValue(), option: argument)
+            case "--persistence-parts":
+                configuration.persistencePartCount = try positiveInt(nextValue(), option: argument)
+            case "--persistence-iterations":
+                configuration.persistenceIterations = try positiveInt(nextValue(), option: argument)
             default:
                 throw BenchmarkCLIError.unknownOption(argument)
             }
@@ -299,9 +385,41 @@ struct BenchmarkConfiguration: Codable, Sendable {
         if configuration.sourceURL != nil,
            configuration.perConnectionBytesPerSecond > 0
             || configuration.firstByteDelayMilliseconds > 0
-            || configuration.failFirstDataRequests > 0 {
+            || configuration.failFirstDataRequests > 0
+            || configuration.slowRangeOffsetBytes != nil {
             throw BenchmarkCLIError.invalidCombination(
-                "--per-connection-mibps, --first-byte-ms and --fail-first-data-requests are local-fixture options"
+                "--per-connection-mibps, --first-byte-ms, --fail-first-data-requests and slow Range options are local-fixture options"
+            )
+        }
+        if let offset = configuration.slowRangeOffsetBytes {
+            guard offset < configuration.sizeBytes,
+                  configuration.slowRangeEndBytes.map({ $0 >= offset && $0 < configuration.sizeBytes }) ?? true,
+                  configuration.slowRangePrefixBytes <= configuration.sizeBytes - offset,
+                  configuration.slowRangeBytesPerSecond > 0
+                    || configuration.slowRangePauseMilliseconds > 0 else {
+                throw BenchmarkCLIError.invalidCombination(
+                    "slow Range options must identify a valid range and set --slow-range-mibps or --slow-range-pause-ms"
+                )
+            }
+        } else if configuration.slowRangeEndBytes != nil
+                    || configuration.slowRangePrefixBytes > 0
+                    || configuration.slowRangeBytesPerSecond > 0
+                    || configuration.slowRangePauseMilliseconds > 0 {
+            throw BenchmarkCLIError.invalidCombination(
+                "slow Range detail options require --slow-range-offset-mib"
+            )
+        }
+        guard configuration.persistenceTaskCount > 0,
+              configuration.persistencePartCount > 0,
+              configuration.persistenceIterations > 0 else {
+            throw BenchmarkCLIError.invalidCombination(
+                "persistence benchmark counts must be positive"
+            )
+        }
+        if configuration.persistenceBenchmark,
+           configuration.sourceURL != nil || configuration.interruptionAfterMilliseconds != nil {
+            throw BenchmarkCLIError.invalidCombination(
+                "--persistence-benchmark is a local standalone scenario"
             )
         }
         if configuration.interruptionAfterMilliseconds != nil {
@@ -362,6 +480,17 @@ struct BenchmarkConfiguration: Codable, Sendable {
         )
     }
 
+    func slowRangeConfiguration() -> RangeFixtureServer.SlowRangeConfiguration? {
+        guard let start = slowRangeOffsetBytes else { return nil }
+        return RangeFixtureServer.SlowRangeConfiguration(
+            start: start,
+            end: slowRangeEndBytes,
+            prefixBytes: slowRangePrefixBytes,
+            bytesPerSecond: slowRangeBytesPerSecond,
+            pauseMilliseconds: slowRangePauseMilliseconds
+        )
+    }
+
     static let usage = """
     Usage: swift run CoolDownloadBenchmark [options]
 
@@ -379,6 +508,11 @@ struct BenchmarkConfiguration: Codable, Sendable {
       --global-mibps N             Aggregate production speed cap; 0 is unlimited
       --first-byte-ms N            Delay before response headers (default: 0)
       --fail-first-data-requests N Deterministically fail the first N data requests (default: 0)
+      --slow-range-offset-mib N    Slow the exact local Range beginning at this offset
+      --slow-range-end-mib N       Optional exact local Range end offset
+      --slow-range-prefix-mib N    Bytes sent normally before the slow tail
+      --slow-range-mibps N         Slow-tail per-request rate
+      --slow-range-pause-ms N      One pause when the slow tail begins
       --retry-attempts N           Maximum attempts per task (default: 1)
       --retry-delay-ms N            Retry backoff in milliseconds (default: 1000)
       --proxy-url URL               HTTP(S) proxy for --url; credentials stay local
@@ -387,6 +521,10 @@ struct BenchmarkConfiguration: Codable, Sendable {
       --timeout-seconds N          Per-run timeout (default: 300)
       --output PATH                Also write the JSON report to PATH
       --interrupt-after-ms N       Kill a local child and verify process resume
+      --persistence-benchmark      Compare incremental and full-rebuild metadata checkpoints
+      --persistence-tasks N        Tasks in the persistence scenario (default: 4)
+      --persistence-parts N        Parts per task in the persistence scenario (default: 64)
+      --persistence-iterations N   Progress checkpoints in the persistence scenario (default: 100)
       --help                       Show this help
 
     Progress is written to stderr. The final machine-readable report is written
@@ -402,6 +540,17 @@ struct BenchmarkConfiguration: Codable, Sendable {
 
     private static func mibValue(_ raw: String, option: String) throws -> Int64 {
         guard let value = Double(raw), value > 0 else {
+            throw BenchmarkCLIError.invalidValue(option, raw)
+        }
+        let bytes = value * 1024 * 1024
+        guard bytes <= Double(Int64.max) else {
+            throw BenchmarkCLIError.invalidValue(option, raw)
+        }
+        return Int64(bytes)
+    }
+
+    private static func nonNegativeMibValue(_ raw: String, option: String) throws -> Int64 {
+        guard let value = Double(raw), value >= 0 else {
             throw BenchmarkCLIError.invalidValue(option, raw)
         }
         let bytes = value * 1024 * 1024

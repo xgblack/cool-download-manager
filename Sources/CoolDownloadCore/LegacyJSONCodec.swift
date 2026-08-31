@@ -308,7 +308,7 @@ public enum LegacyJSONCodec {
     private static func legacyStatus(_ status: DownloadStatus) -> String {
         switch status {
         case .completed: return "Completed"
-        case .paused: return "Paused"
+        case .paused, .waitingForSourceRefresh: return "Paused"
         case .downloading, .preparing: return "Downloading"
         case .failed: return "Error"
         case .cancelled: return "Error"

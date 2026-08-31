@@ -794,6 +794,8 @@ private struct DownloadTableRow: View {
                 Button("暂停", systemImage: "pause.fill", action: onPause)
             case .failed, .cancelled:
                 Button("重试", systemImage: "arrow.clockwise", action: onRetry)
+            case .waitingForSourceRefresh:
+                Button("更新来源", systemImage: "link.badge.plus", action: onOpenDetail)
             case .completed:
                 Button("重新下载", systemImage: "arrow.clockwise", action: onRedownload)
             default:
@@ -827,6 +829,7 @@ private struct DownloadTableRow: View {
         case .downloading: return "下载中"
         case .paused: return "已暂停"
         case .retrying: return "重试中"
+        case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
         case .failed: return "失败"
         case .cancelled: return "已取消"
@@ -840,7 +843,7 @@ private struct DownloadTableRow: View {
 
     private var canShowProgress: Bool {
         switch record.status {
-        case .preparing, .downloading, .paused, .retrying:
+        case .preparing, .downloading, .paused, .retrying, .waitingForSourceRefresh:
             return true
         case .added, .completed, .failed, .cancelled:
             return false
@@ -851,6 +854,7 @@ private struct DownloadTableRow: View {
         switch record.status {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
+        case .waitingForSourceRefresh: return "link.badge.plus"
         case .paused: return "pause.fill"
         case .downloading, .preparing, .retrying: return "arrow.down"
         case .cancelled: return "xmark.circle.fill"
@@ -884,6 +888,7 @@ private struct DownloadTableRow: View {
         switch record.status {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
+        case .waitingForSourceRefresh: return "link.badge.plus"
         case .paused: return "pause.circle.fill"
         case .downloading, .preparing, .retrying: return "arrow.down.circle.fill"
         case .cancelled: return "xmark.circle.fill"
@@ -895,6 +900,7 @@ private struct DownloadTableRow: View {
         switch record.status {
         case .completed: return .green
         case .failed: return .red
+        case .waitingForSourceRefresh: return .yellow
         case .paused: return .orange
         case .retrying: return .yellow
         default: return .accentColor

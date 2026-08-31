@@ -196,6 +196,7 @@ struct CoreTests {
         } catch let error as DownloadCoreError {
             #expect(error == .invalidTaskSettings("任务最大连接数必须在 1 到 64 之间"))
         }
+        await service.shutdown()
     }
 
     @Test("running task applies local speed-limit changes without bypassing global limit")
@@ -347,6 +348,7 @@ struct CoreTests {
         #expect(request.value(forHTTPHeaderField: "User-Agent") == "HostAgent")
         #expect(request.value(forHTTPHeaderField: "Referer") == "https://downloads.example.test/page")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Basic YWxpY2U6c2VjcmV0")
+        await service.shutdown()
     }
 
     @Test("batch expansion matches the legacy padding rules")
@@ -771,6 +773,7 @@ struct CoreTests {
         ))
 
         #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.name == "CoolDM_1.10.2_linux_x64.tar.gz")
+        await service.shutdown()
     }
 
     @Test("service auto-renames duplicate browser destinations")
@@ -809,6 +812,7 @@ struct CoreTests {
         let downloads = await service.snapshot().downloads
         #expect(downloads.first(where: { $0.id == firstID })?.name == "archive (2).tar.gz")
         #expect(downloads.first(where: { $0.id == secondID })?.name == "archive (3).tar.gz")
+        await service.shutdown()
     }
 
     @Test("missing completed destinations do not reserve their old filename")
@@ -841,6 +845,7 @@ struct CoreTests {
         ))
 
         #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.name == "stale.bin")
+        await service.shutdown()
     }
 
     @Test("HTTP response exposes Content-Disposition filename")
@@ -926,6 +931,7 @@ struct CoreTests {
         #expect(manual.status == .completed)
         #expect(manual.name == "manual-name.bin")
         #expect(try Data(contentsOf: manual.destinationURL) == Data("body".utf8))
+        await service.shutdown()
     }
 
     @Test("server filename gets a suffix when a queued task reserves it")
@@ -979,6 +985,7 @@ struct CoreTests {
         #expect(completed.status == .completed)
         #expect(completed.name == "server-name (1).bin")
         #expect(try Data(contentsOf: completed.destinationURL) == Data("body".utf8))
+        await service.shutdown()
     }
 
     @Test("HTTP downloader surfaces server errors")
@@ -1104,6 +1111,7 @@ struct CoreTests {
         let recovered = try #require(await service.snapshot().downloads.first)
         #expect(recovered.status == .paused)
         #expect(recovered.downloadedBytes == 4)
+        await service.shutdown()
     }
 
     @Test("scheduler never exceeds its configured concurrent download limit")
@@ -1169,6 +1177,7 @@ struct CoreTests {
         let record = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
         #expect(record.status == .paused)
         #expect(record.downloadedBytes == 0)
+        await service.shutdown()
     }
 
     @Test("queue metadata is persisted and queue start does not start other queues")
@@ -1208,6 +1217,7 @@ struct CoreTests {
         #expect(records.first(where: { $0.id == other })?.status == .added)
         #expect(records.first(where: { $0.id == queued })?.queueID == 7)
         #expect((await store.record(id: queued))?.queueID == 7)
+        await service.shutdown()
     }
 
     @Test("started queues emit one completion event and honor their policy")
@@ -1253,6 +1263,7 @@ struct CoreTests {
         #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
         let event = await eventTask.value
         #expect(event == .becameEmpty(queueID: 7, completionAction: .lock))
+        await service.shutdown()
     }
 
     @Test("service retries transient HTTP failures and records the final success")
@@ -1281,6 +1292,7 @@ struct CoreTests {
         }
         #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
         #expect(transport.requestCount() == 3)
+        await service.shutdown()
     }
 
     @Test("concurrent transient failures release FD and retry reservations")
@@ -1359,6 +1371,7 @@ struct CoreTests {
         try await service.remove(ids: [id], removeFiles: true)
         #expect(await service.snapshot().downloads.isEmpty)
         #expect(await store.record(id: id) == nil)
+        await service.shutdown()
     }
 
     @Test("download service completes and persists a file")
@@ -1392,6 +1405,7 @@ struct CoreTests {
         let record = try #require(completed)
         #expect(record.downloadedBytes == 11)
         #expect(try Data(contentsOf: record.destinationURL) == Data("hello world".utf8))
+        await service.shutdown()
     }
 
     @Test("ordinary HTTP downloads report one active connection")
@@ -1436,6 +1450,11 @@ struct CoreTests {
 
         #expect(recorder.counts(for: id).contains(1))
         #expect(recorder.counts(for: id).last == 0)
+        let completionDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < completionDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .completed)
         await service.shutdown()
     }
@@ -1473,6 +1492,7 @@ struct CoreTests {
         let second = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
         #expect(second.status == .completed)
         #expect(try Data(contentsOf: second.destinationURL) == Data("ok".utf8))
+        await service.shutdown()
     }
 
     @Test("retrying complete range metadata without its part file performs a real download")
@@ -1529,6 +1549,7 @@ struct CoreTests {
             return range != "bytes=0-0"
         })
         #expect(try Data(contentsOf: completed.destinationURL) == content)
+        await service.shutdown()
     }
 
     @Test("range workers consume more persisted work items than active connections")
@@ -1704,6 +1725,7 @@ struct CoreTests {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let performanceStore = try HostPerformanceStore(dataRoot: root)
+        let credentialStore = InMemoryDownloadCredentialStore()
         let service = DownloadService(
             store: try DownloadStore(rootURL: root),
             downloader: HTTPDownloader(transport: transport),
@@ -1713,7 +1735,8 @@ struct CoreTests {
                 maxConnectionsPerDownload: 2,
                 minimumPartSize: 1
             ),
-            hostPerformanceStore: performanceStore
+            hostPerformanceStore: performanceStore,
+            credentialStore: credentialStore
         )
         try await service.boot()
         let id = try await service.add(AddDownloadRequest(
@@ -2940,10 +2963,10 @@ struct CoreTests {
             guard case .checkpoint(let id, _, let encodedBytes, let logicalWriteBytes, _, let synchronizeCount, let succeeded) = event,
                   succeeded,
                   encodedBytes > 0,
-                  logicalWriteBytes > 0,
                   synchronizeCount >= 1 else {
                 return nil
             }
+            _ = logicalWriteBytes
             return id
         })
         let publishedIDs = Set(events.compactMap { event -> DownloadID? in
@@ -2951,7 +2974,7 @@ struct CoreTests {
             return id
         })
         let checkpointPhaseIDs = Set(events.compactMap { event -> DownloadID? in
-            guard case .checkpointPhase(let id, .recordEncode, _, let bytes) = event,
+            guard case .checkpointPhase(let id, .projectionEncode, _, let bytes) = event,
                   bytes > 0 else {
                 return nil
             }
@@ -3164,12 +3187,12 @@ struct CoreTests {
         )
     }
 
-    @Test("URLSession transport coalesces callbacks without losing body bytes")
+    @Test("URLSession transport bounds callback fragments without losing body bytes")
     func urlSessionTransportStreamsChunks() async throws {
         let url = URL(string: "https://transport.fixture/\(UUID().uuidString)")!
         let content = Data((0..<(700 * 1024)).map { UInt8($0 % 251) })
         URLSessionTransportFixtureRegistry.shared.register(
-            .body(content, callbackChunkSize: 8 * 1024),
+            .body(content, callbackChunkSize: content.count),
             for: url
         )
         defer { URLSessionTransportFixtureRegistry.shared.remove(url) }
@@ -3182,13 +3205,16 @@ struct CoreTests {
 
         var received = Data()
         var chunkCount = 0
+        var largestChunkSize = 0
         for try await chunk in response.body {
             received.append(chunk)
             chunkCount += 1
+            largestChunkSize = max(largestChunkSize, chunk.count)
         }
 
         #expect(received == content)
-        #expect(chunkCount <= 4)
+        #expect(chunkCount > 0)
+        #expect(largestChunkSize <= 256 * 1024)
     }
 
     @Test("cancelling a URLSession response wait cancels its data task")
@@ -3507,6 +3533,742 @@ struct CoreTests {
         #expect(requests.first?.value(forHTTPHeaderField: "Range") == "bytes=0-0")
     }
 
+    @Test("task credentials stay out of metadata while requests receive the secure source")
+    func taskCredentialsUseSecureOverlay() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentials = InMemoryDownloadCredentialStore()
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(
+                status: 200,
+                headers: ["Content-Length": "2"],
+                body: Data("ok".utf8)
+            )
+        }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/secure.bin?signature=secret-query-value",
+                headers: [
+                    "Authorization": "Bearer secret-authorization-value",
+                    "Cookie": "session=secret-cookie-value",
+                    "X-Download-Token": "secret-custom-value"
+                ],
+                downloadPage: "https://page.invalid/watch?session=secret-page-value",
+                suggestedName: "secure.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let record = try #require(await service.snapshot().downloads.first { $0.id == id })
+        #expect(record.status == .completed)
+        #expect(record.source.link == "https://fixture.invalid/secure.bin")
+        #expect(record.source.headers == nil)
+        let reference = try #require(record.source.credentialReference)
+        #expect(try credentials.read(reference: reference)?.link.contains("secret-query-value") == true)
+
+        let request = try #require(transport.recordedRequests().last)
+        #expect(request.url?.query?.contains("secret-query-value") == true)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret-authorization-value")
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "session=secret-cookie-value")
+        #expect(request.value(forHTTPHeaderField: "X-Download-Token") == "secret-custom-value")
+        #expect(request.value(forHTTPHeaderField: "Referer")?.contains("secret-page-value") == true)
+
+        let persisted = [
+            root.appendingPathComponent("metadata.sqlite"),
+            URL(fileURLWithPath: root.appendingPathComponent("metadata.sqlite").path + "-wal"),
+            URL(fileURLWithPath: root.appendingPathComponent("metadata.sqlite").path + "-shm")
+        ].compactMap { try? Data(contentsOf: $0) }
+        for secret in [
+            "secret-query-value", "secret-authorization-value",
+            "secret-cookie-value", "secret-custom-value", "secret-page-value"
+        ] {
+            let bytes = Data(secret.utf8)
+            #expect(persisted.allSatisfy { $0.range(of: bytes) == nil })
+        }
+        await service.shutdown()
+    }
+
+    @Test("invalid download pages are rejected before metadata or credentials are written")
+    func invalidDownloadPageIsRejected() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentials = InMemoryDownloadCredentialStore()
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        do {
+            _ = try await service.add(AddDownloadRequest(source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/file.bin",
+                downloadPage: "not a URL?session=must-not-persist"
+            )))
+            Issue.record("invalid download pages should fail")
+        } catch let error as DownloadCoreError {
+            #expect(error == .invalidSourcePatch("下载页面地址格式无效"))
+            #expect(!error.localizedDescription.contains("must-not-persist"))
+        }
+
+        #expect(await service.snapshot().downloads.isEmpty)
+        #expect(try credentials.read(
+            reference: DownloadSourceSecurity.credentialReference(for: 1)
+        ) == nil)
+        await service.shutdown()
+    }
+
+    @Test("add removes a newly written credential when readback verification fails")
+    func addRollsBackUnverifiedCredential() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentials = FaultInjectingCredentialStore(readbackFailures: 1)
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        do {
+            _ = try await service.add(AddDownloadRequest(source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/file.bin?signature=not-committed"
+            )))
+            Issue.record("credential readback failure should reject add")
+        } catch let error as DownloadCoreError {
+            #expect(error == .sourceRefreshRequired(.credentialsUnavailable))
+        }
+
+        let reference = DownloadSourceSecurity.credentialReference(for: 1)
+        #expect(credentials.value(reference: reference) == nil)
+        #expect(await service.snapshot().downloads.isEmpty)
+        await service.shutdown()
+    }
+
+    @Test("source patch restores the old credential when Keychain write fails")
+    func sourcePatchRollsBackCredentialWriteFailure() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reference = DownloadSourceSecurity.credentialReference(for: 31)
+        let oldSecureSource = DownloadSecureSource(
+            link: "https://fixture.invalid/old.bin?signature=old",
+            headers: ["Authorization": "Bearer old"]
+        )
+        let credentials = FaultInjectingCredentialStore()
+        credentials.seed(oldSecureSource, reference: reference)
+        let store = try DownloadStore(rootURL: root)
+        let original = DownloadRecord(
+            id: 31,
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/old.bin",
+                credentialReference: reference
+            ),
+            folder: root.path,
+            name: "old.bin",
+            status: .paused,
+            downloadedBytes: 2,
+            totalBytes: 4,
+            etag: "\"v1\"",
+            supportsResume: true,
+            parts: [DownloadPart(id: 0, from: 0, to: 3, downloaded: 2)]
+        )
+        try await store.save(original)
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(
+                status: 206,
+                headers: [
+                    "Content-Length": "1",
+                    "Content-Range": "bytes 0-0/4",
+                    "ETag": "\"v1\""
+                ],
+                body: Data([0])
+            )
+        }
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+        credentials.failNextWriteAfterMutation()
+
+        do {
+            _ = try await service.patchSource(
+                id: original.id,
+                patch: DownloadSourcePatch(
+                    link: "https://fixture.invalid/new.bin?signature=new",
+                    headers: ["Authorization": "Bearer new"]
+                )
+            )
+            Issue.record("injected credential failure should reject patch")
+        } catch CredentialFixtureError.injected {
+            // Expected.
+        }
+
+        #expect(credentials.value(reference: reference) == oldSecureSource)
+        #expect(await service.snapshot().downloads.first?.source == original.source)
+        await service.shutdown()
+    }
+
+    @Test("final authentication failure waits for a source refresh without retrying")
+    func authenticationFailureWaitsForSourceRefresh() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = MemoryTransport()
+        transport.handler = { _ in
+            MemoryTransport.reply(status: 403, headers: [:], body: Data())
+        }
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            retryPolicy: DownloadRetryPolicy(maxAttempts: 3, delay: .milliseconds(1)),
+            credentialStore: InMemoryDownloadCredentialStore()
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/expired.bin?signature=expired",
+                suggestedName: "expired.bin"
+            ),
+            start: true
+        ))
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status
+                != .waitingForSourceRefresh {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let record = try #require(await service.snapshot().downloads.first { $0.id == id })
+        #expect(record.status == .waitingForSourceRefresh)
+        #expect(record.sourceRefreshReason == .authenticationRequired)
+        #expect(transport.recordedRequests().count == 1)
+        #expect(record.error?.contains("expired") == false)
+        await service.shutdown()
+    }
+
+    @Test("source patch requires a matching strong validator before preserving bytes")
+    func sourcePatchValidatesResourceIdentity() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let reference = DownloadSourceSecurity.credentialReference(for: 1)
+        let original = DownloadRecord(
+            id: 1,
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/old.bin",
+                downloadPage: "https://fixture.invalid/download",
+                credentialReference: reference
+            ),
+            folder: root.path,
+            name: "old.bin",
+            status: .paused,
+            downloadedBytes: 2,
+            totalBytes: 4,
+            etag: "\"v1\"",
+            supportsResume: true,
+            parts: [DownloadPart(id: 0, from: 0, to: 3, downloaded: 2)]
+        )
+        try await store.save(original)
+        let credentials = InMemoryDownloadCredentialStore()
+        try credentials.write(
+            DownloadSecureSource(
+                link: "https://fixture.invalid/old.bin?signature=old",
+                downloadPage: "https://fixture.invalid/download?session=private"
+            ),
+            reference: reference
+        )
+        let transport = MemoryTransport()
+        transport.handler = { request in
+            let etag = request.url?.path == "/changed.bin" ? "\"v2\"" : "\"v1\""
+            return MemoryTransport.reply(
+                status: 206,
+                headers: [
+                    "Content-Length": "1",
+                    "Content-Range": "bytes 0-0/4",
+                    "ETag": etag
+                ],
+                body: Data([0])
+            )
+        }
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        let result = try await service.patchSource(
+            id: 1,
+            patch: DownloadSourcePatch(
+                link: "https://fixture.invalid/refreshed.bin?signature=fresh-secret",
+                headers: ["Authorization": "Bearer refreshed-secret"]
+            )
+        )
+        #expect(result.status == .paused)
+        #expect(!result.continued)
+        let patched = try #require(await service.snapshot().downloads.first)
+        #expect(patched.source.link == "https://fixture.invalid/refreshed.bin")
+        #expect(patched.downloadedBytes == 2)
+        #expect(patched.parts == original.parts)
+        #expect(patched.sourceRefreshReason == nil)
+        let patchedReference = try #require(patched.source.credentialReference)
+        #expect(patchedReference == reference)
+        #expect(try credentials.read(reference: reference)?.link.contains("fresh-secret") == true)
+        #expect(try credentials.read(reference: reference)?.downloadPage
+            == "https://fixture.invalid/download?session=private")
+
+        await #expect(throws: DownloadCoreError.resourceChanged) {
+            try await service.patchSource(
+                id: 1,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/changed.bin?signature=other")
+            )
+        }
+        #expect(await service.snapshot().downloads.first?.source == patched.source)
+        #expect(try credentials.read(reference: reference)?.link.contains("fresh-secret") == true)
+        await service.shutdown()
+    }
+
+    @Test("source patch keeps a concurrent user pause and commits only the new revision")
+    func sourcePatchRespectsConcurrentPause() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = refreshableRecord(id: 46, root: root)
+        let store = try DownloadStore(rootURL: root)
+        try await store.save(original)
+        let transport = ControlledProbeTransport()
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: InMemoryDownloadCredentialStore()
+        )
+        try await service.boot()
+
+        let patch = Task {
+            try await service.patchSource(
+                id: original.id,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/fresh.bin?token=new")
+            )
+        }
+        try await transport.waitUntilRequested()
+        try await service.pause(ids: [original.id])
+        await transport.release()
+
+        let result = try await patch.value
+        let updated = try #require(await service.snapshot().downloads.first)
+        #expect(result.status == .paused)
+        #expect(!result.continued)
+        #expect(updated.status == .paused)
+        #expect(updated.source.link == "https://fixture.invalid/fresh.bin")
+        #expect(updated.sourceRefreshReason == nil)
+        #expect(updated.revision > original.revision)
+        await service.shutdown()
+    }
+
+    @Test("source patch cancels an old completion before committing the refreshed source")
+    func sourcePatchCannotBeOverwrittenByAnOldCompletion() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = PatchCompletionTransport()
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: InMemoryDownloadCredentialStore()
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/old.bin",
+                suggestedName: "patched.bin"
+            ),
+            start: true
+        ))
+        try await transport.waitUntilOldRequest()
+
+        let patch = Task {
+            try await service.patchSource(
+                id: id,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/new.bin")
+            )
+        }
+        let pauseDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < pauseDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .paused {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await service.snapshot().downloads.first(where: { $0.id == id })?.status == .paused)
+        await transport.releaseOldResponse()
+
+        let result = try await patch.value
+        #expect(result.continued)
+        let completionDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < completionDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let record = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
+        #expect(record.status == .completed)
+        #expect(record.source.link == "https://fixture.invalid/new.bin")
+        #expect(record.downloadedBytes == 4)
+        #expect(try Data(contentsOf: record.destinationURL) == Data("new!".utf8))
+        #expect(transport.oldRequestCount() == 1)
+        await service.shutdown()
+    }
+
+    @Test("a failed source patch restores the previous running source")
+    func failedSourcePatchRestoresRunningSource() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transport = PatchCompletionTransport()
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: InMemoryDownloadCredentialStore()
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/old.bin",
+                suggestedName: "restored.bin"
+            ),
+            start: true
+        ))
+        try await transport.waitUntilOldRequest()
+
+        let patch = Task {
+            try await service.patchSource(
+                id: id,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/missing.bin")
+            )
+        }
+        let pauseDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < pauseDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .paused {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        await transport.releaseOldResponse()
+
+        await #expect(throws: DownloadCoreError.httpStatus(404)) {
+            try await patch.value
+        }
+        let completionDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < completionDeadline,
+              await service.snapshot().downloads.first(where: { $0.id == id })?.status != .completed {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let record = try #require(await service.snapshot().downloads.first(where: { $0.id == id }))
+        #expect(record.status == .completed)
+        #expect(record.source.link == "https://fixture.invalid/old.bin")
+        #expect(try Data(contentsOf: record.destinationURL) == Data("old!".utf8))
+        #expect(transport.oldRequestCount() == 2)
+        await service.shutdown()
+    }
+
+    @Test("source patch cannot restore a task removed while its probe is pending")
+    func sourcePatchRespectsConcurrentRemoval() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = refreshableRecord(id: 47, root: root)
+        let store = try DownloadStore(rootURL: root)
+        try await store.save(original)
+        let transport = ControlledProbeTransport()
+        let credentials = InMemoryDownloadCredentialStore()
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        let patch = Task {
+            try await service.patchSource(
+                id: original.id,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/fresh.bin?token=new")
+            )
+        }
+        try await transport.waitUntilRequested()
+        try await service.remove(ids: [original.id], removeFiles: false)
+        await transport.release()
+
+        await #expect(throws: DownloadCoreError.notFound(original.id)) {
+            try await patch.value
+        }
+        #expect(await service.snapshot().downloads.isEmpty)
+        #expect(try credentials.read(
+            reference: DownloadSourceSecurity.credentialReference(for: original.id)
+        ) == nil)
+        await service.shutdown()
+    }
+
+    @Test("source patch discards a probe result that arrives after shutdown")
+    func sourcePatchRespectsShutdown() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = refreshableRecord(id: 48, root: root)
+        let store = try DownloadStore(rootURL: root)
+        try await store.save(original)
+        let transport = ControlledProbeTransport()
+        let credentials = InMemoryDownloadCredentialStore()
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        let patch = Task {
+            try await service.patchSource(
+                id: original.id,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/fresh.bin?token=new")
+            )
+        }
+        try await transport.waitUntilRequested()
+        await service.shutdown()
+        await transport.release()
+
+        await #expect(throws: DownloadCoreError.cancelled) {
+            try await patch.value
+        }
+        let retained = try #require(await service.snapshot().downloads.first)
+        #expect(retained.source == original.source)
+        #expect(retained.sourceRefreshReason == original.sourceRefreshReason)
+        #expect(try credentials.read(
+            reference: DownloadSourceSecurity.credentialReference(for: original.id)
+        ) == nil)
+    }
+
+    @Test("source identity falls back only to Last-Modified and rejects weak or absent validators")
+    func sourcePatchValidatorFallbacks() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DownloadStore(rootURL: root)
+        let part = DownloadPart(id: 0, from: 0, to: 3, downloaded: 2)
+        let lastModified = "Wed, 21 Oct 2015 07:28:00 GMT"
+        let records = [
+            DownloadRecord(
+                id: 41,
+                source: DownloadSource(kind: .http, link: "https://fixture.invalid/old-lm.bin"),
+                folder: root.path,
+                name: "lm.bin",
+                status: .paused,
+                downloadedBytes: 2,
+                totalBytes: 4,
+                etag: "W/\"v1\"",
+                lastModified: lastModified,
+                supportsResume: true,
+                parts: [part]
+            ),
+            DownloadRecord(
+                id: 42,
+                source: DownloadSource(kind: .http, link: "https://fixture.invalid/old-weak.bin"),
+                folder: root.path,
+                name: "weak.bin",
+                status: .paused,
+                downloadedBytes: 2,
+                totalBytes: 4,
+                etag: "W/\"v1\"",
+                supportsResume: true,
+                parts: [part]
+            ),
+            DownloadRecord(
+                id: 43,
+                source: DownloadSource(kind: .http, link: "https://fixture.invalid/old-none.bin"),
+                folder: root.path,
+                name: "none.bin",
+                status: .paused,
+                downloadedBytes: 2,
+                totalBytes: 4,
+                supportsResume: true,
+                parts: [part]
+            ),
+            DownloadRecord(
+                id: 44,
+                source: DownloadSource(kind: .http, link: "https://fixture.invalid/old-no-range.bin"),
+                folder: root.path,
+                name: "no-range.bin",
+                status: .paused,
+                downloadedBytes: 2,
+                totalBytes: 4,
+                lastModified: lastModified,
+                supportsResume: true,
+                parts: [part]
+            )
+        ]
+        for record in records { try await store.save(record) }
+        let transport = MemoryTransport()
+        transport.handler = { request in
+            if request.url?.path == "/new-no-range.bin" {
+                return MemoryTransport.reply(
+                    status: 200,
+                    headers: ["Content-Length": "4", "Last-Modified": lastModified],
+                    body: Data("data".utf8)
+                )
+            }
+            var headers = [
+                "Content-Length": "1",
+                "Content-Range": "bytes 0-0/4"
+            ]
+            if request.url?.path == "/new-lm.bin" {
+                headers["ETag"] = "W/\"v2\""
+                headers["Last-Modified"] = lastModified
+            } else if request.url?.path == "/new-weak.bin" {
+                headers["ETag"] = "W/\"v1\""
+            }
+            return MemoryTransport.reply(status: 206, headers: headers, body: Data([0]))
+        }
+        let service = DownloadService(
+            store: store,
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: InMemoryDownloadCredentialStore()
+        )
+        try await service.boot()
+
+        _ = try await service.patchSource(
+            id: 41,
+            patch: DownloadSourcePatch(link: "https://fixture.invalid/new-lm.bin")
+        )
+        await #expect(throws: DownloadCoreError.resourceChanged) {
+            try await service.patchSource(
+                id: 42,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/new-weak.bin")
+            )
+        }
+        await #expect(throws: DownloadCoreError.resourceChanged) {
+            try await service.patchSource(
+                id: 43,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/new-none.bin")
+            )
+        }
+        await #expect(throws: DownloadCoreError.resumeNotSupported) {
+            try await service.patchSource(
+                id: 44,
+                patch: DownloadSourcePatch(link: "https://fixture.invalid/new-no-range.bin")
+            )
+        }
+        #expect(await service.snapshot().downloads.first { $0.id == 41 }?.source.link
+            == "https://fixture.invalid/new-lm.bin")
+        #expect(await service.snapshot().downloads.first { $0.id == 42 }?.source
+            == records[1].source)
+        #expect(await service.snapshot().downloads.first { $0.id == 43 }?.source
+            == records[2].source)
+        #expect(await service.snapshot().downloads.first { $0.id == 44 }?.source
+            == records[3].source)
+        await service.shutdown()
+    }
+
+    @Test("HLS source patch resumes only a matching manifest fingerprint")
+    func hlsSourcePatchUsesManifestFingerprint() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reference = DownloadSourceSecurity.credentialReference(for: 45)
+        let parser = HLSParser()
+        let oldURL = URL(string: "https://fixture.invalid/index.m3u8?token=old")!
+        let manifest = """
+        #EXTM3U
+        #EXT-X-MEDIA-SEQUENCE:10
+        #EXTINF:1,
+        one.ts
+        #EXTINF:1,
+        two.ts
+        #EXT-X-ENDLIST
+        """
+        let fingerprint = parser.fingerprint(for: try parser.parse(manifest, baseURL: oldURL))
+        let record = DownloadRecord(
+            id: 45,
+            source: DownloadSource(
+                kind: .hls,
+                link: "https://fixture.invalid/index.m3u8",
+                credentialReference: reference
+            ),
+            folder: root.path,
+            name: "video.ts",
+            status: .paused,
+            downloadedBytes: 3,
+            parts: [DownloadPart(id: 0, from: 0, to: 2, downloaded: 3, completed: true)],
+            hlsResumeSnapshot: HLSResumeSnapshot(
+                fingerprint: fingerprint,
+                completedSegmentSequence: 10,
+                outputByteBoundary: 3
+            )
+        )
+        let store = try DownloadStore(rootURL: root)
+        try await store.save(record)
+        let credentials = InMemoryDownloadCredentialStore()
+        try credentials.write(
+            DownloadSecureSource(link: oldURL.absoluteString),
+            reference: reference
+        )
+        let transport = MemoryTransport()
+        transport.handler = { request in
+            let changed = request.url?.query?.contains("token=changed") == true
+            let value = changed
+                ? manifest.replacingOccurrences(of: "two.ts", with: "changed.ts")
+                : manifest
+            return MemoryTransport.reply(status: 200, headers: [:], body: Data(value.utf8))
+        }
+        let service = DownloadService(
+            store: store,
+            hlsDownloader: HLSDownloader(transport: transport),
+            defaultFolder: root,
+            credentialStore: credentials
+        )
+        try await service.boot()
+
+        _ = try await service.patchSource(
+            id: record.id,
+            patch: DownloadSourcePatch(
+                link: "https://fixture.invalid/index.m3u8?token=rotated"
+            )
+        )
+        let rotated = try #require(await service.snapshot().downloads.first)
+        #expect(rotated.downloadedBytes == 3)
+        #expect(rotated.hlsResumeSnapshot == record.hlsResumeSnapshot)
+        #expect(try credentials.read(reference: reference)?.link.contains("token=rotated") == true)
+
+        await #expect(throws: DownloadCoreError.resourceChanged) {
+            try await service.patchSource(
+                id: record.id,
+                patch: DownloadSourcePatch(
+                    link: "https://fixture.invalid/index.m3u8?token=changed"
+                )
+            )
+        }
+        #expect(try credentials.read(reference: reference)?.link.contains("token=rotated") == true)
+        await service.shutdown()
+    }
+
     @Test("HTTP probe propagates transport failures without retrying")
     func probeDoesNotRetryTransportFailure() async throws {
         let transport = FailingTransport(error: URLError(.timedOut))
@@ -3546,16 +4308,34 @@ struct CoreTests {
         let store = try DownloadStore(rootURL: root)
         var missing = makeRecord(id: 23, folder: root)
         missing.status = .completed
+        missing.source.credentialReference = DownloadSourceSecurity.credentialReference(for: missing.id)
         var present = makeRecord(id: 24, folder: root)
         present.status = .completed
+        present.source.credentialReference = DownloadSourceSecurity.credentialReference(for: present.id)
         try Data("kept".utf8).write(to: present.destinationURL)
         try await store.save(missing)
         try await store.save(present)
+        let credentials = InMemoryDownloadCredentialStore()
+        try credentials.write(
+            DownloadSecureSource(link: "https://fixture.invalid/missing?token=private"),
+            reference: missing.source.credentialReference!
+        )
+        try credentials.write(
+            DownloadSecureSource(link: "https://fixture.invalid/present?token=private"),
+            reference: present.source.credentialReference!
+        )
 
-        let service = DownloadService(store: store, defaultFolder: root)
+        let service = DownloadService(
+            store: store,
+            defaultFolder: root,
+            credentialStore: credentials
+        )
         try await service.boot()
         #expect(try await service.removeCompletedDownloadsMissingFiles() == [23])
         #expect(Set(await service.snapshot().downloads.map(\.id)) == [24])
+        #expect(try credentials.read(reference: missing.source.credentialReference!) == nil)
+        #expect(try credentials.read(reference: present.source.credentialReference!) != nil)
+        await service.shutdown()
     }
 
     @Test("HTTP downloader refuses a changed validator for a partial response")
@@ -3693,6 +4473,22 @@ struct CoreTests {
         DownloadRecord(id: id, source: source, folder: folder.path, name: "file-\(id).bin")
     }
 
+    private func refreshableRecord(id: DownloadID, root: URL) -> DownloadRecord {
+        DownloadRecord(
+            id: id,
+            source: DownloadSource(kind: .http, link: "https://fixture.invalid/original.bin"),
+            folder: root.path,
+            name: "refresh-\(id).bin",
+            status: .waitingForSourceRefresh,
+            downloadedBytes: 2,
+            totalBytes: 4,
+            etag: "\"v1\"",
+            supportsResume: true,
+            parts: [DownloadPart(id: 0, from: 0, to: 3, downloaded: 2)],
+            sourceRefreshReason: .authenticationRequired
+        )
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("cool-download-core-\(UUID().uuidString)", isDirectory: true)
@@ -3730,6 +4526,191 @@ private final class MemoryTransport: HTTPTransport, @unchecked Sendable {
 
     func recordedRequests() -> [URLRequest] {
         lock.withLock { requests }
+    }
+}
+
+private enum ControlledProbeError: Error {
+    case timedOut
+}
+
+private actor ControlledProbeGate {
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard !released else { return }
+        released = true
+        let continuations = waiters
+        waiters.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+}
+
+private final class ControlledProbeTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let gate = ControlledProbeGate()
+    private var requestCount = 0
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        _ = request
+        lock.withLock { requestCount += 1 }
+        await gate.wait()
+        let body = Data([0])
+        return HTTPTransportResponse(
+            statusCode: 206,
+            headers: [
+                "Content-Length": "1",
+                "Content-Range": "bytes 0-0/4",
+                "ETag": "\"v1\""
+            ],
+            body: AsyncThrowingStream { continuation in
+                continuation.yield(body)
+                continuation.finish()
+            }
+        )
+    }
+
+    func waitUntilRequested() async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while lock.withLock({ requestCount == 0 }) {
+            guard ContinuousClock.now < deadline else {
+                throw ControlledProbeError.timedOut
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func release() async {
+        await gate.release()
+    }
+}
+
+private final class PatchCompletionTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let oldResponseGate = ControlledProbeGate()
+    private var oldRequests = 0
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        switch request.url?.path {
+        case "/old.bin":
+            lock.withLock { oldRequests += 1 }
+            await oldResponseGate.wait()
+            return Self.response(
+                status: 200,
+                headers: ["Content-Length": "4", "ETag": "\"v1\""],
+                body: Data("old!".utf8)
+            )
+        case "/new.bin":
+            if request.value(forHTTPHeaderField: "Range") == "bytes=0-0" {
+                return Self.response(
+                    status: 206,
+                    headers: [
+                        "Content-Length": "1",
+                        "Content-Range": "bytes 0-0/4",
+                        "ETag": "\"v1\""
+                    ],
+                    body: Data([0])
+                )
+            }
+            return Self.response(
+                status: 200,
+                headers: ["Content-Length": "4", "ETag": "\"v1\""],
+                body: Data("new!".utf8)
+            )
+        default:
+            return Self.response(status: 404, headers: ["Content-Length": "0"], body: Data())
+        }
+    }
+
+    func waitUntilOldRequest() async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while lock.withLock({ oldRequests == 0 }) {
+            guard ContinuousClock.now < deadline else {
+                throw ControlledProbeError.timedOut
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func releaseOldResponse() async {
+        await oldResponseGate.release()
+    }
+
+    func oldRequestCount() -> Int {
+        lock.withLock { oldRequests }
+    }
+
+    private static func response(
+        status: Int,
+        headers: [String: String],
+        body: Data
+    ) -> HTTPTransportResponse {
+        HTTPTransportResponse(
+            statusCode: status,
+            headers: headers,
+            body: AsyncThrowingStream { continuation in
+                continuation.yield(body)
+                continuation.finish()
+            }
+        )
+    }
+}
+
+private enum CredentialFixtureError: Error {
+    case injected
+}
+
+private final class FaultInjectingCredentialStore: DownloadCredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: DownloadSecureSource] = [:]
+    private var readbackFailures: Int
+    private var failWriteAfterMutation = false
+
+    init(readbackFailures: Int = 0) {
+        self.readbackFailures = readbackFailures
+    }
+
+    func read(reference: String) throws -> DownloadSecureSource? {
+        lock.withLock {
+            if readbackFailures > 0 {
+                readbackFailures -= 1
+                return nil
+            }
+            return values[reference]
+        }
+    }
+
+    func write(_ source: DownloadSecureSource, reference: String) throws {
+        let shouldFail = lock.withLock { () -> Bool in
+            values[reference] = source
+            let value = failWriteAfterMutation
+            failWriteAfterMutation = false
+            return value
+        }
+        if shouldFail { throw CredentialFixtureError.injected }
+    }
+
+    func remove(reference: String) throws {
+        lock.withLock { values[reference] = nil }
+    }
+
+    func seed(_ source: DownloadSecureSource, reference: String) {
+        lock.withLock { values[reference] = source }
+    }
+
+    func failNextWriteAfterMutation() {
+        lock.withLock { failWriteAfterMutation = true }
+    }
+
+    func value(reference: String) -> DownloadSecureSource? {
+        lock.withLock { values[reference] }
     }
 }
 

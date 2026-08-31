@@ -45,6 +45,9 @@ struct BenchmarkRun: Codable, Sendable {
     /// Optional for compatibility with schema-version 4 reports produced
     /// before task-level completion statistics were added.
     let taskMetrics: TaskMetricSummary?
+    /// Optional local-fixture tail observations. External runs and reports
+    /// produced before schema version 5 leave this field absent.
+    let rangeTailMetrics: RangeTailMetricSummary?
     let resources: ResourceMetricSummary
     /// Local fixture counters are unavailable when `--url` targets an
     /// external source.
@@ -175,6 +178,7 @@ extension BenchmarkRun {
         case checkpointPhaseMetrics
         case eventMetrics
         case taskMetrics
+        case rangeTailMetrics
         case resources
         case server
         case verified
@@ -217,6 +221,10 @@ extension BenchmarkRun {
         ) ?? [:]
         eventMetrics = try container.decode(EventMetricSummary.self, forKey: .eventMetrics)
         taskMetrics = try container.decodeIfPresent(TaskMetricSummary.self, forKey: .taskMetrics)
+        rangeTailMetrics = try container.decodeIfPresent(
+            RangeTailMetricSummary.self,
+            forKey: .rangeTailMetrics
+        )
         resources = try container.decode(ResourceMetricSummary.self, forKey: .resources)
         server = try container.decodeIfPresent(
             RangeFixtureServer.Statistics.self,
@@ -224,6 +232,14 @@ extension BenchmarkRun {
         )
         verified = try container.decode(Bool.self, forKey: .verified)
     }
+}
+
+struct RangeTailMetricSummary: Codable, Sendable, Equatable {
+    let configured: Bool
+    let matchingRequestCount: Int
+    let completedRequestCount: Int
+    let responseP95Milliseconds: Double
+    let totalBytesSent: Int64
 }
 
 /// A small, benchmark-only report for a hard process interruption followed by
@@ -273,6 +289,30 @@ final class ResourcePeakRecorder: @unchecked Sendable {
 }
 
 enum BenchmarkMetricSummarizer {
+    static func summarizeRangeTail(
+        _ statistics: RangeFixtureServer.Statistics?,
+        configuration: RangeFixtureServer.SlowRangeConfiguration?
+    ) -> RangeTailMetricSummary? {
+        guard let configuration else { return nil }
+        let timings = statistics?.requestTimings ?? []
+        let matching = timings.filter { timing in
+            guard timing.rangeStart == configuration.start else { return false }
+            guard let end = configuration.end else { return true }
+            return timing.rangeEnd == end
+        }
+        let completed = matching.filter {
+            !$0.failed && $0.responseMilliseconds != nil
+        }
+        let latencies = completed.compactMap(\.responseMilliseconds)
+        return RangeTailMetricSummary(
+            configured: true,
+            matchingRequestCount: matching.count,
+            completedRequestCount: completed.count,
+            responseP95Milliseconds: percentile(latencies, percentile: 0.95),
+            totalBytesSent: matching.reduce(0) { $0 + $1.bytesSent }
+        )
+    }
+
     static func summarizeRequests(_ events: [DownloadMetricEvent]) -> RequestMetricSummary {
         var ordinaryGetCount = 0
         var rangeCount = 0

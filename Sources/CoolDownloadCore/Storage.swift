@@ -1,6 +1,31 @@
 import Foundation
 import CoreData
 
+public struct DownloadStoreMutationStats: Sendable, Equatable {
+    public let taskInserted: Bool
+    public let taskAttributesUpdated: Int
+    public let partsInserted: Int
+    public let partsUpdated: Int
+    public let partsDeleted: Int
+    public let contextSaved: Bool
+
+    public init(
+        taskInserted: Bool = false,
+        taskAttributesUpdated: Int = 0,
+        partsInserted: Int = 0,
+        partsUpdated: Int = 0,
+        partsDeleted: Int = 0,
+        contextSaved: Bool = false
+    ) {
+        self.taskInserted = taskInserted
+        self.taskAttributesUpdated = taskAttributesUpdated
+        self.partsInserted = partsInserted
+        self.partsUpdated = partsUpdated
+        self.partsDeleted = partsDeleted
+        self.contextSaved = contextSaved
+    }
+}
+
 /// Core Data façade for download metadata. The actor owns the value-type
 /// cache used by `DownloadService`; managed objects never cross the actor
 /// boundary. File contents and `.cooldm.part` files remain outside this store.
@@ -13,6 +38,7 @@ public actor DownloadStore {
     private var loaded = false
     private var metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
     private var metricsEnabled = false
+    private var latestMutationStats = DownloadStoreMutationStats()
 
     public init(rootURL: URL) throws {
         try self.init(rootURL: rootURL, database: MetadataDatabase.shared(rootURL: rootURL))
@@ -27,14 +53,25 @@ public actor DownloadStore {
 
     @discardableResult
     public func load() throws -> [DownloadRecord] {
-        let loadedRecords: [DownloadRecord] = try database.perform { context in
-            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
-            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
-            do {
-                return try context.fetch(request).map(Self.decodeRecord)
-            } catch {
-                throw DownloadCoreError.corruptRecord(metadataURL, error.localizedDescription)
+        let tasks: [NSManagedObject]
+        do {
+            tasks = try database.perform { context in
+                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
+                return try context.fetch(request)
             }
+        } catch let error as MetadataDatabaseError {
+            throw error
+        } catch {
+            throw MetadataDatabaseError.loadFailed(metadataURL, error.localizedDescription)
+        }
+        let loadedRecords: [DownloadRecord]
+        do {
+            loadedRecords = try tasks.map(Self.decodeRecord)
+        } catch let error as DownloadCoreError {
+            throw error
+        } catch {
+            throw DownloadCoreError.corruptRecord(metadataURL, error.localizedDescription)
         }
         records = Dictionary(uniqueKeysWithValues: loadedRecords.map { ($0.id, $0) })
         loaded = true
@@ -64,44 +101,139 @@ public actor DownloadStore {
         metricsEnabled = metrics.isEnabled
     }
 
+    public func lastMutationStats() -> DownloadStoreMutationStats {
+        latestMutationStats
+    }
+
     public func save(_ record: DownloadRecord) throws {
         if let current = records[record.id], current.revision > record.revision {
             return
         }
         let startedAt = metricsEnabled ? downloadMetricsNow() : 0
         let resources = metricsEnabled ? DownloadResourceSnapshot.capture() : nil
+        let projectionStartedAt = metricsEnabled ? downloadMetricsNow() : 0
+        let encodedBytes = metricsEnabled
+            ? Int64(try MetadataJSON.encode(record).utf8.count)
+            : 0
+        if metricsEnabled {
+            metrics.record(.checkpointPhase(
+                id: record.id,
+                phase: .projectionEncode,
+                elapsedNanoseconds: downloadMetricsElapsed(since: projectionStartedAt),
+                bytes: encodedBytes
+            ))
+        }
+        let sqliteSizeBefore = metricsEnabled ? databaseFileSize() : 0
         do {
-            let encodedBytes = try database.perform { context -> Int64 in
-                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
-                request.predicate = NSPredicate(format: "id == %lld", record.id)
-                request.fetchLimit = 1
-                let task = try context.fetch(request).first ?? NSEntityDescription.insertNewObject(
-                    forEntityName: "DownloadTask",
-                    into: context
-                )
-                try Self.encode(record, into: task, context: context)
-                try context.save()
-                return Int64(try MetadataJSON.encode(record).utf8.count)
+            let result = try database.perform { context -> SaveMutationResult in
+                try Self.performMutation(in: context) {
+                    let fetchStartedAt = self.metricsEnabled ? downloadMetricsNow() : 0
+                    let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                    request.predicate = NSPredicate(format: "id == %lld", record.id)
+                    request.fetchLimit = 1
+                    let existingTask = try context.fetch(request).first
+                    if self.metricsEnabled {
+                        self.metrics.record(.checkpointPhase(
+                            id: record.id,
+                            phase: .fetch,
+                            elapsedNanoseconds: downloadMetricsElapsed(since: fetchStartedAt),
+                            bytes: 0
+                        ))
+                    }
+                    if let storedRevision = (existingTask?.value(forKey: "revision") as? NSNumber)?.int64Value,
+                       storedRevision > record.revision {
+                        return SaveMutationResult(stats: DownloadStoreMutationStats(), stale: true)
+                    }
+
+                    try Self.validateParts(record.parts)
+                    let task = existingTask ?? NSEntityDescription.insertNewObject(
+                        forEntityName: "DownloadTask",
+                        into: context
+                    )
+                    let attributeStartedAt = self.metricsEnabled ? downloadMetricsNow() : 0
+                    let updatedAttributes = try Self.syncAttributes(
+                        record,
+                        into: task,
+                        context: context
+                    )
+                    if self.metricsEnabled {
+                        self.metrics.record(.checkpointPhase(
+                            id: record.id,
+                            phase: .attributeUpdate,
+                            elapsedNanoseconds: downloadMetricsElapsed(since: attributeStartedAt),
+                            bytes: Int64(updatedAttributes)
+                        ))
+                    }
+
+                    let partStartedAt = self.metricsEnabled ? downloadMetricsNow() : 0
+                    let partChanges = try Self.syncParts(record.parts, task: task, context: context)
+                    if self.metricsEnabled {
+                        self.metrics.record(.checkpointPhase(
+                            id: record.id,
+                            phase: .partDiff,
+                            elapsedNanoseconds: downloadMetricsElapsed(since: partStartedAt),
+                            bytes: Int64(partChanges.inserted + partChanges.updated + partChanges.deleted)
+                        ))
+                    }
+
+                    let shouldSave = context.hasChanges
+                    if shouldSave {
+                        let saveStartedAt = self.metricsEnabled ? downloadMetricsNow() : 0
+                        do {
+                            try context.save()
+                        } catch {
+                            context.rollback()
+                            throw MetadataDatabaseError.saveFailed(
+                                self.metadataURL,
+                                error.localizedDescription
+                            )
+                        }
+                        if self.metricsEnabled {
+                            self.metrics.record(.checkpointPhase(
+                                id: record.id,
+                                phase: .contextSave,
+                                elapsedNanoseconds: downloadMetricsElapsed(since: saveStartedAt),
+                                bytes: 0
+                            ))
+                        }
+                    }
+                    return SaveMutationResult(
+                        stats: DownloadStoreMutationStats(
+                            taskInserted: existingTask == nil,
+                            taskAttributesUpdated: updatedAttributes,
+                            partsInserted: partChanges.inserted,
+                            partsUpdated: partChanges.updated,
+                            partsDeleted: partChanges.deleted,
+                            contextSaved: shouldSave
+                        ),
+                        stale: false
+                    )
+                }
             }
+            guard !result.stale else { return }
             records[record.id] = record
+            latestMutationStats = result.stats
             if metricsEnabled, let resources {
+                let sqliteDelta = max(0, databaseFileSize() - sqliteSizeBefore)
                 metrics.record(.checkpointPhase(
                     id: record.id,
-                    phase: .recordEncode,
-                    elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
-                    bytes: encodedBytes
+                    phase: .sqliteFileDelta,
+                    elapsedNanoseconds: 0,
+                    bytes: sqliteDelta
                 ))
                 metrics.record(.checkpoint(
                     id: record.id,
                     elapsedNanoseconds: downloadMetricsElapsed(since: startedAt),
                     encodedBytes: encodedBytes,
-                    logicalWriteBytes: encodedBytes,
+                    logicalWriteBytes: sqliteDelta,
                     kernelAccountedWriteBytes: DownloadResourceSnapshot.capture().diskWriteDelta(from: resources),
-                    synchronizeCount: 1,
+                    synchronizeCount: result.stats.contextSaved ? 1 : 0,
                     succeeded: true
                 ))
             }
         } catch let error as DownloadCoreError {
+            throw error
+        } catch let error as MetadataDatabaseError {
             throw error
         } catch {
             if metricsEnabled, let resources {
@@ -115,7 +247,7 @@ public actor DownloadStore {
                     succeeded: false
                 ))
             }
-            throw DownloadCoreError.permissionDenied(metadataURL.path)
+            throw MetadataDatabaseError.saveFailed(metadataURL, error.localizedDescription)
         }
     }
 
@@ -136,6 +268,49 @@ public actor DownloadStore {
             throw error
         } catch {
             throw DownloadCoreError.permissionDenied(metadataURL.path)
+        }
+    }
+
+    /// Persists only the failure state for a v1 source migration. The legacy
+    /// source columns stay untouched so a later boot can retry moving their
+    /// sensitive values to Keychain, while the actor cache receives only the
+    /// redacted projection supplied by DownloadService.
+    public func saveSourceMigrationFailure(_ record: DownloadRecord) throws {
+        guard record.status == .waitingForSourceRefresh,
+              record.sourceRefreshReason == .credentialsUnavailable,
+              !DownloadSourceSecurity.containsRestrictedData(record.source) else {
+            throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+        }
+        do {
+            try database.perform { context in
+                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.predicate = NSPredicate(format: "id == %lld", record.id)
+                request.fetchLimit = 1
+                guard let task = try context.fetch(request).first else {
+                    throw DownloadCoreError.notFound(record.id)
+                }
+                task.setValue(record.status.rawValue, forKey: "status")
+                task.setValue(record.sourceRefreshReason?.rawValue, forKey: "sourceRefreshReason")
+                task.setValue(record.error, forKey: "error")
+                task.setValue(record.updatedAt, forKey: "updatedAt")
+                task.setValue(record.revision, forKey: "revision")
+                do {
+                    try context.save()
+                } catch {
+                    context.rollback()
+                    throw MetadataDatabaseError.saveFailed(
+                        self.metadataURL,
+                        error.localizedDescription
+                    )
+                }
+            }
+            records[record.id] = record
+        } catch let error as DownloadCoreError {
+            throw error
+        } catch let error as MetadataDatabaseError {
+            throw error
+        } catch {
+            throw MetadataDatabaseError.saveFailed(metadataURL, error.localizedDescription)
         }
     }
 
@@ -173,7 +348,8 @@ public actor DownloadStore {
             link: link,
             headers: headers,
             downloadPage: task.value(forKey: "downloadPage") as? String,
-            suggestedName: task.value(forKey: "suggestedName") as? String
+            suggestedName: task.value(forKey: "suggestedName") as? String,
+            credentialReference: task.value(forKey: "credentialReference") as? String
         )
         let parts = ((task.value(forKey: "parts") as? NSSet)?.allObjects as? [NSManagedObject] ?? [])
             .sorted {
@@ -214,36 +390,130 @@ public actor DownloadStore {
             fileChecksum: task.value(forKey: "fileChecksum") as? String,
             taskSettings: taskSettings,
             incompleteFileName: task.value(forKey: "incompleteFileName") as? String,
+            sourceRefreshReason: (task.value(forKey: "sourceRefreshReason") as? String)
+                .flatMap(DownloadSourceRefreshReason.init(rawValue:)),
+            hlsResumeSnapshot: try (task.value(forKey: "hlsResumeSnapshotJSON") as? String)
+                .map { try MetadataJSON.decode(HLSResumeSnapshot.self, from: $0) },
+            hlsRenditions: try (task.value(forKey: "hlsRenditionsJSON") as? String)
+                .map { try MetadataJSON.decode([HLSRendition].self, from: $0) },
             revision: (task.value(forKey: "revision") as? NSNumber)?.int64Value ?? 1
         )
     }
 
-    private static func encode(
+    private struct SaveMutationResult {
+        let stats: DownloadStoreMutationStats
+        let stale: Bool
+    }
+
+    private struct PartMutationCounts {
+        var inserted = 0
+        var updated = 0
+        var deleted = 0
+    }
+
+    private func databaseFileSize() -> Int64 {
+        [
+            metadataURL,
+            URL(fileURLWithPath: metadataURL.path + "-wal"),
+            URL(fileURLWithPath: metadataURL.path + "-shm")
+        ]
+            .reduce(0) { partial, url in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                return partial + Int64(size)
+            }
+    }
+
+    private static func validateParts(_ parts: [DownloadPart]) throws {
+        guard Set(parts.map(\.id)).count == parts.count else {
+            throw DownloadCoreError.corruptRecord(
+                URL(fileURLWithPath: "DownloadPart"),
+                "分片 ID 重复"
+            )
+        }
+        for part in parts {
+            guard part.id >= 0,
+                  part.from >= 0,
+                  part.downloaded >= 0,
+                  part.to.map({ $0 >= part.from && part.downloaded <= $0 - part.from + 1 }) ?? true else {
+                throw DownloadCoreError.corruptRecord(
+                    URL(fileURLWithPath: "DownloadPart"),
+                    "分片范围或进度无效"
+                )
+            }
+        }
+    }
+
+    /// A failed diff must not leave modified managed objects for a later save.
+    private static func performMutation<T>(
+        in context: NSManagedObjectContext,
+        _ operation: () throws -> T
+    ) throws -> T {
+        do {
+            return try operation()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    @discardableResult
+    private static func setIfChanged(
+        _ value: Any?,
+        forKey key: String,
+        on object: NSManagedObject
+    ) -> Bool {
+        let current = object.value(forKey: key)
+        let equal: Bool
+        switch (current, value) {
+        case (nil, nil):
+            equal = true
+        case let (lhs as NSObject, rhs as NSObject):
+            equal = lhs == rhs
+        default:
+            equal = false
+        }
+        guard !equal else { return false }
+        object.setValue(value, forKey: key)
+        return true
+    }
+
+    private static func syncAttributes(
         _ record: DownloadRecord,
         into task: NSManagedObject,
         context: NSManagedObjectContext
-    ) throws {
-        task.setValue(record.id, forKey: "id")
-        task.setValue(record.source.kind.rawValue, forKey: "sourceKind")
-        task.setValue(record.source.link, forKey: "link")
-        task.setValue(try record.source.headers.map(MetadataJSON.encode), forKey: "headersJSON")
-        task.setValue(record.source.downloadPage, forKey: "downloadPage")
-        task.setValue(record.source.suggestedName, forKey: "suggestedName")
-        task.setValue(record.folder, forKey: "folder")
-        task.setValue(record.name, forKey: "name")
-        task.setValue(record.status.rawValue, forKey: "status")
-        task.setValue(record.downloadedBytes, forKey: "downloadedBytes")
-        task.setValue(record.totalBytes, forKey: "totalBytes")
-        task.setValue(record.etag, forKey: "etag")
-        task.setValue(record.lastModified, forKey: "lastModified")
-        task.setValue(record.supportsResume, forKey: "supportsResume")
-        task.setValue(record.createdAt, forKey: "createdAt")
-        task.setValue(record.updatedAt, forKey: "updatedAt")
-        task.setValue(record.error, forKey: "error")
-        task.setValue(record.fileChecksum, forKey: "fileChecksum")
-        task.setValue(try record.taskSettings.map(MetadataJSON.encode), forKey: "taskSettingsJSON")
-        task.setValue(record.incompleteFileName, forKey: "incompleteFileName")
-        task.setValue(record.revision, forKey: "revision")
+    ) throws -> Int {
+        guard !DownloadSourceSecurity.containsRestrictedData(record.source) else {
+            throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+        }
+        var count = 0
+        func set(_ value: Any?, _ key: String) {
+            if setIfChanged(value, forKey: key, on: task) { count += 1 }
+        }
+        set(record.id, "id")
+        set(record.source.kind.rawValue, "sourceKind")
+        set(record.source.link, "link")
+        set(try record.source.headers.map(MetadataJSON.encode), "headersJSON")
+        set(record.source.downloadPage, "downloadPage")
+        set(record.source.suggestedName, "suggestedName")
+        set(record.source.credentialReference, "credentialReference")
+        set(record.folder, "folder")
+        set(record.name, "name")
+        set(record.status.rawValue, "status")
+        set(record.downloadedBytes, "downloadedBytes")
+        set(record.totalBytes, "totalBytes")
+        set(record.etag, "etag")
+        set(record.lastModified, "lastModified")
+        set(record.supportsResume, "supportsResume")
+        set(record.createdAt, "createdAt")
+        set(record.updatedAt, "updatedAt")
+        set(record.error, "error")
+        set(record.fileChecksum, "fileChecksum")
+        set(try record.taskSettings.map(MetadataJSON.encode), "taskSettingsJSON")
+        set(record.incompleteFileName, "incompleteFileName")
+        set(record.sourceRefreshReason?.rawValue, "sourceRefreshReason")
+        set(try record.hlsResumeSnapshot.map(MetadataJSON.encode), "hlsResumeSnapshotJSON")
+        set(try record.hlsRenditions.map(MetadataJSON.encode), "hlsRenditionsJSON")
+        set(record.revision, "revision")
 
         let queue: NSManagedObject?
         if let queueID = record.queueID {
@@ -254,7 +524,7 @@ public actor DownloadStore {
         } else {
             queue = nil
         }
-        task.setValue(queue, forKey: "queue")
+        if setIfChanged(queue, forKey: "queue", on: task) { count += 1 }
 
         let category: NSManagedObject?
         if let categoryID = record.categoryID {
@@ -265,11 +535,39 @@ public actor DownloadStore {
         } else {
             category = nil
         }
-        task.setValue(category, forKey: "category")
+        if setIfChanged(category, forKey: "category", on: task) { count += 1 }
+        return count
+    }
 
-        let oldParts = ((task.value(forKey: "parts") as? NSSet)?.allObjects as? [NSManagedObject] ?? [])
-        oldParts.forEach(context.delete)
-        let parts = record.parts.map { value -> NSManagedObject in
+    private static func syncParts(
+        _ parts: [DownloadPart],
+        task: NSManagedObject,
+        context: NSManagedObjectContext
+    ) throws -> PartMutationCounts {
+        let oldParts = (task.value(forKey: "parts") as? NSSet)?.allObjects as? [NSManagedObject] ?? []
+        let grouped = Dictionary(grouping: oldParts) {
+            Int(($0.value(forKey: "partID") as? NSNumber)?.int64Value ?? -1)
+        }
+        guard grouped.values.allSatisfy({ $0.count == 1 }) else {
+            throw DownloadCoreError.corruptRecord(
+                URL(fileURLWithPath: "DownloadPart"),
+                "数据库中存在重复分片 ID"
+            )
+        }
+        var existing = grouped.mapValues { $0[0] }
+        var counts = PartMutationCounts()
+
+        for value in parts {
+            if let object = existing.removeValue(forKey: value.id) {
+                var changed = false
+                changed = setIfChanged(Int64(value.id), forKey: "partID", on: object) || changed
+                changed = setIfChanged(value.from, forKey: "from", on: object) || changed
+                changed = setIfChanged(value.to, forKey: "to", on: object) || changed
+                changed = setIfChanged(value.downloaded, forKey: "downloaded", on: object) || changed
+                changed = setIfChanged(value.completed, forKey: "completed", on: object) || changed
+                if changed { counts.updated += 1 }
+                continue
+            }
             let object = NSEntityDescription.insertNewObject(forEntityName: "DownloadPart", into: context)
             object.setValue(Int64(value.id), forKey: "partID")
             object.setValue(value.from, forKey: "from")
@@ -277,8 +575,12 @@ public actor DownloadStore {
             object.setValue(value.downloaded, forKey: "downloaded")
             object.setValue(value.completed, forKey: "completed")
             object.setValue(task, forKey: "task")
-            return object
+            counts.inserted += 1
         }
-        task.setValue(NSSet(array: parts), forKey: "parts")
+        for object in existing.values {
+            context.delete(object)
+            counts.deleted += 1
+        }
+        return counts
     }
 }

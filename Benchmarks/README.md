@@ -113,9 +113,9 @@ swift run --disable-sandbox CoolDownloadBenchmark \
   > /tmp/cooldm-process-recovery.stdout.json
 ```
 
-Recovery reports use their own `schemaVersion: 1`. Normal matrix reports keep
-`schemaVersion: 4`; `taskMetrics` is optional when decoding older version-4
-files created before task-level completion statistics were added.
+Recovery reports use their own `schemaVersion: 1`. Normal matrix reports now
+use `schemaVersion: 5`; version-4 reports remain decodable with defaults for
+the optional dimensions added later.
 
 ## External source and storage matrix
 
@@ -141,9 +141,55 @@ For an HTTP proxy, use `--proxy-url http://[user:password@]host:port` together
 with `--url`. Proxy credentials and URL query parameters are removed from the
 persisted report. `--keep-files` retains each isolated run directory under the
 selected `--downloads-root`; otherwise it is removed after metrics and
-verification are collected. A report with `schemaVersion: 4` has
-`server: null` for external runs because the local fixture counters are not
-available.
+verification are collected. An external report has `server: null` and no
+`rangeTailMetrics` because the local fixture counters are not available.
+
+## Core Data checkpoint comparison
+
+Use the dedicated persistence mode to compare the production incremental
+checkpoint path with a benchmark-only delete-and-reinsert reference. It uses
+separate temporary SQLite roots, mutates one existing part per iteration,
+checks a no-op save, and reopens the database before reporting. The report
+separates row mutation counts, Core Data phase p95 values, SQLite file-size
+deltas, CPU, RSS, and FD observations; file-size deltas are not device writes
+or fsync counts.
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
+swift run --disable-sandbox CoolDownloadBenchmark \
+  --persistence-benchmark \
+  --persistence-tasks 4 \
+  --persistence-parts 64 \
+  --persistence-iterations 100 \
+  --output /tmp/cooldm-persistence.json
+```
+
+## Controlled Range tail
+
+The loopback fixture can slow one exact Range after a normal prefix. These
+options are benchmark-only and are rejected for `--url` runs. The resulting
+`rangeTailMetrics` records the matching request count, completed count,
+response p95, and sent bytes; full per-request range timing remains in the
+local `server.requestTimings` array.
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
+swift run --disable-sandbox CoolDownloadBenchmark \
+  --size-mib 32 \
+  --connections 2 \
+  --minimum-part-mib 8 \
+  --slow-range-offset-mib 16 \
+  --slow-range-prefix-mib 1 \
+  --slow-range-mibps 1 \
+  --slow-range-pause-ms 100 \
+  --repetitions 3 \
+  --warmups 1 \
+  --output /tmp/cooldm-range-tail.json
+```
+
+`--slow-range-end-mib` can narrow the exact range match. A configured slow
+Range with zero matching requests means the selected download path did not
+issue that Range, not that it ran without a tail.
 
 The benchmark does not force HTTP/1.1 or HTTP/2. `URLSession` negotiates the
 protocol allowed by the endpoint and proxy. Record the endpoint/proxy setup

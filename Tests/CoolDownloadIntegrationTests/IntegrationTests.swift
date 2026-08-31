@@ -40,6 +40,139 @@ struct IntegrationTests {
         ))
         #expect(headless.statusCode == 200)
         #expect(await handler.headlessRequests.count == 1)
+
+        let patchPayload = Data(#"{"link":"https://example.test/a.bin?signature=secret","headers":{"Authorization":"Bearer secret"}}"#.utf8)
+        let patched = await router.handle(HTTPRequest(
+            method: "PATCH",
+            path: "/downloads/7/source",
+            headers: ["X-Api-Key": "secret"],
+            body: patchPayload
+        ))
+        #expect(patched.statusCode == 200)
+        #expect(await handler.sourcePatches.count == 1)
+        #expect(!patched.body.contains(Data("signature".utf8)))
+        #expect(!patched.body.contains(Data("Authorization".utf8)))
+
+        let malformedPath = await router.handle(HTTPRequest(
+            method: "PATCH",
+            path: "/downloads/7/source/extra",
+            headers: ["X-Api-Key": "secret"],
+            body: patchPayload
+        ))
+        #expect(malformedPath.statusCode == 404)
+
+        let malformedBody = await router.handle(HTTPRequest(
+            method: "PATCH",
+            path: "/downloads/7/source",
+            headers: ["X-Api-Key": "secret"],
+            body: Data("{}".utf8)
+        ))
+        #expect(malformedBody.statusCode == 400)
+    }
+
+    @Test("source patch route enforces authentication, exact paths and bounded input")
+    func sourcePatchRouteValidation() async throws {
+        let payload = Data(#"{"link":"https://example.test/file?token=private","headers":{"Authorization":"Bearer private"}}"#.utf8)
+        let handler = RecordingHandler()
+        let router = IntegrationRouter(handler: handler, apiKey: "secret")
+
+        let missingKey = await router.handle(HTTPRequest(
+            method: "PATCH",
+            path: "/downloads/7/source",
+            body: payload
+        ))
+        #expect(missingKey.statusCode == 401)
+        let wrongKey = await router.handle(HTTPRequest(
+            method: "PATCH",
+            path: "/downloads/7/source",
+            headers: ["X-Api-Key": "wrong"],
+            body: payload
+        ))
+        #expect(wrongKey.statusCode == 401)
+
+        let invalidPaths = [
+            "/downloads/7/source/",
+            "/downloads//source",
+            "//downloads/7/source",
+            "/downloads/0/source",
+            "/downloads/not-an-id/source",
+            "/downloads/7/source?extra=true",
+            "/downloads/7/source/extra"
+        ]
+        for path in invalidPaths {
+            let response = await router.handle(HTTPRequest(
+                method: "PATCH",
+                path: path,
+                headers: ["X-Api-Key": "secret"],
+                body: payload
+            ))
+            #expect(response.statusCode == 404, "unexpected path accepted: \(path)")
+        }
+
+        let invalidBodies = [
+            Data("{".utf8),
+            Data(#"{"headers":{}}"#.utf8),
+            Data(#"{"link":"ftp://example.test/file"}"#.utf8),
+            Data(#"{"link":"https://example.test/file","extra":true}"#.utf8),
+            Data(#"{"link":"https://example.test/file","headers":{"Cookie":"a","cookie":"b"}}"#.utf8),
+            Data(#"{"link":"https://example.test/file","headers":{"X-Test":"line\r\nbreak"}}"#.utf8)
+        ]
+        for body in invalidBodies {
+            let response = await router.handle(HTTPRequest(
+                method: "PATCH",
+                path: "/downloads/7/source",
+                headers: ["X-Api-Key": "secret"],
+                body: body
+            ))
+            #expect(response.statusCode == 400)
+            #expect(String(data: response.body, encoding: .utf8) == "Invalid request")
+        }
+        #expect(await handler.sourcePatches.isEmpty)
+    }
+
+    @Test("source patch route maps failures without exposing source material")
+    func sourcePatchErrorMapping() async throws {
+        let payload = Data(#"{"link":"https://example.test/file?signature=private"}"#.utf8)
+        let coreFailures: [(DownloadCoreError, Int)] = [
+            (.invalidURL("https://example.test/?signature=private"), 400),
+            (.invalidSourcePatch("Authorization: private"), 400),
+            (.notFound(7), 404),
+            (.invalidState(7, .completed), 409),
+            (.resourceChanged, 409),
+            (.resumeNotSupported, 409),
+            (.sourceRefreshRequired(.credentialsUnavailable), 409)
+        ]
+
+        for (error, expectedStatus) in coreFailures {
+            let router = IntegrationRouter(
+                handler: RecordingHandler(patchFailure: .core(error)),
+                apiKey: "secret"
+            )
+            let response = await router.handle(HTTPRequest(
+                method: "PATCH",
+                path: "/downloads/7/source",
+                headers: ["X-Api-Key": "secret"],
+                body: payload
+            ))
+            #expect(response.statusCode == expectedStatus)
+            #expect(!response.body.contains(Data("private".utf8)))
+            #expect(!response.body.contains(Data("signature".utf8)))
+            #expect(!response.body.contains(Data("Authorization".utf8)))
+        }
+
+        let storageRouter = IntegrationRouter(
+            handler: RecordingHandler(patchFailure: .storage),
+            apiKey: "secret"
+        )
+        let storageFailure = await storageRouter.handle(HTTPRequest(
+            method: "PATCH",
+            path: "/downloads/7/source",
+            headers: ["X-Api-Key": "secret"],
+            body: payload
+        ))
+        #expect(storageFailure.statusCode == 500)
+        #expect(String(data: storageFailure.body, encoding: .utf8) == "Request failed")
+        #expect(!storageFailure.body.contains(Data("private".utf8)))
     }
 
     @Test("Native Messaging codec uses native-endian four-byte framing")
@@ -409,9 +542,15 @@ private actor RecordingHandler: DownloadIntegrationHandler {
     var addRequests: [AddDownloadsRequest] = []
     var headlessRequests: [HeadlessDownloadRequest] = []
     var queues: [IntegrationQueue] = []
+    var sourcePatches: [(DownloadID, DownloadSourcePatch)] = []
+    let patchFailure: RecordedPatchFailure?
 
-    init(queues: [IntegrationQueue] = []) {
+    init(
+        queues: [IntegrationQueue] = [],
+        patchFailure: RecordedPatchFailure? = nil
+    ) {
         self.queues = queues
+        self.patchFailure = patchFailure
     }
 
     func addFromBrowser(_ request: AddDownloadsRequest) async throws {
@@ -426,6 +565,30 @@ private actor RecordingHandler: DownloadIntegrationHandler {
         headlessRequests.append(request)
         return 1
     }
+
+    func patchSource(
+        id: DownloadID,
+        patch: DownloadSourcePatch
+    ) async throws -> DownloadSourcePatchResult {
+        if let patchFailure {
+            switch patchFailure {
+            case .core(let error):
+                throw error
+            case .storage:
+                throw MetadataDatabaseError.saveFailed(
+                    URL(fileURLWithPath: "/private/signature-secret"),
+                    "Authorization: private"
+                )
+            }
+        }
+        sourcePatches.append((id, patch))
+        return DownloadSourcePatchResult(id: id, status: .paused, continued: false)
+    }
+}
+
+private enum RecordedPatchFailure: Sendable {
+    case core(DownloadCoreError)
+    case storage
 }
 
 private actor InteractiveRequestRecorder {

@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: Download Service API
-  version: 1.0.0
+  version: 1.1.0
   description: API for managing download tasks and queues.
 servers:
   - url: http://localhost:15151
@@ -35,7 +35,7 @@ paths:
         "200":
           description: Successfully added the download
           content:
-            plain/text:
+            text/plain:
               schema:
                 type: string
                 description: OK on success
@@ -96,7 +96,103 @@ paths:
         "200":
           description: Successfully added the download task
           content:
-            plain/text:
+            text/plain:
               schema:
                 type: string
                 description: OK on success
+
+  /downloads/{id}/source:
+    patch:
+      summary: Replace an existing task's request source
+      description: Probes the replacement source and preserves downloaded bytes only when resource identity can be proven.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [link]
+              properties:
+                link:
+                  type: string
+                  format: uri
+                  maxLength: 8192
+                  description: Replacement HTTP or HTTPS source URL.
+                headers:
+                  type: object
+                  maxProperties: 64
+                  additionalProperties:
+                    type: string
+                    maxLength: 8192
+                  description: Complete replacement request headers; old authentication headers are not merged.
+      responses:
+        "200":
+          description: Source updated. The task may continue or remain paused.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [id, status, continued]
+                properties:
+                  id:
+                    type: integer
+                    format: int64
+                  status:
+                    type: string
+                    enum: [added, preparing, downloading, paused, retrying, waitingForSourceRefresh, completed, failed, cancelled]
+                  continued:
+                    type: boolean
+        "400":
+          description: Malformed JSON, URL, headers, or path parameters.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid request
+        "401":
+          description: X-Api-Key is missing or invalid.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Unauthorized
+        "404":
+          description: The task does not exist or the route is not an exact match.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Not Found
+        "409":
+          description: Task state, resource identity, or resume support prevents a safe update.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Source update conflict
+        "500":
+          description: Secure credential storage or metadata persistence failed.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Request failed
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key

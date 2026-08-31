@@ -10,6 +10,11 @@ private struct HTTPRangeRequestResult: Sendable {
     let elapsed: Duration
 }
 
+private enum SourcePatchMetadata: Sendable {
+    case http(HTTPResourceMetadata)
+    case hls(HLSResolvedPlaylist)
+}
+
 public actor DownloadService {
     private let store: DownloadStore
     private var downloader: HTTPDownloader
@@ -22,6 +27,7 @@ public actor DownloadService {
     private let fileDescriptorBudget: HTTPFileDescriptorBudget
     private let globalRateLimiter: DownloadRateLimiter
     private let hostPerformanceStore: HostPerformanceStore?
+    private let credentialStore: any DownloadCredentialStore
     private let metrics: any DownloadMetricsSink
     private let metricsEnabled: Bool
     private var records: [DownloadID: DownloadRecord] = [:]
@@ -56,7 +62,8 @@ public actor DownloadService {
         schedulerConfiguration: DownloadSchedulerConfiguration = .init(),
         retryPolicy: DownloadRetryPolicy = .init(),
         metrics: any DownloadMetricsSink = NoopDownloadMetricsSink(),
-        hostPerformanceStore: HostPerformanceStore? = nil
+        hostPerformanceStore: HostPerformanceStore? = nil,
+        credentialStore: any DownloadCredentialStore = KeychainDownloadCredentialStore()
     ) {
         self.store = store
         self.downloader = downloader
@@ -79,6 +86,7 @@ public actor DownloadService {
             bytesPerSecond: schedulerConfiguration.speedLimit
         )
         self.hostPerformanceStore = hostPerformanceStore
+        self.credentialStore = credentialStore
     }
 
     public func boot() async throws {
@@ -88,6 +96,10 @@ public actor DownloadService {
         var loaded = Dictionary(
             uniqueKeysWithValues: try await store.load().map { ($0.id, $0) }
         )
+        for id in Array(loaded.keys) {
+            guard let record = loaded[id] else { continue }
+            loaded[id] = try await migrateSourceIfNeeded(record)
+        }
         // A process cannot safely continue a live task after a restart. Keep
         // its part file and expose it as resumable instead of leaving a stale
         // "downloading" state that has no associated task.
@@ -314,6 +326,7 @@ public actor DownloadService {
             guard let record = records[id], record.status == .completed else { continue }
             try await store.remove(id: id)
             records[id] = nil
+            removeCredentialIfPresent(for: record)
             emit(.removed(id: id))
             if let queueID = record.queueID {
                 reconcileQueue(queueID)
@@ -323,11 +336,11 @@ public actor DownloadService {
     }
 
     public func add(_ request: AddDownloadRequest) async throws -> DownloadID {
-        guard let url = URL(string: request.source.link),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else {
-            throw DownloadCoreError.invalidURL(request.source.link)
-        }
+        let id = await store.nextID()
+        let preparedSource = try DownloadSourceSecurity.prepare(
+            request.source,
+            reference: DownloadSourceSecurity.credentialReference(for: id)
+        )
 
         let folderURL = URL(fileURLWithPath: request.folder ?? defaultFolder.path, isDirectory: true)
             .standardizedFileURL
@@ -336,8 +349,15 @@ public actor DownloadService {
             throw DownloadCoreError.permissionDenied(folderURL.path)
         }
 
-        let id = await store.nextID()
-        var source = request.source
+        if let secureSource = preparedSource.secureSource {
+            try writeCredentialVerified(
+                secureSource,
+                reference: preparedSource.projection.credentialReference!,
+                previousSource: nil,
+                previousReference: nil
+            )
+        }
+        var source = preparedSource.projection
         let requestedName = request.name?.nilIfBlank
         let suggestedName = source.suggestedName?.nilIfBlank
         // Persist the chosen name as the source hint as well. This lets later
@@ -368,8 +388,15 @@ public actor DownloadService {
                 ? "\(name).cooldm.part"
                 : nil
         )
+        do {
+            try await store.save(record)
+        } catch {
+            if let reference = record.source.credentialReference {
+                try? credentialStore.remove(reference: reference)
+            }
+            throw error
+        }
         records[id] = record
-        try await store.save(record)
         emit(.created(record))
 
         if request.start {
@@ -378,12 +405,189 @@ public actor DownloadService {
         return id
     }
 
+    public func patchSource(
+        id: DownloadID,
+        patch: DownloadSourcePatch
+    ) async throws -> DownloadSourcePatchResult {
+        guard var record = records[id] else {
+            throw DownloadCoreError.notFound(id)
+        }
+        guard record.status != .completed, record.status != .cancelled else {
+            throw DownloadCoreError.invalidState(id, record.status)
+        }
+
+        let shouldContinue = record.status == .preparing
+            || record.status == .downloading
+            || record.status == .retrying
+            || record.status == .waitingForSourceRefresh
+        let pausedForPatch = record.status == .preparing
+            || record.status == .downloading
+            || record.status == .retrying
+        if pausedForPatch {
+            queuedIDs.removeAll { $0 == id }
+            record.status = .paused
+            record.updatedAt = Date()
+            record.revision += 1
+            records[id] = record
+            try await store.save(record)
+            emit(.updated(record))
+        }
+        if let task = tasks[id] {
+            task.cancel()
+            await task.value
+        }
+        guard let baseline = records[id] else {
+            throw DownloadCoreError.notFound(id)
+        }
+        let oldReference = baseline.source.credentialReference
+        let oldSecureSource = try oldReference.flatMap { try credentialStore.read(reference: $0) }
+        var continueAfterPatch = shouldContinue
+        var current = baseline
+        var committedCredentialReference = oldReference
+        do {
+            let candidate = DownloadSource(
+                kind: baseline.source.kind,
+                link: patch.link,
+                headers: patch.headers,
+                downloadPage: oldSecureSource?.downloadPage ?? baseline.source.downloadPage,
+                suggestedName: baseline.source.suggestedName
+            )
+            let reference = DownloadSourceSecurity.credentialReference(for: id)
+            let prepared = try DownloadSourceSecurity.prepare(candidate, reference: reference)
+            let networkSource = try await effectiveSource(candidate)
+            let metadata: SourcePatchMetadata
+            switch candidate.kind {
+            case .http:
+                metadata = .http(try await downloader.probe(
+                    source: networkSource,
+                    metrics: metrics,
+                    downloadID: id,
+                    fileDescriptorBudget: fileDescriptorBudget,
+                    activity: requestActivityHandler(for: id)
+                ))
+            case .hls:
+                metadata = .hls(try await hlsDownloader.resolvePlaylist(
+                    source: networkSource,
+                    fileDescriptorBudget: fileDescriptorBudget,
+                    downloadID: id,
+                    activity: requestActivityHandler(for: id)
+                ))
+            }
+
+            guard !shuttingDown else {
+                throw DownloadCoreError.cancelled
+            }
+            guard let latest = records[id] else {
+                throw DownloadCoreError.notFound(id)
+            }
+            current = latest
+            if current.revision != baseline.revision {
+                guard current.status == .paused,
+                      current.source == baseline.source else {
+                    throw DownloadCoreError.invalidState(id, current.status)
+                }
+                continueAfterPatch = false
+            }
+            try validateSourceIdentity(record: current, metadata: metadata)
+
+            if let secureSource = prepared.secureSource {
+                try writeCredentialVerified(
+                    secureSource,
+                    reference: reference,
+                    previousSource: oldSecureSource,
+                    previousReference: oldReference
+                )
+            }
+
+            current.source = prepared.projection
+            current.sourceRefreshReason = nil
+            current.error = nil
+            switch metadata {
+            case .http(let resource):
+                current.totalBytes = resource.totalBytes ?? current.totalBytes
+                current.etag = resource.etag
+                current.lastModified = resource.lastModified
+                current.supportsResume = resource.supportsRanges
+            case .hls(let resolved):
+                current.hlsRenditions = resolved.renditions
+                if current.downloadedBytes == 0,
+                   !current.parts.contains(where: { $0.downloaded > 0 }) {
+                    current.hlsResumeSnapshot = HLSResumeSnapshot(
+                        fingerprint: resolved.fingerprint,
+                        completedSegmentSequence: nil,
+                        outputByteBoundary: 0
+                    )
+                }
+            }
+            if continueAfterPatch {
+                current.status = .paused
+            }
+            current.updatedAt = Date()
+            current.revision += 1
+            do {
+                try await store.save(current)
+            } catch {
+                try? restoreCredential(
+                    oldSecureSource,
+                    oldReference: oldReference,
+                    writtenReference: prepared.projection.credentialReference
+                )
+                throw error
+            }
+            committedCredentialReference = prepared.projection.credentialReference
+        } catch {
+            await resumeAfterFailedSourcePatch(
+                id: id,
+                baseline: baseline,
+                pausedForPatch: pausedForPatch
+            )
+            throw error
+        }
+        records[id] = current
+        if let oldReference,
+           oldReference != committedCredentialReference {
+            try? credentialStore.remove(reference: oldReference)
+        }
+        emit(.updated(current))
+
+        var continued = false
+        if continueAfterPatch, !shuttingDown {
+            try await start(id: id)
+            continued = true
+        }
+        let finalStatus = records[id]?.status ?? current.status
+        return DownloadSourcePatchResult(id: id, status: finalStatus, continued: continued)
+    }
+
+    private func resumeAfterFailedSourcePatch(
+        id: DownloadID,
+        baseline: DownloadRecord,
+        pausedForPatch: Bool
+    ) async {
+        guard pausedForPatch,
+              !shuttingDown,
+              let current = records[id],
+              current.status == .paused,
+              current.revision == baseline.revision,
+              current.source == baseline.source else {
+            return
+        }
+        do {
+            try await start(id: id)
+        } catch {
+            fputs("CoolDownloadCore: unable to resume previous source for \(id)\n", stderr)
+        }
+    }
+
     public func start(id: DownloadID) async throws {
         guard !shuttingDown else {
             throw DownloadCoreError.cancelled
         }
         guard var record = records[id] else {
             throw DownloadCoreError.notFound(id)
+        }
+        if let reason = record.sourceRefreshReason {
+            throw DownloadCoreError.sourceRefreshRequired(reason)
         }
         guard record.status != .completed, tasks[id] == nil else {
             if record.status == .completed {
@@ -511,6 +715,9 @@ public actor DownloadService {
             record.etag = nil
             record.lastModified = nil
             record.supportsResume = nil
+            record.sourceRefreshReason = nil
+            record.hlsResumeSnapshot = nil
+            record.hlsRenditions = nil
             record.parts = []
             record.error = nil
             record.updatedAt = Date()
@@ -579,8 +786,9 @@ public actor DownloadService {
                     try FileManager.default.removeItem(at: record.incompleteURL)
                 }
             }
-            records[id] = nil
             try await store.remove(id: id)
+            records[id] = nil
+            removeCredentialIfPresent(for: record)
             emit(.removed(id: id))
             if let queueID {
                 reconcileQueue(queueID)
@@ -707,7 +915,8 @@ public actor DownloadService {
             switch record.status {
             case .completed, .cancelled:
                 return false
-            case .added, .preparing, .downloading, .paused, .retrying, .failed:
+            case .added, .preparing, .downloading, .paused, .retrying,
+                 .waitingForSourceRefresh, .failed:
                 return true
             }
         }
@@ -785,7 +994,23 @@ public actor DownloadService {
                 emit(.updated(paused))
             }
         } catch {
-            if let current = records[id], current.status != .paused {
+            if let reason = sourceRefreshReason(for: error),
+               let current = records[id],
+               current.status != .paused {
+                var waiting = current
+                waiting.status = .waitingForSourceRefresh
+                waiting.sourceRefreshReason = reason
+                waiting.error = DownloadCoreError.sourceRefreshRequired(reason).localizedDescription
+                waiting.updatedAt = Date()
+                waiting.revision += 1
+                records[id] = waiting
+                do {
+                    try await store.save(waiting)
+                } catch {
+                    reportPersistenceFailure("source refresh state", id: id, error: error)
+                }
+                emit(.updated(waiting))
+            } else if let current = records[id], current.status != .paused {
                 var failed = current
                 failed.status = .failed
                 failed.error = error.localizedDescription
@@ -823,6 +1048,7 @@ public actor DownloadService {
                 try await writer.truncate()
                 record.parts = []
                 record.downloadedBytes = 0
+                record.hlsResumeSnapshot = nil
                 record.updatedAt = Date()
                 record.revision += 1
                 records[id] = record
@@ -852,7 +1078,7 @@ public actor DownloadService {
         defer { activeRateLimiters[id] = nil }
         let (totalBytes, reportedTotal, etag, lastModified, serverFileName) = try await downloadWithRetry(
             id: id,
-            source: effectiveSource(record.source),
+                    source: try await effectiveSource(record.source),
             writer: writer,
             rateLimiter: rateLimiter
         )
@@ -965,15 +1191,24 @@ public actor DownloadService {
                     let result = try await hlsDownloader.download(
                         source: source,
                         writer: writer,
+                        resumeSnapshot: records[id]?.hlsResumeSnapshot,
                         completedSegments: completedSegments,
                         completedPartMetadata: records[id]?.parts ?? [],
-                        progress: { [weak self] bytes, segmentIndex, segmentCount, segmentBytes in
+                        checkpoint: { [weak self] bytes, segmentIndex, segmentCount, segmentBytes, snapshot in
                             await self?.persistHLSProgress(
                                 id: id,
                                 bytes: bytes,
                                 segmentIndex: segmentIndex,
                                 segmentCount: segmentCount,
-                                segmentBytes: segmentBytes
+                                segmentBytes: segmentBytes,
+                                snapshot: snapshot
+                            )
+                        },
+                        manifestResolved: { [weak self] snapshot, renditions in
+                            await self?.persistHLSManifestSnapshot(
+                                id: id,
+                                snapshot: snapshot,
+                                renditions: renditions
                             )
                         },
                         rateLimiter: rateLimiter,
@@ -1680,7 +1915,8 @@ public actor DownloadService {
         bytes: Int64,
         segmentIndex: Int,
         segmentCount: Int,
-        segmentBytes: Int64
+        segmentBytes: Int64,
+        snapshot: HLSResumeSnapshot
     ) async {
         guard var record = records[id], record.status == .downloading else {
             return
@@ -1689,6 +1925,7 @@ public actor DownloadService {
         // HLS task can resume at a persisted segment boundary.
         record.supportsResume = true
         record.downloadedBytes = bytes
+        record.hlsResumeSnapshot = snapshot
         let segmentStart = max(0, bytes - segmentBytes)
         if !record.parts.contains(where: { $0.id == segmentIndex }) {
             record.parts.append(DownloadPart(
@@ -1712,6 +1949,29 @@ public actor DownloadService {
             try await store.save(record)
         } catch {
             reportPersistenceFailure("HLS progress", id: id, error: error)
+        }
+        emit(.updated(record))
+    }
+
+    private func persistHLSManifestSnapshot(
+        id: DownloadID,
+        snapshot: HLSResumeSnapshot,
+        renditions: [HLSRendition]
+    ) async {
+        guard var record = records[id],
+              record.status == .downloading,
+              record.hlsResumeSnapshot != snapshot || record.hlsRenditions != renditions else {
+            return
+        }
+        record.hlsResumeSnapshot = snapshot
+        record.hlsRenditions = renditions
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        do {
+            try await store.save(record)
+        } catch {
+            reportPersistenceFailure("HLS manifest", id: id, error: error)
         }
         emit(.updated(record))
     }
@@ -1762,9 +2022,18 @@ public actor DownloadService {
         )
     }
 
-    private func effectiveSource(_ source: DownloadSource) -> DownloadSource {
+    private func effectiveSource(_ source: DownloadSource) async throws -> DownloadSource {
         var source = source
         var headers = source.headers ?? [:]
+
+        if let reference = source.credentialReference {
+            guard let secure = try credentialStore.read(reference: reference) else {
+                throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+            }
+            source.link = secure.link
+            headers = secure.headers ?? [:]
+            source.downloadPage = secure.downloadPage ?? source.downloadPage
+        }
 
         func hasHeader(_ name: String) -> Bool {
             headers.keys.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
@@ -1793,6 +2062,193 @@ public actor DownloadService {
             source.headers = headers
         }
         return source
+    }
+
+    private func sourceRefreshReason(for error: Error) -> DownloadSourceRefreshReason? {
+        guard let error = error as? DownloadCoreError else { return nil }
+        switch error {
+        case .httpStatus(let status) where status == 401 || status == 403:
+            return .authenticationRequired
+        case .sourceRefreshRequired(let reason):
+            return reason
+        default:
+            return nil
+        }
+    }
+
+    private func validateSourceIdentity(
+        record: DownloadRecord,
+        metadata: SourcePatchMetadata
+    ) throws {
+        let hasPersistedBytes = record.downloadedBytes > 0
+            || record.parts.contains { $0.downloaded > 0 }
+        guard hasPersistedBytes else { return }
+        switch metadata {
+        case .hls(let resolved):
+            guard record.source.kind == .hls,
+                  record.hlsResumeSnapshot?.fingerprint == resolved.fingerprint else {
+                throw DownloadCoreError.resourceChanged
+            }
+            return
+        case .http(let metadata):
+            guard record.source.kind == .http else {
+                throw DownloadCoreError.resourceChanged
+            }
+            guard metadata.supportsRanges else {
+                throw DownloadCoreError.resumeNotSupported
+            }
+            guard let oldTotal = record.totalBytes,
+                  let newTotal = metadata.totalBytes,
+                  oldTotal == newTotal else {
+                throw DownloadCoreError.resourceChanged
+            }
+            if let oldETag = record.etag,
+               isStrongETag(oldETag) {
+                guard let newETag = metadata.etag,
+                      isStrongETag(newETag),
+                      newETag == oldETag else {
+                    throw DownloadCoreError.resourceChanged
+                }
+                return
+            }
+            if let oldLastModified = record.lastModified {
+                guard metadata.lastModified == oldLastModified else {
+                    throw DownloadCoreError.resourceChanged
+                }
+                return
+            }
+            throw DownloadCoreError.resourceChanged
+        }
+    }
+
+    private func isStrongETag(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !normalized.lowercased().hasPrefix("w/") && !normalized.isEmpty
+    }
+
+    private func restoreCredential(
+        _ source: DownloadSecureSource?,
+        oldReference: String?,
+        writtenReference: String?
+    ) throws {
+        if let oldReference {
+            if let source {
+                try credentialStore.write(source, reference: oldReference)
+            } else {
+                try credentialStore.remove(reference: oldReference)
+            }
+        }
+        if let writtenReference, writtenReference != oldReference {
+            try credentialStore.remove(reference: writtenReference)
+        }
+    }
+
+    private func writeCredentialVerified(
+        _ source: DownloadSecureSource,
+        reference: String,
+        previousSource: DownloadSecureSource?,
+        previousReference: String?
+    ) throws {
+        do {
+            try credentialStore.write(source, reference: reference)
+            guard try credentialStore.read(reference: reference) == source else {
+                throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+            }
+        } catch {
+            try? restoreCredential(
+                previousSource,
+                oldReference: previousReference,
+                writtenReference: reference
+            )
+            throw error
+        }
+    }
+
+    private func removeCredentialIfPresent(for record: DownloadRecord) {
+        guard let reference = record.source.credentialReference else { return }
+        do {
+            try credentialStore.remove(reference: reference)
+        } catch {
+            fputs("CoolDownloadCore: unable to remove source credential for \(record.id)\n", stderr)
+        }
+    }
+
+    private func sourceMigrationFailure(
+        _ record: DownloadRecord,
+        projection: DownloadSource
+    ) async throws -> DownloadRecord {
+        var waiting = record
+        waiting.source = projection
+        waiting.status = .waitingForSourceRefresh
+        waiting.sourceRefreshReason = .credentialsUnavailable
+        waiting.error = DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+            .localizedDescription
+        waiting.updatedAt = Date()
+        waiting.revision += 1
+        try await store.saveSourceMigrationFailure(waiting)
+        return waiting
+    }
+
+    private func migrateSourceIfNeeded(_ record: DownloadRecord) async throws -> DownloadRecord {
+        if let reference = record.source.credentialReference,
+           !DownloadSourceSecurity.containsRestrictedData(record.source) {
+            do {
+                guard try credentialStore.read(reference: reference) != nil else {
+                    throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+                }
+                return record
+            } catch {
+                var waiting = record
+                waiting.status = .waitingForSourceRefresh
+                waiting.sourceRefreshReason = .credentialsUnavailable
+                waiting.error = DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable).localizedDescription
+                waiting.updatedAt = Date()
+                waiting.revision += 1
+                try await store.save(waiting)
+                return waiting
+            }
+        }
+        let reference = record.source.credentialReference
+            ?? DownloadSourceSecurity.credentialReference(for: record.id)
+        let prepared = try DownloadSourceSecurity.prepare(record.source, reference: reference)
+        guard let secure = prepared.secureSource else {
+            return record
+        }
+        let existing: DownloadSecureSource?
+        do {
+            existing = try credentialStore.read(reference: reference)
+        } catch {
+            return try await sourceMigrationFailure(record, projection: prepared.projection)
+        }
+        do {
+            if existing == secure {
+                var migrated = record
+                migrated.source = prepared.projection
+                try await store.save(migrated)
+                return migrated
+            }
+            try writeCredentialVerified(
+                secure,
+                reference: reference,
+                previousSource: existing,
+                previousReference: existing == nil ? nil : reference
+            )
+            var migrated = record
+            migrated.source = prepared.projection
+            do {
+                try await store.save(migrated)
+            } catch {
+                try? restoreCredential(
+                    existing,
+                    oldReference: existing == nil ? nil : reference,
+                    writtenReference: reference
+                )
+                throw error
+            }
+            return migrated
+        } catch {
+            return try await sourceMigrationFailure(record, projection: prepared.projection)
+        }
     }
 
     private func emit(_ event: DownloadEvent) {

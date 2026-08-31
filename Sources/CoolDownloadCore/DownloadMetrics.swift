@@ -16,7 +16,14 @@ public enum HTTPRequestMetricKind: String, Sendable, Equatable {
 
 /// A durable checkpoint phase used to locate storage-path bottlenecks without
 /// recording file paths or payload data.
-public enum DownloadCheckpointPhase: String, Sendable, Equatable {
+public enum DownloadCheckpointPhase: String, Sendable, Equatable, Hashable {
+    case projectionEncode
+    case fetch
+    case attributeUpdate
+    case partDiff
+    case contextSave
+    case sqliteFileDelta
+    // Retained for benchmark report compatibility with pre-Core Data runs.
     case recordEncode
     case recordWrite
     case recordSynchronize

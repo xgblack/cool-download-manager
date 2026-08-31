@@ -283,8 +283,8 @@ private final class URLSessionBodyChannel: @unchecked Sendable {
 
     func send(_ data: Data) {
         guard !data.isEmpty else { return }
-        // Contexts normally emit 256 KiB chunks. Keep this class safe for a
-        // transport that delivers a larger callback as well.
+        // The request context caps delegate fragments at 256 KiB. Keep this
+        // channel safe if a transport bypasses that limit.
         if data.count > highWaterMark {
             var offset = 0
             while offset < data.count {

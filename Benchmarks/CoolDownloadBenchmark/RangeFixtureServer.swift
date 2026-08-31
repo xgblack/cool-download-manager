@@ -2,25 +2,69 @@ import Foundation
 import Network
 
 final class RangeFixtureServer: @unchecked Sendable {
+    /// Benchmark-only impairment applied after a matching Range has sent a
+    /// configurable prefix. It never reaches production downloader settings.
+    struct SlowRangeConfiguration: Codable, Sendable, Equatable {
+        let start: Int64
+        let end: Int64?
+        let prefixBytes: Int64
+        let bytesPerSecond: Int64
+        let pauseMilliseconds: Int
+
+        init(
+            start: Int64,
+            end: Int64? = nil,
+            prefixBytes: Int64 = 0,
+            bytesPerSecond: Int64 = 0,
+            pauseMilliseconds: Int = 0
+        ) {
+            self.start = start
+            self.end = end
+            self.prefixBytes = max(0, prefixBytes)
+            self.bytesPerSecond = max(0, bytesPerSecond)
+            self.pauseMilliseconds = max(0, pauseMilliseconds)
+        }
+
+        func matches(_ range: ClosedRange<Int64>) -> Bool {
+            guard range.lowerBound == start else { return false }
+            guard let end else { return true }
+            return range.upperBound == end
+        }
+    }
+
+    struct RequestTiming: Codable, Sendable, Equatable {
+        let rangeStart: Int64?
+        let rangeEnd: Int64?
+        let statusCode: Int
+        let isProbe: Bool
+        let failed: Bool
+        let firstByteMilliseconds: Double?
+        let responseMilliseconds: Double?
+        let bytesSent: Int64
+    }
+
     struct Statistics: Codable, Sendable {
         var requestCount: Int
         var dataRequestCount: Int
         var failedDataRequestCount: Int
         var maximumConcurrentDataRequests: Int
         var bytesSent: Int64
+        var requestTimings: [RequestTiming]
 
         init(
             requestCount: Int,
             dataRequestCount: Int,
             failedDataRequestCount: Int,
             maximumConcurrentDataRequests: Int,
-            bytesSent: Int64
+            bytesSent: Int64,
+            requestTimings: [RequestTiming] = []
         ) {
             self.requestCount = requestCount
             self.dataRequestCount = dataRequestCount
             self.failedDataRequestCount = failedDataRequestCount
             self.maximumConcurrentDataRequests = maximumConcurrentDataRequests
             self.bytesSent = bytesSent
+            self.requestTimings = requestTimings
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -29,6 +73,7 @@ final class RangeFixtureServer: @unchecked Sendable {
             case failedDataRequestCount
             case maximumConcurrentDataRequests
             case bytesSent
+            case requestTimings
         }
 
         /// Early schema-1 reports did not record failed fixture responses.
@@ -50,6 +95,10 @@ final class RangeFixtureServer: @unchecked Sendable {
                 forKey: .maximumConcurrentDataRequests
             ) ?? 0
             bytesSent = try container.decodeIfPresent(Int64.self, forKey: .bytesSent) ?? 0
+            requestTimings = try container.decodeIfPresent(
+                [RequestTiming].self,
+                forKey: .requestTimings
+            ) ?? []
         }
     }
 
@@ -59,6 +108,19 @@ final class RangeFixtureServer: @unchecked Sendable {
         var failedDataRequestCount = 0
         var activeDataRequests = 0
         var maximumConcurrentDataRequests = 0
+        var bytesSent: Int64 = 0
+        var requestTimings: [MutableRequestTiming] = []
+    }
+
+    private struct MutableRequestTiming {
+        let rangeStart: Int64?
+        let rangeEnd: Int64?
+        let isProbe: Bool
+        let startedAtNanoseconds: UInt64
+        var statusCode: Int
+        var failed: Bool
+        var firstByteMilliseconds: Double?
+        var responseMilliseconds: Double?
         var bytesSent: Int64 = 0
     }
 
@@ -103,6 +165,7 @@ final class RangeFixtureServer: @unchecked Sendable {
     private let bytesPerSecond: Int64
     private let firstByteDelay: DispatchTimeInterval
     private let failFirstDataRequests: Int
+    private let slowRange: SlowRangeConfiguration?
     private let listener: NWListener
     // Each connection must be able to advance independently. A serial queue
     // would turn the per-connection throttle into an unintended global
@@ -121,16 +184,24 @@ final class RangeFixtureServer: @unchecked Sendable {
         contentLength: Int64,
         bytesPerSecond: Int64,
         firstByteDelayMilliseconds: Int,
-        failFirstDataRequests: Int = 0
+        failFirstDataRequests: Int = 0,
+        slowRange: SlowRangeConfiguration? = nil
     ) throws {
         guard contentLength > 0 else { throw FixtureServerError.invalidContentLength }
         guard failFirstDataRequests >= 0 else {
             throw FixtureServerError.invalidFailureCount
         }
+        if let slowRange {
+            guard slowRange.start >= 0,
+                  slowRange.end.map({ $0 >= slowRange.start && $0 < contentLength }) ?? true else {
+                throw FixtureServerError.invalidSlowRange
+            }
+        }
         self.contentLength = contentLength
         self.bytesPerSecond = max(0, bytesPerSecond)
         self.firstByteDelay = .milliseconds(max(0, firstByteDelayMilliseconds))
         self.failFirstDataRequests = failFirstDataRequests
+        self.slowRange = slowRange
 
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -188,7 +259,19 @@ final class RangeFixtureServer: @unchecked Sendable {
                 dataRequestCount: mutableStatistics.dataRequestCount,
                 failedDataRequestCount: mutableStatistics.failedDataRequestCount,
                 maximumConcurrentDataRequests: mutableStatistics.maximumConcurrentDataRequests,
-                bytesSent: mutableStatistics.bytesSent
+                bytesSent: mutableStatistics.bytesSent,
+                requestTimings: mutableStatistics.requestTimings.map { timing in
+                    RequestTiming(
+                        rangeStart: timing.rangeStart,
+                        rangeEnd: timing.rangeEnd,
+                        statusCode: timing.statusCode,
+                        isProbe: timing.isProbe,
+                        failed: timing.failed,
+                        firstByteMilliseconds: timing.firstByteMilliseconds,
+                        responseMilliseconds: timing.responseMilliseconds,
+                        bytesSent: timing.bytesSent
+                    )
+                }
             )
         }
     }
@@ -273,16 +356,31 @@ final class RangeFixtureServer: @unchecked Sendable {
     }
 
     private func serve(_ request: ParsedRequest, on connection: NWConnection) {
-        statisticsLock.withLock { mutableStatistics.requestCount += 1 }
-        if request.hasInvalidRange {
-            sendError(status: 416, reason: "Range Not Satisfiable", on: connection)
-            return
-        }
-
         let responseRange = request.range ?? 0...(contentLength - 1)
         let isProbe = responseRange.lowerBound == 0
             && responseRange.upperBound == 0
             && request.range != nil
+        let timingIndex = statisticsLock.withLock { () -> Int in
+            mutableStatistics.requestCount += 1
+            let index = mutableStatistics.requestTimings.count
+            mutableStatistics.requestTimings.append(MutableRequestTiming(
+                rangeStart: request.range?.lowerBound,
+                rangeEnd: request.range?.upperBound,
+                isProbe: isProbe,
+                startedAtNanoseconds: DispatchTime.now().uptimeNanoseconds,
+                statusCode: request.hasInvalidRange ? 416 : 0,
+                failed: request.hasInvalidRange,
+                firstByteMilliseconds: nil,
+                responseMilliseconds: nil
+            ))
+            return index
+        }
+        if request.hasInvalidRange {
+            finishTiming(timingIndex, statusCode: 416, failed: true)
+            sendError(status: 416, reason: "Range Not Satisfiable", on: connection)
+            return
+        }
+
         if !isProbe {
             let shouldFail = statisticsLock.withLock { () -> Bool in
                 mutableStatistics.dataRequestCount += 1
@@ -293,6 +391,7 @@ final class RangeFixtureServer: @unchecked Sendable {
                 return true
             }
             if shouldFail {
+                finishTiming(timingIndex, statusCode: 503, failed: true)
                 sendError(status: 503, reason: "Service Unavailable", on: connection)
                 return
             }
@@ -306,6 +405,7 @@ final class RangeFixtureServer: @unchecked Sendable {
         }
 
         let status = request.range == nil ? 200 : 206
+        setTimingStatus(timingIndex, statusCode: status)
         let reason = status == 200 ? "OK" : "Partial Content"
         let length = responseRange.upperBound - responseRange.lowerBound + 1
         var headers = "HTTP/1.1 \(status) \(reason)\r\n"
@@ -326,15 +426,26 @@ final class RangeFixtureServer: @unchecked Sendable {
                 return
             }
             connection.send(content: headerData, completion: .contentProcessed { error in
+                self.markTimingFirstByte(timingIndex)
                 guard error == nil else {
-                    self.finish(connection, countedAsDataRequest: !isProbe)
+                    self.finish(
+                        connection,
+                        countedAsDataRequest: !isProbe,
+                        timingIndex: timingIndex
+                    )
                     return
                 }
                 self.sendBody(
                     on: connection,
                     offset: responseRange.lowerBound,
                     remaining: length,
-                    countedAsDataRequest: !isProbe
+                    countedAsDataRequest: !isProbe,
+                    timingIndex: timingIndex,
+                    slowRange: self.slowRange?.matches(responseRange) == true
+                        ? self.slowRange
+                        : nil,
+                    sent: 0,
+                    pauseApplied: false
                 )
             })
         }
@@ -344,10 +455,18 @@ final class RangeFixtureServer: @unchecked Sendable {
         on connection: NWConnection,
         offset: Int64,
         remaining: Int64,
-        countedAsDataRequest: Bool
+        countedAsDataRequest: Bool,
+        timingIndex: Int,
+        slowRange: SlowRangeConfiguration?,
+        sent: Int64,
+        pauseApplied: Bool
     ) {
         guard remaining > 0 else {
-            finish(connection, countedAsDataRequest: countedAsDataRequest)
+            finish(
+                connection,
+                countedAsDataRequest: countedAsDataRequest,
+                timingIndex: timingIndex
+            )
             return
         }
         let count = min(chunkSize, Int(remaining))
@@ -359,22 +478,61 @@ final class RangeFixtureServer: @unchecked Sendable {
                 return
             }
             guard error == nil else {
-                self.finish(connection, countedAsDataRequest: countedAsDataRequest)
+                self.finish(
+                    connection,
+                    countedAsDataRequest: countedAsDataRequest,
+                    timingIndex: timingIndex
+                )
                 return
             }
+            let nextSent = sent + Int64(count)
             self.statisticsLock.withLock {
                 self.mutableStatistics.bytesSent += Int64(count)
+                guard self.mutableStatistics.requestTimings.indices.contains(timingIndex) else {
+                    return
+                }
+                self.mutableStatistics.requestTimings[timingIndex].bytesSent += Int64(count)
+            }
+            if remaining == Int64(count) {
+                self.finish(
+                    connection,
+                    countedAsDataRequest: countedAsDataRequest,
+                    timingIndex: timingIndex
+                )
+                return
             }
             let next: @Sendable () -> Void = {
                 self.sendBody(
                     on: connection,
                     offset: offset + Int64(count),
                     remaining: remaining - Int64(count),
-                    countedAsDataRequest: countedAsDataRequest
+                    countedAsDataRequest: countedAsDataRequest,
+                    timingIndex: timingIndex,
+                    slowRange: slowRange,
+                    sent: nextSent,
+                    pauseApplied: pauseApplied || self.crossedSlowBoundary(
+                        slowRange,
+                        sent: sent,
+                        nextSent: nextSent
+                    )
                 )
             }
-            if self.bytesPerSecond > 0 {
-                let delay = Double(count) / Double(self.bytesPerSecond)
+            let delay: Double
+            if let slowRange, nextSent >= slowRange.prefixBytes {
+                let crossesBoundary = !pauseApplied && sent < slowRange.prefixBytes
+                if crossesBoundary, slowRange.pauseMilliseconds > 0 {
+                    delay = Double(slowRange.pauseMilliseconds) / 1_000
+                } else if slowRange.bytesPerSecond > 0 {
+                    delay = Double(count) / Double(slowRange.bytesPerSecond)
+                } else {
+                    delay = 0
+                }
+            } else if self.bytesPerSecond > 0 {
+                delay = Double(count) / Double(self.bytesPerSecond)
+            } else {
+                delay = 0
+            }
+            if delay > 0 {
                 self.queue.asyncAfter(deadline: .now() + delay, execute: next)
             } else {
                 self.queue.async(execute: next)
@@ -382,7 +540,11 @@ final class RangeFixtureServer: @unchecked Sendable {
         })
     }
 
-    private func finish(_ connection: NWConnection, countedAsDataRequest: Bool) {
+    private func finish(
+        _ connection: NWConnection,
+        countedAsDataRequest: Bool,
+        timingIndex: Int
+    ) {
         if countedAsDataRequest {
             statisticsLock.withLock {
                 mutableStatistics.activeDataRequests = max(
@@ -391,7 +553,57 @@ final class RangeFixtureServer: @unchecked Sendable {
                 )
             }
         }
+        finishTiming(timingIndex, statusCode: nil, failed: nil)
         connection.cancel()
+    }
+
+    private func crossedSlowBoundary(
+        _ slowRange: SlowRangeConfiguration?,
+        sent: Int64,
+        nextSent: Int64
+    ) -> Bool {
+        guard let slowRange else { return false }
+        return sent < slowRange.prefixBytes && nextSent >= slowRange.prefixBytes
+    }
+
+    private func setTimingStatus(_ index: Int, statusCode: Int) {
+        statisticsLock.withLock {
+            guard mutableStatistics.requestTimings.indices.contains(index) else { return }
+            mutableStatistics.requestTimings[index].statusCode = statusCode
+        }
+    }
+
+    private func markTimingFirstByte(_ index: Int) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        statisticsLock.withLock {
+            guard mutableStatistics.requestTimings.indices.contains(index) else { return }
+            var timing = mutableStatistics.requestTimings[index]
+            guard timing.firstByteMilliseconds == nil else { return }
+            timing.firstByteMilliseconds = Double(
+                now - timing.startedAtNanoseconds
+            ) / 1_000_000
+            mutableStatistics.requestTimings[index] = timing
+        }
+    }
+
+    private func finishTiming(
+        _ index: Int,
+        statusCode: Int?,
+        failed: Bool?
+    ) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        statisticsLock.withLock {
+            guard mutableStatistics.requestTimings.indices.contains(index) else { return }
+            var timing = mutableStatistics.requestTimings[index]
+            if let statusCode { timing.statusCode = statusCode }
+            if let failed { timing.failed = failed }
+            if timing.responseMilliseconds == nil {
+                timing.responseMilliseconds = Double(
+                    now - timing.startedAtNanoseconds
+                ) / 1_000_000
+            }
+            mutableStatistics.requestTimings[index] = timing
+        }
     }
 
     private func sendError(status: Int, reason: String, on connection: NWConnection) {
@@ -405,6 +617,7 @@ final class RangeFixtureServer: @unchecked Sendable {
 enum FixtureServerError: Error, LocalizedError {
     case invalidContentLength
     case invalidFailureCount
+    case invalidSlowRange
     case missingPort
     case cancelledBeforeReady
 
@@ -418,6 +631,8 @@ enum FixtureServerError: Error, LocalizedError {
             return "Loopback fixture was cancelled before becoming ready"
         case .invalidFailureCount:
             return "Fixture failure count must not be negative"
+        case .invalidSlowRange:
+            return "Fixture slow Range configuration is invalid"
         }
     }
 }

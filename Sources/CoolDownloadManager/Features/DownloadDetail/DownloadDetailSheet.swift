@@ -98,12 +98,67 @@ struct DownloadDetailSheet: View {
                     detailRow("修改时间", modified, showsDivider: false)
                 }
             }
+            if requiresSourceRefresh {
+                sourceRefreshEditor
+            }
             if let error = record.error {
                 SettingsSectionView(title: "错误详情", description: "") {
                     Text(error)
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
                 }
+            }
+        }
+    }
+
+    private var sourceRefreshEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            NativeSettingsGroup(title: "更新下载来源") {
+                NativeSettingsRow(title: "新地址") {
+                    SecureField("HTTPS 地址", text: $viewState.sourceLink)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 360)
+                        .accessibilityLabel("新的下载地址")
+                }
+                ForEach($viewState.sourceHeaders) { $header in
+                    NativeSettingsRow(title: "请求头") {
+                        HStack(spacing: 8) {
+                            TextField("名称", text: $header.name)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 130)
+                                .accessibilityLabel("请求头名称")
+                            SecureField("值", text: $header.value)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                                .accessibilityLabel("请求头值")
+                            Button {
+                                viewState.removeSourceHeader(id: header.id)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                                    .frame(width: 18, height: 18)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("删除请求头")
+                            .accessibilityLabel("删除请求头")
+                        }
+                    }
+                }
+                NativeSettingsRow(title: "", showsDivider: false) {
+                    Button("添加请求头", systemImage: "plus") {
+                        viewState.addSourceHeader()
+                    }
+                    .disabled(viewState.sourceHeaders.count >= 64)
+                }
+            }
+            if let message = viewState.sourceUpdateMessage {
+                Label(message, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
+            if let error = viewState.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
         }
     }
@@ -193,6 +248,50 @@ struct DownloadDetailSheet: View {
         }
     }
 
+    private func updateSource() {
+        let link = viewState.sourceLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !link.isEmpty else {
+            viewState.errorMessage = "请输入新的下载地址。"
+            return
+        }
+        var headers: [String: String] = [:]
+        var normalizedNames: Set<String> = []
+        for header in viewState.sourceHeaders {
+            let name = header.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty, header.value.isEmpty { continue }
+            guard !name.isEmpty else {
+                viewState.errorMessage = "请求头名称不能为空。"
+                return
+            }
+            guard normalizedNames.insert(name.lowercased()).inserted else {
+                viewState.errorMessage = "请求头名称不能重复。"
+                return
+            }
+            headers[name] = header.value
+        }
+
+        viewState.isPatchingSource = true
+        viewState.errorMessage = nil
+        viewState.sourceUpdateMessage = nil
+        Task { @MainActor in
+            do {
+                let result = try await store.patchSource(
+                    id: record.id,
+                    link: link,
+                    headers: headers.isEmpty ? nil : headers
+                )
+                viewState.clearSourceDraft()
+                viewState.isPatchingSource = false
+                viewState.sourceUpdateMessage = result.continued
+                    ? "来源已更新，下载已继续。"
+                    : "来源已更新，任务保持暂停。"
+            } catch {
+                viewState.isPatchingSource = false
+                viewState.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private var actionBar: some View {
         NativePageActionBar {
             if canShowProgress {
@@ -209,26 +308,40 @@ struct DownloadDetailSheet: View {
                 }
             }
             Spacer()
-            switch record.status {
-            case .preparing, .downloading, .retrying:
-                Button("暂停", systemImage: "pause.fill") {
-                    store.selectedIDs = [record.id]
-                    store.pauseSelected()
+            if requiresSourceRefresh {
+                Button(
+                    viewState.isPatchingSource ? "更新中…" : "更新来源",
+                    systemImage: "link.badge.plus"
+                ) {
+                    updateSource()
                 }
-            case .failed, .cancelled:
-                Button("重试", systemImage: "arrow.clockwise") {
-                    store.selectedIDs = [record.id]
-                    store.retrySelected()
-                }
-            case .completed:
-                Button("重新下载", systemImage: "arrow.clockwise") {
-                    store.selectedIDs = [record.id]
-                    store.redownloadSelected()
-                }
-            default:
-                Button("继续", systemImage: "play.fill") {
-                    store.selectedIDs = [record.id]
-                    store.startSelected()
+                .buttonStyle(.borderedProminent)
+                .disabled(viewState.isPatchingSource || viewState.sourceLink
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } else {
+                switch record.status {
+                case .preparing, .downloading, .retrying:
+                    Button("暂停", systemImage: "pause.fill") {
+                        store.selectedIDs = [record.id]
+                        store.pauseSelected()
+                    }
+                case .failed, .cancelled:
+                    Button("重试", systemImage: "arrow.clockwise") {
+                        store.selectedIDs = [record.id]
+                        store.retrySelected()
+                    }
+                case .waitingForSourceRefresh:
+                    EmptyView()
+                case .completed:
+                    Button("重新下载", systemImage: "arrow.clockwise") {
+                        store.selectedIDs = [record.id]
+                        store.redownloadSelected()
+                    }
+                default:
+                    Button("继续", systemImage: "play.fill") {
+                        store.selectedIDs = [record.id]
+                        store.startSelected()
+                    }
                 }
             }
             if viewState.tab == .settings {
@@ -303,7 +416,7 @@ struct DownloadDetailSheet: View {
             return "重新下载时生效"
         }
         switch record.status {
-        case .added, .paused, .failed, .cancelled:
+        case .added, .paused, .failed, .cancelled, .waitingForSourceRefresh:
             return "下次开始时生效"
         case .preparing, .downloading, .retrying:
             return "尚未创建 Range 工作块时本次生效"
@@ -318,7 +431,7 @@ struct DownloadDetailSheet: View {
             return "保存后立即生效"
         case .completed:
             return "重新下载时生效"
-        case .added, .paused, .failed, .cancelled:
+        case .added, .paused, .failed, .cancelled, .waitingForSourceRefresh:
             return "下次开始时生效"
         }
     }
@@ -335,11 +448,15 @@ struct DownloadDetailSheet: View {
 
     private var canShowProgress: Bool {
         switch record.status {
-        case .preparing, .downloading, .paused, .retrying:
+        case .preparing, .downloading, .paused, .retrying, .waitingForSourceRefresh:
             return true
         case .added, .completed, .failed, .cancelled:
             return false
         }
+    }
+
+    private var requiresSourceRefresh: Bool {
+        record.status == .waitingForSourceRefresh || record.sourceRefreshReason != nil
     }
 
     private var statusText: String {
@@ -349,6 +466,7 @@ struct DownloadDetailSheet: View {
         case .downloading: return "下载中"
         case .paused: return "已暂停"
         case .retrying: return "重试中"
+        case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
         case .failed: return "失败"
         case .cancelled: return "已取消"
@@ -359,6 +477,7 @@ struct DownloadDetailSheet: View {
         switch record.status {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
+        case .waitingForSourceRefresh: return "link.badge.plus"
         case .paused, .cancelled: return "pause.circle.fill"
         default: return "arrow.down.circle.fill"
         }
@@ -368,6 +487,7 @@ struct DownloadDetailSheet: View {
         switch record.status {
         case .completed: return .green
         case .failed: return .red
+        case .waitingForSourceRefresh: return .yellow
         case .paused, .cancelled: return .orange
         default: return .accentColor
         }
@@ -417,6 +537,10 @@ private final class DownloadDetailViewState: ObservableObject {
     @Published var completionDialogMode: CompletionDialogMode
     @Published var didCopyLink = false
     @Published var isSaving = false
+    @Published var sourceLink = ""
+    @Published var sourceHeaders = [SourceHeaderDraft()]
+    @Published var isPatchingSource = false
+    @Published var sourceUpdateMessage: String?
     @Published var errorMessage: String?
     private var copyFeedbackRevision = 0
 
@@ -429,6 +553,29 @@ private final class DownloadDetailViewState: ObservableObject {
         } else {
             completionDialogMode = .global
         }
+    }
+
+    struct SourceHeaderDraft: Identifiable {
+        let id = UUID()
+        var name = ""
+        var value = ""
+    }
+
+    func addSourceHeader() {
+        guard sourceHeaders.count < 64 else { return }
+        sourceHeaders.append(SourceHeaderDraft())
+    }
+
+    func removeSourceHeader(id: UUID) {
+        sourceHeaders.removeAll { $0.id == id }
+        if sourceHeaders.isEmpty {
+            sourceHeaders = [SourceHeaderDraft()]
+        }
+    }
+
+    func clearSourceDraft() {
+        sourceLink = ""
+        sourceHeaders = [SourceHeaderDraft()]
     }
 
     func markLinkCopied() {

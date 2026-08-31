@@ -144,16 +144,31 @@ public protocol DownloadIntegrationHandler: Sendable {
     func addFromBrowser(_ request: AddDownloadsRequest) async throws
     func listQueues() async throws -> [IntegrationQueue]
     func addHeadless(_ request: HeadlessDownloadRequest) async throws -> DownloadID
+    func patchSource(id: DownloadID, patch: DownloadSourcePatch) async throws -> DownloadSourcePatchResult
 }
 
 public enum DownloadIntegrationError: Error, LocalizedError, Sendable, Equatable {
     case confirmationUnavailable
+    case sourcePatchUnavailable
 
     public var errorDescription: String? {
         switch self {
         case .confirmationUnavailable:
             return "无法打开下载确认窗口"
+        case .sourcePatchUnavailable:
+            return "当前下载处理器不支持更新来源"
         }
+    }
+}
+
+public extension DownloadIntegrationHandler {
+    func patchSource(
+        id: DownloadID,
+        patch: DownloadSourcePatch
+    ) async throws -> DownloadSourcePatchResult {
+        _ = id
+        _ = patch
+        throw DownloadIntegrationError.sourcePatchUnavailable
     }
 }
 
@@ -227,5 +242,12 @@ public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
             try await service.start(id: id)
         }
         return id
+    }
+
+    public func patchSource(
+        id: DownloadID,
+        patch: DownloadSourcePatch
+    ) async throws -> DownloadSourcePatchResult {
+        try await service.patchSource(id: id, patch: patch)
     }
 }

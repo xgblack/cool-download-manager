@@ -1,4 +1,5 @@
 import Foundation
+import CoolDownloadCore
 
 public struct HTTPRequest: Sendable, Equatable {
     public var method: String
@@ -78,10 +79,37 @@ public actor IntegrationRouter {
                 _ = try await handler.addHeadless(headless)
                 return .text(200, "OK")
             default:
+                if request.method.uppercased() == "PATCH",
+                   let id = sourcePatchDownloadID(from: request.path) {
+                    let patch = try decoder.decode(DownloadSourcePatch.self, from: request.body)
+                    _ = try DownloadSourceSecurity.prepare(
+                        DownloadSource(kind: .http, link: patch.link, headers: patch.headers),
+                        reference: "integration.validation"
+                    )
+                    let result = try await handler.patchSource(id: id, patch: patch)
+                    return HTTPResponse(
+                        statusCode: 200,
+                        headers: ["Content-Type": "application/json; charset=utf-8"],
+                        body: try encoder.encode(result)
+                    )
+                }
                 return .text(404, "Not Found")
             }
         } catch let error as DecodingError {
-            return .text(400, "Invalid request: \(error.localizedDescription)")
+            _ = error
+            return .text(400, "Invalid request")
+        } catch let error as DownloadCoreError {
+            switch error {
+            case .notFound:
+                return .text(404, "Not Found")
+            case .invalidURL, .invalidSourcePatch:
+                return .text(400, "Invalid request")
+            case .invalidState, .resourceChanged, .resumeNotSupported,
+                 .sourceRefreshRequired:
+                return .text(409, "Source update conflict")
+            default:
+                return .text(500, "Request failed")
+            }
         } catch {
             return .text(500, "Request failed")
         }
@@ -93,5 +121,18 @@ public actor IntegrationRouter {
         }
         let items = try decoder.decode([IntegrationDownloadCredential].self, from: data)
         return AddDownloadsRequest(items: items)
+    }
+
+    private func sourcePatchDownloadID(from path: String) -> DownloadID? {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 4,
+              components[0].isEmpty,
+              components[1] == "downloads",
+              components[3] == "source",
+              let id = DownloadID(components[2]),
+              id > 0 else {
+            return nil
+        }
+        return id
     }
 }

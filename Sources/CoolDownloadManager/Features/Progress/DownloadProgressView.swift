@@ -314,6 +314,8 @@ struct DownloadProgressView: View {
                 Button("重试", systemImage: "arrow.clockwise") {
                     store.retry(id: currentRecord.id)
                 }
+            case .waitingForSourceRefresh:
+                EmptyView()
             default:
                 EmptyView()
             }
@@ -370,6 +372,7 @@ struct DownloadProgressView: View {
         case .downloading: return "下载中"
         case .paused: return "已暂停"
         case .retrying: return "重试中"
+        case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
         case .failed: return currentRecord.error.map { "失败：\($0)" } ?? "失败"
         case .cancelled: return "已取消"
@@ -380,6 +383,7 @@ struct DownloadProgressView: View {
         switch currentRecord.status {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
+        case .waitingForSourceRefresh: return "link.badge.plus"
         case .paused, .cancelled: return "pause.circle.fill"
         default: return "arrow.down.circle.fill"
         }
@@ -389,6 +393,7 @@ struct DownloadProgressView: View {
         switch currentRecord.status {
         case .completed: return .green
         case .failed: return .red
+        case .waitingForSourceRefresh: return .yellow
         case .paused, .cancelled: return .orange
         default: return .accentColor
         }

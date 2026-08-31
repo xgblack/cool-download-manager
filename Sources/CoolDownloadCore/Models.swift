@@ -13,9 +13,15 @@ public enum DownloadStatus: String, Codable, Sendable {
     case downloading
     case paused
     case retrying
+    case waitingForSourceRefresh
     case completed
     case failed
     case cancelled
+}
+
+public enum DownloadSourceRefreshReason: String, Codable, Sendable, Equatable {
+    case authenticationRequired
+    case credentialsUnavailable
 }
 
 public struct DownloadSchedulerConfiguration: Sendable, Equatable {
@@ -97,19 +103,24 @@ public struct DownloadSource: Codable, Sendable, Equatable {
     public var headers: [String: String]?
     public var downloadPage: String?
     public var suggestedName: String?
+    /// Stable task-level lookup key. The referenced full URL and request
+    /// headers live in Keychain and are resolved only when a request starts.
+    public var credentialReference: String?
 
     public init(
         kind: DownloadKind,
         link: String,
         headers: [String: String]? = nil,
         downloadPage: String? = nil,
-        suggestedName: String? = nil
+        suggestedName: String? = nil,
+        credentialReference: String? = nil
     ) {
         self.kind = kind
         self.link = link
         self.headers = headers
         self.downloadPage = downloadPage
         self.suggestedName = suggestedName
+        self.credentialReference = credentialReference
     }
 }
 
@@ -197,6 +208,9 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     /// The deterministic temporary filename used for this task. `nil` uses
     /// the default `.dl-{id}.cooldm.part` path.
     public var incompleteFileName: String?
+    public var sourceRefreshReason: DownloadSourceRefreshReason?
+    public var hlsResumeSnapshot: HLSResumeSnapshot?
+    public var hlsRenditions: [HLSRendition]?
     public var revision: Int64
 
     public init(
@@ -219,6 +233,9 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         fileChecksum: String? = nil,
         taskSettings: DownloadTaskSettings? = nil,
         incompleteFileName: String? = nil,
+        sourceRefreshReason: DownloadSourceRefreshReason? = nil,
+        hlsResumeSnapshot: HLSResumeSnapshot? = nil,
+        hlsRenditions: [HLSRendition]? = nil,
         revision: Int64 = 1
     ) {
         self.id = id
@@ -240,6 +257,9 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         self.fileChecksum = fileChecksum
         self.taskSettings = taskSettings
         self.incompleteFileName = incompleteFileName
+        self.sourceRefreshReason = sourceRefreshReason
+        self.hlsResumeSnapshot = hlsResumeSnapshot
+        self.hlsRenditions = hlsRenditions
         self.revision = revision
     }
 
@@ -282,6 +302,60 @@ public struct AddDownloadRequest: Codable, Sendable, Equatable {
         self.categoryID = categoryID
         self.start = start
         self.taskSettings = taskSettings
+    }
+}
+
+public struct DownloadSourcePatch: Codable, Sendable, Equatable {
+    public var link: String
+    public var headers: [String: String]?
+
+    public init(link: String, headers: [String: String]? = nil) {
+        self.link = link
+        self.headers = headers
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case link, headers
+    }
+
+    private struct AnyCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+        }
+
+        init?(intValue: Int) {
+            return nil
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let allValues = try decoder.container(keyedBy: AnyCodingKey.self)
+        let allowedKeys = Set(CodingKeys.allCases.map(\.rawValue))
+        guard allValues.allKeys.allSatisfy({ allowedKeys.contains($0.stringValue) }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: allValues.allKeys.first { !allowedKeys.contains($0.stringValue) }!,
+                in: allValues,
+                debugDescription: "来源更新请求包含未知字段"
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        link = try container.decode(String.self, forKey: .link)
+        headers = try container.decodeIfPresent([String: String].self, forKey: .headers)
+    }
+}
+
+public struct DownloadSourcePatchResult: Codable, Sendable, Equatable {
+    public let id: DownloadID
+    public let status: DownloadStatus
+    public let continued: Bool
+
+    public init(id: DownloadID, status: DownloadStatus, continued: Bool) {
+        self.id = id
+        self.status = status
+        self.continued = continued
     }
 }
 

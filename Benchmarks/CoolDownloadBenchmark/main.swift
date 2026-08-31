@@ -30,6 +30,22 @@ struct CoolDownloadBenchmarkMain {
             }
 
             let configuration = try BenchmarkConfiguration.parse(arguments: arguments)
+            if configuration.persistenceBenchmark {
+                let report = try await PersistenceBenchmarkRunner.run(configuration: configuration)
+                let data = try encoder.encode(report)
+                if let outputPath = configuration.outputPath {
+                    let outputURL = URL(fileURLWithPath: outputPath).standardizedFileURL
+                    try FileManager.default.createDirectory(
+                        at: outputURL.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try data.write(to: outputURL, options: .atomic)
+                    fputs("report: \(outputURL.path)\n", stderr)
+                }
+                FileHandle.standardOutput.write(data)
+                FileHandle.standardOutput.write(Data("\n".utf8))
+                return
+            }
             if configuration.interruptionAfterMilliseconds != nil {
                 let report = try await runRecoveryScenario(configuration: configuration)
                 let data = try encoder.encode(report)
@@ -104,7 +120,7 @@ struct CoolDownloadBenchmarkMain {
         }
 
         return BenchmarkReport(
-            schemaVersion: 4,
+            schemaVersion: 5,
             generatedAt: Date(),
             environment: .current,
             configuration: configuration.redactedForReport(),
@@ -124,7 +140,8 @@ struct CoolDownloadBenchmarkMain {
             contentLength: configuration.sizeBytes,
             bytesPerSecond: configuration.perConnectionBytesPerSecond,
             firstByteDelayMilliseconds: configuration.firstByteDelayMilliseconds,
-            failFirstDataRequests: configuration.failFirstDataRequests
+            failFirstDataRequests: configuration.failFirstDataRequests,
+            slowRange: configuration.slowRangeConfiguration()
         )
         let sourceURL = try await server.start()
         defer { server.stop() }
@@ -532,7 +549,8 @@ struct CoolDownloadBenchmarkMain {
             contentLength: configuration.sizeBytes,
             bytesPerSecond: configuration.perConnectionBytesPerSecond,
             firstByteDelayMilliseconds: configuration.firstByteDelayMilliseconds,
-            failFirstDataRequests: configuration.failFirstDataRequests
+            failFirstDataRequests: configuration.failFirstDataRequests,
+            slowRange: configuration.slowRangeConfiguration()
         )
         let sourceURL = try await server.start()
         defer { server.stop() }
@@ -695,6 +713,7 @@ struct CoolDownloadBenchmarkMain {
             : completedByteCounts.reduce(0, +)
         let events = metrics.snapshot()
         let peakValues = peaks.peaks()
+        let serverStatistics = server?.statistics()
         return BenchmarkRun(
             requestedConnectionsPerTask: requestedConnections,
             repetition: repetition,
@@ -708,6 +727,10 @@ struct CoolDownloadBenchmarkMain {
             checkpointPhaseMetrics: BenchmarkMetricSummarizer.summarizeCheckpointPhases(events),
             eventMetrics: BenchmarkMetricSummarizer.summarizeEvents(events),
             taskMetrics: BenchmarkMetricSummarizer.summarizeTasks(events),
+            rangeTailMetrics: BenchmarkMetricSummarizer.summarizeRangeTail(
+                serverStatistics,
+                configuration: configuration.slowRangeConfiguration()
+            ),
             resources: ResourceMetricSummary(
                 userCPUMilliseconds: nanosecondsDelta(
                     endResources.userCPUTimeNanoseconds,
@@ -729,7 +752,7 @@ struct CoolDownloadBenchmarkMain {
                     startResources.diskWriteBytes
                 )
             ),
-            server: server?.statistics(),
+            server: serverStatistics,
             verified: verified
         )
     }
