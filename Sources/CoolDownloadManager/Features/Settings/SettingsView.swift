@@ -16,6 +16,7 @@ struct SettingsView: View {
     @ObservedObject var coordinator: AppCoordinator
     @StateObject private var viewState: SettingsViewState
     @StateObject private var windowGuard = SettingsWindowGuard()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(store: AppStore, coordinator: AppCoordinator) {
         self.store = store
@@ -175,7 +176,7 @@ struct SettingsView: View {
 
     private func toggleSidebar() {
         guard viewState.path.isEmpty else { return }
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.28)) {
             viewState.isSidebarVisible.toggle()
         }
     }
@@ -336,12 +337,6 @@ private struct SettingsWindowHeader: View {
             .help("隐藏侧栏")
             .accessibilityLabel("隐藏侧栏")
 
-            Image(systemName: "gearshape.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text("设置")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 13)

@@ -43,7 +43,7 @@ struct AddDownloadSheet: View {
                     NativeSettingsRow(title: "文件名") {
                         TextField("自动从地址解析", text: $nameText)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 300)
+                            .frame(minWidth: 220, idealWidth: 300, maxWidth: 420)
                     }
                     NativeSettingsRow(title: "保存位置") {
                         HStack(spacing: 8) {
@@ -52,7 +52,7 @@ struct AddDownloadSheet: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                                .frame(width: 278, alignment: .leading)
+                                .frame(minWidth: 160, idealWidth: 278, maxWidth: .infinity, alignment: .leading)
                                 .help(folderURL.path)
                             Button(action: onChooseFolder) {
                                 Image(systemName: "folder")
@@ -69,7 +69,7 @@ struct AddDownloadSheet: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 220)
+                        .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
                     }
                     NativeSettingsRow(title: "分类") {
                         Picker("分类", selection: $categoryID) {
@@ -79,7 +79,7 @@ struct AddDownloadSheet: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 220)
+                        .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
                     }
                     NativeSettingsToggleRow(
                         "添加后立即开始",
@@ -101,7 +101,6 @@ struct AddDownloadSheet: View {
                     .disabled(urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .frame(width: 700, height: 620)
-        .navigationTitle(title)
+        .frame(minWidth: 620, idealWidth: 700, minHeight: 560, idealHeight: 620)
     }
 }

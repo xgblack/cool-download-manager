@@ -40,6 +40,7 @@ struct DownloadProgressView: View {
     let onClose: () -> Void
 
     @StateObject private var viewState = ProgressViewState()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var currentRecord: DownloadRecord {
         store.record(id: record.id) ?? record
@@ -185,7 +186,7 @@ struct DownloadProgressView: View {
                         .foregroundStyle(.secondary)
                 }
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1)) {
                         viewState.showsPartDetails.toggle()
                     }
                 } label: {

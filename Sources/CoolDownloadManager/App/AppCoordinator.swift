@@ -209,7 +209,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         guard let window else { return }
         settingsWindow = window
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.settings-window")
-        window.title = "下载管理器"
+        window.title = "设置"
         // Keep the settings editor below the native title bar. Its custom
         // section header contains navigation controls and must not overlap the
         // traffic-light region when the window is resized.
@@ -550,51 +550,140 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     }
 }
 
-/// Captures the custom header area before SwiftUI content receives the mouse
-/// event and applies the pointer delta directly to the panel frame.
+enum UtilityPanelMouseTarget: Equatable {
+    case systemWindowButton
+    case interactiveContent
+    case emptyHeader
+    case nonHeaderContent
+}
+
+enum UtilityPanelEventRouting {
+    static func shouldBeginDrag(for target: UtilityPanelMouseTarget) -> Bool {
+        target == .emptyHeader
+    }
+}
+
+/// Captures only the empty header area before SwiftUI content receives the
+/// mouse event and applies the pointer delta directly to the panel frame.
 private final class UtilityPanel: NSPanel {
-    private let movableHeaderHeight: CGFloat = 88
-    private var dragStartMouseLocation: NSPoint?
-    private var dragStartOrigin: NSPoint?
+    private let fallbackHeaderHeight: CGFloat = 64
+    private let minimumHeaderHeight: CGFloat = 44
+    private let maximumHeaderHeight: CGFloat = 96
+
+    private struct DragState {
+        let startMouseLocation: NSPoint
+        let startOrigin: NSPoint
+    }
+
+    private var dragState: DragState?
 
     override func sendEvent(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
-            guard isMovableHeaderEvent(event) else {
+            guard UtilityPanelEventRouting.shouldBeginDrag(for: mouseTarget(for: event)) else {
                 super.sendEvent(event)
                 return
             }
-            dragStartMouseLocation = NSEvent.mouseLocation
-            dragStartOrigin = frame.origin
+            dragState = DragState(
+                startMouseLocation: NSEvent.mouseLocation,
+                startOrigin: frame.origin
+            )
         case .leftMouseDragged:
-            guard let dragStartMouseLocation, let dragStartOrigin else {
+            guard let dragState else {
                 super.sendEvent(event)
                 return
             }
             let current = NSEvent.mouseLocation
             setFrameOrigin(NSPoint(
-                x: dragStartOrigin.x + current.x - dragStartMouseLocation.x,
-                y: dragStartOrigin.y + current.y - dragStartMouseLocation.y
+                x: dragState.startOrigin.x + current.x - dragState.startMouseLocation.x,
+                y: dragState.startOrigin.y + current.y - dragState.startMouseLocation.y
             ))
         case .leftMouseUp:
-            guard dragStartMouseLocation != nil else {
+            guard dragState != nil else {
                 super.sendEvent(event)
                 return
             }
-            dragStartMouseLocation = nil
-            dragStartOrigin = nil
+            self.dragState = nil
         default:
             super.sendEvent(event)
         }
     }
 
-    private func isMovableHeaderEvent(_ event: NSEvent) -> Bool {
-        guard let contentView, contentView.bounds.height > movableHeaderHeight else {
-            return false
-        }
+    override func resignMain() {
+        dragState = nil
+        super.resignMain()
+    }
+
+    override func orderOut(_ sender: Any?) {
+        dragState = nil
+        super.orderOut(sender)
+    }
+
+    private func mouseTarget(for event: NSEvent) -> UtilityPanelMouseTarget {
+        guard let contentView else { return .nonHeaderContent }
         let point = contentView.convert(event.locationInWindow, from: nil)
-        return contentView.bounds.contains(point)
-            && contentView.hitTest(point) != nil
-            && point.y >= contentView.bounds.maxY - movableHeaderHeight
+
+        if standardWindowButtonFrames.contains(where: { $0.insetBy(dx: -4, dy: -4).contains(event.locationInWindow) }) {
+            return .systemWindowButton
+        }
+
+        guard movableHeaderRect(for: contentView).contains(point) else {
+            return .nonHeaderContent
+        }
+
+        guard let hitView = contentView.hitTest(point) else {
+            return .emptyHeader
+        }
+        return containsInteractiveView(hitView, contentView: contentView)
+            ? .interactiveContent
+            : .emptyHeader
+    }
+
+    private var standardWindowButtonFrames: [NSRect] {
+        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { type in
+            guard let button = standardWindowButton(type) else { return nil }
+            return button.convert(button.bounds, to: nil)
+        }
+    }
+
+    private func movableHeaderRect(for contentView: NSView) -> NSRect {
+        let bounds = contentView.bounds
+        guard bounds.height > minimumHeaderHeight else { return .zero }
+
+        // `contentLayoutRect` tracks the actual title-bar geometry across
+        // full-size content layouts. Fall back only when AppKit has not laid
+        // out the window yet (for example during the first event).
+        let inferredHeight = frame.height - contentLayoutRect.height
+        let resolvedHeaderHeight = (minimumHeaderHeight...maximumHeaderHeight).contains(inferredHeight)
+            ? inferredHeight
+            : fallbackHeaderHeight
+        let headerHeight = min(
+            bounds.height,
+            max(
+                minimumHeaderHeight,
+                resolvedHeaderHeight
+            )
+        )
+        return NSRect(
+            x: bounds.minX,
+            y: bounds.maxY - headerHeight,
+            width: bounds.width,
+            height: headerHeight
+        )
+    }
+
+    private func containsInteractiveView(_ view: NSView, contentView: NSView) -> Bool {
+        var current: NSView? = view
+        while let candidate = current, candidate !== contentView {
+            if !candidate.mouseDownCanMoveWindow
+                || candidate is NSControl
+                || candidate is NSTextView
+                || candidate is NSScrollView
+                || candidate is NSClipView {
+                return true
+            }
+            current = candidate.superview
+        }
+        return false
     }
 }

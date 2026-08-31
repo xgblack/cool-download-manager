@@ -26,6 +26,7 @@ struct MainView: View {
         } detail: {
             NavigationStack(path: $coordinator.mainPath) {
                 rootContent
+                    .navigationTitle("下载")
                     .navigationDestination(for: MainDestination.self) { destination in
                         destinationView(destination)
                     }
@@ -120,11 +121,36 @@ struct MainView: View {
     }
 
     private var rootContent: some View {
-        VStack(spacing: 0) {
-            downloadTable
-            footer
+        Group {
+            if !store.isReady {
+                startupState
+            } else {
+                VStack(spacing: 0) {
+                    downloadTable
+                    footer
+                }
+            }
         }
-        .navigationTitle("下载")
+    }
+
+    @ViewBuilder
+    private var startupState: some View {
+        if let error = store.errorMessage {
+            NativeEmptyState(
+                systemImage: "exclamationmark.triangle",
+                title: "无法加载下载列表",
+                message: error
+            )
+        } else {
+            NativeEmptyState(
+                systemImage: "arrow.triangle.2.circlepath",
+                title: "正在加载下载列表",
+                message: "正在准备下载服务。"
+            ) {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
     }
 
     @ViewBuilder
@@ -133,20 +159,16 @@ struct MainView: View {
         case .downloadDetail(let id):
             if let record = store.downloadList.record(id: id) {
                 DownloadDetailSheet(record: record, store: store.downloadList, coordinator: coordinator)
-                    .navigationTitle(record.name)
             } else {
                 ContentUnavailableFallback(title: "任务不存在", message: "该下载记录已被删除或无法读取。")
                     .navigationTitle("下载详情")
             }
         case .queues:
             QueueView(store: store)
-                .navigationTitle("队列")
         case .categories:
             CategoryView(store: store)
-                .navigationTitle("分类")
         case .appInfo(let page):
             infoView(page)
-                .navigationTitle(page == .thirdParty ? "第三方库" : "翻译者")
         }
     }
 
@@ -316,7 +338,7 @@ struct MainView: View {
                 Label("新建下载", systemImage: "plus")
                     .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(.borderedProminent)
             .help("新建下载")
         }
     }
@@ -368,6 +390,11 @@ struct MainView: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
+                .transaction { transaction in
+                    // Progress events arrive frequently; avoid implicit
+                    // layout animation making rows lag behind the source.
+                    transaction.animation = nil
+                }
             }
         }
     }
@@ -394,50 +421,74 @@ struct MainView: View {
         .background(.bar)
     }
 
+    @ViewBuilder
     private var emptyState: some View {
-        NativeEmptyState(
-            systemImage: "arrow.down.circle",
-            title: "暂无下载",
-            message: store.downloadList.searchText.isEmpty
-                ? "从上方添加下载地址，或从剪贴板新建下载"
-                : "没有匹配的下载任务"
-        ) {
-            Button("新建下载") { coordinator.presentAddDownload() }
-                .keyboardShortcut(.defaultAction)
+        if store.downloadList.downloads.isEmpty {
+            NativeEmptyState(
+                systemImage: "arrow.down.circle",
+                title: "暂无下载",
+                message: "添加后会显示在这里。"
+            )
+        } else if !store.downloadList.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            NativeEmptyState(
+                systemImage: "magnifyingglass",
+                title: "没有匹配的下载任务",
+                message: "当前搜索没有匹配结果。"
+            ) {
+                Button("清除搜索") {
+                    store.downloadList.searchText = ""
+                }
+            }
+        } else {
+            NativeEmptyState(
+                systemImage: store.downloadList.filter.systemImage,
+                title: "当前筛选为空",
+                message: "当前筛选没有匹配结果。"
+            ) {
+                Button("显示全部") {
+                    store.downloadList.filter = .all
+                }
+            }
         }
     }
 
     private var footer: some View {
-        NativePageActionBar {
+        NativePageActionBar(usesGlass: false) {
             Label(footerSummary, systemImage: "arrow.down.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Spacer()
-            Button {
-                store.downloadList.startSelected()
-            } label: {
-                Label("继续", systemImage: "play.fill")
+            if store.downloadList.hasSelection || hasActiveDownloads {
+                Spacer(minLength: 16)
             }
-            .disabled(!store.downloadList.canStartSelection)
-            Button {
-                store.downloadList.pauseSelected()
-            } label: {
-                Label("暂停", systemImage: "pause.fill")
+            if store.downloadList.canStartSelection {
+                Button {
+                    store.downloadList.startSelected()
+                } label: {
+                    Label("继续", systemImage: "play.fill")
+                }
             }
-            .disabled(!store.downloadList.canPauseSelection)
-            Button {
-                store.downloadList.stopAll()
-            } label: {
-                Label("停止全部", systemImage: "stop.fill")
+            if store.downloadList.canPauseSelection {
+                Button {
+                    store.downloadList.pauseSelected()
+                } label: {
+                    Label("暂停", systemImage: "pause.fill")
+                }
             }
-            .disabled(!store.downloadList.downloads.contains { $0.status == .downloading || $0.status == .preparing || $0.status == .retrying })
-            Button(role: .destructive) {
-                viewState.isShowingRemoveConfirmation = true
-            } label: {
-                Label("删除", systemImage: "trash")
+            if hasActiveDownloads {
+                Button {
+                    store.downloadList.stopAll()
+                } label: {
+                    Label("停止全部", systemImage: "stop.fill")
+                }
             }
-            .disabled(!store.downloadList.hasSelection)
+            if store.downloadList.hasSelection {
+                Button(role: .destructive) {
+                    viewState.isShowingRemoveConfirmation = true
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
         }
         .buttonStyle(.borderless)
     }
@@ -447,7 +498,16 @@ struct MainView: View {
         let active = store.downloadList.downloads.filter {
             $0.status == .preparing || $0.status == .downloading || $0.status == .retrying
         }.count
+        if store.downloadList.selectedIDs.isEmpty {
+            return "\(total) 个任务 · \(active) 个进行中"
+        }
         return "\(total) 个任务 · \(active) 个进行中 · 已选 \(store.downloadList.selectedIDs.count)"
+    }
+
+    private var hasActiveDownloads: Bool {
+        store.downloadList.downloads.contains {
+            $0.status == .downloading || $0.status == .preparing || $0.status == .retrying
+        }
     }
 
     private func resetAddForm() {

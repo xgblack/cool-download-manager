@@ -29,7 +29,7 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
               window.identifier?.rawValue == "com.cooldownloadmanager.settings-window" else {
             return
         }
-        window.title = "下载管理器"
+        window.title = "设置"
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

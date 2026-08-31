@@ -6,7 +6,6 @@ private enum SettingsLayout {
     static let contentWidth: CGFloat = 780
     static let labelWidth: CGFloat = 232
     static let rowHeight: CGFloat = 50
-    static let groupRadius: CGFloat = 8
 }
 
 struct GeneralSettingsPage: View {
@@ -438,8 +437,8 @@ struct SettingsPage<Content: View>: View {
     }
 }
 
-/// Shared grouped surface used by task editors. The low-opacity fill separates
-/// controls from the window without introducing another glass layer.
+/// Shared section used by task editors. Grouping comes from hierarchy and
+/// spacing so dense forms do not become a stack of nested cards.
 struct SettingsSectionView<Content: View>: View {
     let title: String
     let description: String
@@ -459,12 +458,7 @@ struct SettingsSectionView<Content: View>: View {
             VStack(alignment: .leading, spacing: 10) {
                 content()
             }
-            .padding(16)
-            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
-            }
+            .padding(.top, 2)
         }
     }
 }
@@ -482,11 +476,6 @@ struct NativeSettingsGroup<Content: View>: View {
             VStack(spacing: 0) {
                 content()
             }
-            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: SettingsLayout.groupRadius, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
-            }
         }
     }
 }
@@ -495,6 +484,7 @@ struct NativeSettingsRow<Content: View>: View {
     let title: String
     let showsDivider: Bool
     @ViewBuilder let content: () -> Content
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     init(
         title: String,
@@ -507,22 +497,53 @@ struct NativeSettingsRow<Content: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 18) {
-            Text(title)
-                .font(.body)
-                .frame(minWidth: SettingsLayout.labelWidth, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 10)
-            content()
-        }
+        rowLayout
         .padding(.horizontal, 18)
+        .padding(.vertical, usesStackedLayout ? 10 : 0)
         .frame(minHeight: SettingsLayout.rowHeight)
         .overlay(alignment: .bottom) {
             if showsDivider {
                 Divider()
                     .padding(.leading, 18)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var rowLayout: some View {
+        if usesStackedLayout {
+            VStack(alignment: .leading, spacing: 8) {
+                rowLabel
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            HStack(spacing: 18) {
+                rowLabel
+                Spacer(minLength: 12)
+                content()
+            }
+        }
+    }
+
+    private var rowLabel: some View {
+        Text(title)
+            .font(.body)
+            .frame(
+                minWidth: usesStackedLayout ? 0 : 180,
+                idealWidth: usesStackedLayout ? nil : SettingsLayout.labelWidth,
+                maxWidth: usesStackedLayout ? .infinity : 280,
+                alignment: .leading
+            )
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var usesStackedLayout: Bool {
+        switch dynamicTypeSize {
+        case .xSmall, .small, .medium, .large:
+            return false
+        default:
+            return true
         }
     }
 }
@@ -766,9 +787,8 @@ struct SettingsSidebarIcon: View {
     var body: some View {
         Image(systemName: section.systemImage)
             .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(section.tint)
+            .foregroundStyle(.secondary)
             .frame(width: 28, height: 28)
-            .background(section.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .accessibilityHidden(true)
     }
 }

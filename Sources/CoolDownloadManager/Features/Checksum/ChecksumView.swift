@@ -72,8 +72,7 @@ struct ChecksumView: View {
                 .keyboardShortcut(.cancelAction)
             }
         }
-        .frame(width: 1_000, height: 580)
-        .navigationTitle("验证文件完整性")
+        .frame(minWidth: 900, idealWidth: 1_000, minHeight: 480, idealHeight: 580)
     }
 
     private func row(_ record: DownloadRecord) -> some View {

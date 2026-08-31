@@ -21,4 +21,12 @@ struct ThemeTests {
         #expect(AppTheme("system").windowAppearance == nil)
         #expect(AppTheme("dark").windowAppearance?.name == .darkAqua)
     }
+
+    @Test("工具面板只允许空白标题区启动拖拽")
+    func utilityPanelRoutesControlsToAppKit() {
+        #expect(!UtilityPanelEventRouting.shouldBeginDrag(for: .systemWindowButton))
+        #expect(!UtilityPanelEventRouting.shouldBeginDrag(for: .interactiveContent))
+        #expect(!UtilityPanelEventRouting.shouldBeginDrag(for: .nonHeaderContent))
+        #expect(UtilityPanelEventRouting.shouldBeginDrag(for: .emptyHeader))
+    }
 }

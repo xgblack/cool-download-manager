@@ -129,8 +129,7 @@ struct BatchDownloadView: View {
                 .disabled(state.preview == nil)
             }
         }
-        .frame(width: 780, height: 700)
-        .navigationTitle("批量下载")
+        .frame(minWidth: 680, idealWidth: 780, minHeight: 620, idealHeight: 700)
         .fileImporter(
             isPresented: $state.isFolderPickerPresented,
             allowedContentTypes: [.folder],

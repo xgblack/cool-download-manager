@@ -4,7 +4,7 @@ import SwiftUI
 /// Shared Liquid Glass primitives for the macOS client. Glass is reserved for
 /// transient controls and utility panels; dense download content stays flat.
 enum LiquidGlassMetrics {
-    static let actionCornerRadius: CGFloat = 18
+    static let actionCornerRadius: CGFloat = 12
     static let panelCornerRadius: CGFloat = 20
 }
 

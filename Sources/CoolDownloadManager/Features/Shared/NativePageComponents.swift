@@ -7,7 +7,6 @@ enum NativePageLayout {
     static let compactContentWidth: CGFloat = 680
     static let headerHeight: CGFloat = 58
     static let actionBarHeight: CGFloat = 60
-    static let groupRadius: CGFloat = 8
 }
 
 struct NativePageHeader<Trailing: View>: View {
@@ -34,19 +33,19 @@ struct NativePageHeader<Trailing: View>: View {
     var body: some View {
         HStack(spacing: 11) {
             Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.body.weight(.semibold))
                 .foregroundStyle(tint)
                 .frame(width: 30, height: 30)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .lineLimit(1)
+                    .font(.headline.weight(.semibold))
+                    .lineLimit(2)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
             }
 
@@ -54,7 +53,8 @@ struct NativePageHeader<Trailing: View>: View {
             trailing()
         }
         .padding(.horizontal, 20)
-        .frame(height: NativePageLayout.headerHeight)
+        .padding(.vertical, 8)
+        .frame(minHeight: NativePageLayout.headerHeight)
     }
 }
 
@@ -130,7 +130,7 @@ struct NativePageActionBar<Content: View>: View {
     let usesGlass: Bool
     @ViewBuilder let content: () -> Content
 
-    init(usesGlass: Bool = true, @ViewBuilder content: @escaping () -> Content) {
+    init(usesGlass: Bool = false, @ViewBuilder content: @escaping () -> Content) {
         self.usesGlass = usesGlass
         self.content = content
     }
@@ -141,17 +141,21 @@ struct NativePageActionBar<Content: View>: View {
                 LiquidGlassActionSurface {
                     content()
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             } else {
-                HStack(spacing: 10) {
-                    content()
+                VStack(spacing: 0) {
+                    Divider()
+                    HStack(spacing: 10) {
+                        content()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, minHeight: NativePageLayout.actionBarHeight)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, minHeight: NativePageLayout.actionBarHeight)
+                .background(Color(nsColor: .windowBackgroundColor))
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
     }
 }
 
@@ -171,11 +175,11 @@ struct NativeSidebarHeader: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(tint)
                 .frame(width: 24, height: 24)
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
             Spacer(minLength: 8)
             Text("\(count)")
                 .font(.caption.monospacedDigit())
