@@ -64,6 +64,30 @@ struct DownloadDetailTests {
         #expect(emptyRangeWorkMessage(for: record) == "暂无 Range 工作块")
     }
 
+    @Test("Range 工作块概览包含间距后仍保持在容器内")
+    func rangeOverviewFitsContainer() {
+        let regular = rangeOverviewLayout(
+            totalWidth: 900,
+            partLengths: Array(repeating: 16 * 1_024 * 1_024, count: 64)
+        )
+        #expect(regular.segmentWidths.count == 64)
+        #expect(abs(regular.occupiedWidth - 900) < 0.001)
+        #expect(regular.segmentWidths.allSatisfy { $0 > 0 })
+
+        let narrow = rangeOverviewLayout(
+            totalWidth: 32,
+            partLengths: Array(repeating: 1, count: 64)
+        )
+        #expect(narrow.occupiedWidth <= 32.001)
+        #expect(narrow.segmentWidths.allSatisfy { $0 > 0 })
+
+        let incompleteRanges = rangeOverviewLayout(
+            totalWidth: 120,
+            partLengths: [100, nil, 300]
+        )
+        #expect(abs(incompleteRanges.occupiedWidth - 120) < 0.001)
+    }
+
     @Test("进度页按任务、主机、全局优先级显示最大连接数")
     func displaysConfiguredConnectionLimit() {
         var record = DownloadRecord(

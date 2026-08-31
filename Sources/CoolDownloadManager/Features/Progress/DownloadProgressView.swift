@@ -29,6 +29,41 @@ func displayedConnectionLimit(
     return min(max(1, hostLimit ?? globalLimit), 64)
 }
 
+struct RangeOverviewLayout {
+    let spacing: CGFloat
+    let segmentWidths: [CGFloat]
+
+    var occupiedWidth: CGFloat {
+        segmentWidths.reduce(0, +)
+            + spacing * CGFloat(max(0, segmentWidths.count - 1))
+    }
+}
+
+func rangeOverviewLayout(
+    totalWidth: CGFloat,
+    partLengths: [Int64?],
+    preferredSpacing: CGFloat = 1
+) -> RangeOverviewLayout {
+    guard !partLengths.isEmpty else {
+        return RangeOverviewLayout(spacing: 0, segmentWidths: [])
+    }
+
+    let width = max(0, totalWidth)
+    let gapCount = max(0, partLengths.count - 1)
+    let maximumSpacing = width / CGFloat(max(1, partLengths.count * 2 - 1))
+    let spacing = gapCount == 0 ? 0 : min(max(0, preferredSpacing), maximumSpacing)
+    let availableWidth = max(0, width - spacing * CGFloat(gapCount))
+
+    let hasCompleteRanges = partLengths.allSatisfy { ($0 ?? 0) > 0 }
+    let weights = hasCompleteRanges
+        ? partLengths.map { CGFloat($0 ?? 1) }
+        : Array(repeating: CGFloat(1), count: partLengths.count)
+    let totalWeight = weights.reduce(0, +)
+    let segmentWidths = weights.map { availableWidth * $0 / totalWeight }
+
+    return RangeOverviewLayout(spacing: spacing, segmentWidths: segmentWidths)
+}
+
 /// Native macOS progress surface for one download.
 ///
 /// Aggregate progress stays primary while persisted Range work remains
@@ -216,16 +251,20 @@ struct DownloadProgressView: View {
 
     private var partOverviewBar: some View {
         GeometryReader { proxy in
-            HStack(spacing: 1) {
-                ForEach(sortedParts, id: \.id) { part in
-                    let width = partLength(part)
+            let layout = rangeOverviewLayout(
+                totalWidth: proxy.size.width,
+                partLengths: sortedParts.map(\.length)
+            )
+            HStack(spacing: layout.spacing) {
+                ForEach(Array(sortedParts.enumerated()), id: \.element.id) { index, part in
                     PartProgressSegment(
                         part: part,
                         color: partColor(part),
-                        width: max(3, proxy.size.width * width)
+                        width: layout.segmentWidths[index]
                     )
                 }
             }
+            .frame(width: proxy.size.width, alignment: .leading)
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .frame(height: 12)
@@ -429,16 +468,6 @@ struct DownloadProgressView: View {
 
     private func formattedByteCount(_ byteCount: Int64) -> String {
         ByteCountText.string(fromByteCount: byteCount, formatter: byteFormatter)
-    }
-
-    private func partLength(_ part: DownloadPart) -> CGFloat {
-        guard let to = part.to, to >= part.from else { return 1 / CGFloat(max(1, sortedParts.count)) }
-        let length = max(1, to - part.from + 1)
-        let total = sortedParts.reduce(Int64(0)) { result, item in
-            guard let itemTo = item.to, itemTo >= item.from else { return result }
-            return result + itemTo - item.from + 1
-        }
-        return total > 0 ? CGFloat(length) / CGFloat(total) : 1 / CGFloat(max(1, sortedParts.count))
     }
 
     private func partProgress(_ part: DownloadPart) -> Double {
