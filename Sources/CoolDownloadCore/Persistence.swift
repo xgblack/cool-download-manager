@@ -61,13 +61,11 @@ public enum MetadataDatabaseError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-/// A single Core Data stack shared by the metadata façades.  The model is
-/// built in code so SwiftPM does not need to copy a model bundle; the model
-/// version is explicit and SQLite's lightweight migration remains enabled for
-/// future additions.
+/// A single Core Data stack shared by the metadata façades. The model is built
+/// in code so SwiftPM does not need to copy a model bundle. Pre-release builds
+/// open only the current schema and intentionally do not migrate older stores.
 public final class MetadataDatabase: @unchecked Sendable {
     public static let modelVersion = "2"
-    static let legacyModelVersion = "1"
 
     private final class Registry: @unchecked Sendable {
         let lock = NSLock()
@@ -163,23 +161,14 @@ public final class MetadataDatabase: @unchecked Sendable {
         }
 
         let model = Self.makeModel()
-        if !readOnly {
-            do {
-                try Self.migrateStoreIfNeeded(at: storeURL, destinationModel: model)
-            } catch let error as MetadataDatabaseError {
-                throw error
-            } catch {
-                throw MetadataDatabaseError.loadFailed(storeURL, error.localizedDescription)
-            }
-        }
         let container = NSPersistentContainer(name: "CoolDownloadManagerMetadata", managedObjectModel: model)
         let description = NSPersistentStoreDescription(url: storeURL)
         description.type = NSSQLiteStoreType
         if readOnly {
             description.setOption(true as NSNumber, forKey: NSReadOnlyPersistentStoreOption)
         }
-        description.shouldMigrateStoreAutomatically = true
-        description.shouldInferMappingModelAutomatically = true
+        description.shouldMigrateStoreAutomatically = false
+        description.shouldInferMappingModelAutomatically = false
         container.persistentStoreDescriptions = [description]
 
         var loadError: Error?
@@ -224,8 +213,7 @@ public final class MetadataDatabase: @unchecked Sendable {
         }
     }
 
-    static func makeModel(version: String = modelVersion) -> NSManagedObjectModel {
-        precondition(version == legacyModelVersion || version == modelVersion)
+    static func makeModel() -> NSManagedObjectModel {
         let model = NSManagedObjectModel()
 
         func attribute(
@@ -245,7 +233,7 @@ public final class MetadataDatabase: @unchecked Sendable {
         let task = NSEntityDescription()
         task.name = "DownloadTask"
         task.managedObjectClassName = "NSManagedObject"
-        var taskProperties: [NSPropertyDescription] = [
+        let taskProperties: [NSPropertyDescription] = [
             attribute("id", .integer64AttributeType, indexed: true),
             attribute("sourceKind", .stringAttributeType),
             attribute("link", .stringAttributeType),
@@ -268,16 +256,12 @@ public final class MetadataDatabase: @unchecked Sendable {
             attribute("incompleteFileName", .stringAttributeType, optional: true),
             attribute("revision", .integer64AttributeType),
             attribute("queueOrder", .integer64AttributeType, optional: true),
-            attribute("categoryOrder", .integer64AttributeType, optional: true)
+            attribute("categoryOrder", .integer64AttributeType, optional: true),
+            attribute("credentialReference", .stringAttributeType, optional: true),
+            attribute("sourceRefreshReason", .stringAttributeType, optional: true),
+            attribute("hlsResumeSnapshotJSON", .stringAttributeType, optional: true),
+            attribute("hlsRenditionsJSON", .stringAttributeType, optional: true)
         ]
-        if version == modelVersion {
-            taskProperties += [
-                attribute("credentialReference", .stringAttributeType, optional: true),
-                attribute("sourceRefreshReason", .stringAttributeType, optional: true),
-                attribute("hlsResumeSnapshotJSON", .stringAttributeType, optional: true),
-                attribute("hlsRenditionsJSON", .stringAttributeType, optional: true)
-            ]
-        }
         task.properties = taskProperties
 
         let part = NSEntityDescription()
@@ -383,74 +367,8 @@ public final class MetadataDatabase: @unchecked Sendable {
         queue.properties += [queueTasks]
         category.properties += [categoryTasks]
         model.entities = [task, part, queue, category, host]
-        model.versionIdentifiers = [version]
+        model.versionIdentifiers = [modelVersion]
         return model
-    }
-
-    private static func migrateStoreIfNeeded(
-        at storeURL: URL,
-        destinationModel: NSManagedObjectModel
-    ) throws {
-        guard FileManager.default.fileExists(atPath: storeURL.path) else { return }
-        let metadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(
-            type: .sqlite,
-            at: storeURL
-        )
-        guard !destinationModel.isConfiguration(
-            withName: nil,
-            compatibleWithStoreMetadata: metadata
-        ) else {
-            return
-        }
-
-        let sourceModel = makeModel(version: legacyModelVersion)
-        guard sourceModel.isConfiguration(
-            withName: nil,
-            compatibleWithStoreMetadata: metadata
-        ) else {
-            throw MetadataDatabaseError.loadFailed(
-                storeURL,
-                "元数据模型版本不受支持"
-            )
-        }
-
-        let mapping = try NSMappingModel.inferredMappingModel(
-            forSourceModel: sourceModel,
-            destinationModel: destinationModel
-        )
-        let temporaryURL = storeURL.deletingLastPathComponent().appendingPathComponent(
-            ".metadata-migration-\(UUID().uuidString).sqlite"
-        )
-        defer { removeSQLiteFiles(at: temporaryURL) }
-
-        let manager = NSMigrationManager(
-            sourceModel: sourceModel,
-            destinationModel: destinationModel
-        )
-        try manager.migrateStore(
-            from: storeURL,
-            type: .sqlite,
-            mapping: mapping,
-            to: temporaryURL,
-            type: .sqlite
-        )
-        let coordinator = NSPersistentStoreCoordinator(managedObjectModel: destinationModel)
-        try coordinator.replacePersistentStore(
-            at: storeURL,
-            withPersistentStoreFrom: temporaryURL,
-            type: .sqlite
-        )
-    }
-
-    private static func removeSQLiteFiles(at url: URL) {
-        let fileManager = FileManager.default
-        for candidate in [
-            url,
-            URL(fileURLWithPath: url.path + "-wal"),
-            URL(fileURLWithPath: url.path + "-shm")
-        ] where fileManager.fileExists(atPath: candidate.path) {
-            try? fileManager.removeItem(at: candidate)
-        }
     }
 }
 

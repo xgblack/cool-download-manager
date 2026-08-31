@@ -271,49 +271,6 @@ public actor DownloadStore {
         }
     }
 
-    /// Persists only the failure state for a v1 source migration. The legacy
-    /// source columns stay untouched so a later boot can retry moving their
-    /// sensitive values to Keychain, while the actor cache receives only the
-    /// redacted projection supplied by DownloadService.
-    public func saveSourceMigrationFailure(_ record: DownloadRecord) throws {
-        guard record.status == .waitingForSourceRefresh,
-              record.sourceRefreshReason == .credentialsUnavailable,
-              !DownloadSourceSecurity.containsRestrictedData(record.source) else {
-            throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
-        }
-        do {
-            try database.perform { context in
-                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
-                request.predicate = NSPredicate(format: "id == %lld", record.id)
-                request.fetchLimit = 1
-                guard let task = try context.fetch(request).first else {
-                    throw DownloadCoreError.notFound(record.id)
-                }
-                task.setValue(record.status.rawValue, forKey: "status")
-                task.setValue(record.sourceRefreshReason?.rawValue, forKey: "sourceRefreshReason")
-                task.setValue(record.error, forKey: "error")
-                task.setValue(record.updatedAt, forKey: "updatedAt")
-                task.setValue(record.revision, forKey: "revision")
-                do {
-                    try context.save()
-                } catch {
-                    context.rollback()
-                    throw MetadataDatabaseError.saveFailed(
-                        self.metadataURL,
-                        error.localizedDescription
-                    )
-                }
-            }
-            records[record.id] = record
-        } catch let error as DownloadCoreError {
-            throw error
-        } catch let error as MetadataDatabaseError {
-            throw error
-        } catch {
-            throw MetadataDatabaseError.saveFailed(metadataURL, error.localizedDescription)
-        }
-    }
-
     private static func decodeRecord(_ task: NSManagedObject) throws -> DownloadRecord {
         guard let id = (task.value(forKey: "id") as? NSNumber)?.int64Value,
               let sourceKind = task.value(forKey: "sourceKind") as? String,

@@ -7,7 +7,7 @@ MACOS_DEPLOYMENT_TARGET="26.0"
 OUTPUT_DIR="$ROOT_DIR/dist"
 DERIVED_DATA_DIR="$ROOT_DIR/.build/XcodePackageData"
 SIGNING_IDENTITY="${CDM_SIGNING_IDENTITY:--}"
-VERSION="${CDM_VERSION:-0.1.0}"
+VERSION="${CDM_VERSION:-1.0.1}"
 DMG_BACKGROUND_FILE="$ROOT_DIR/packaging/macos/DMGBackground.png"
 MAKE_ZIP=0
 MAKE_DMG=0
@@ -26,7 +26,7 @@ Options:
   --configuration <Debug|Release>  Build configuration (default: Release)
   --output <directory>             Output directory (default: dist)
   --derived-data <directory>       Xcode derived data directory
-  --version <version>              Bundle version (default: 0.1.0)
+  --version <version>              Bundle version (default: 1.0.1)
   --signing-identity <identity>    codesign identity; '-' means ad hoc
   --no-sign                        Leave the bundle unsigned
   --zip                            Also create a zip archive

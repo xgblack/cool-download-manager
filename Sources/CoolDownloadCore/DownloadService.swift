@@ -96,10 +96,6 @@ public actor DownloadService {
         var loaded = Dictionary(
             uniqueKeysWithValues: try await store.load().map { ($0.id, $0) }
         )
-        for id in Array(loaded.keys) {
-            guard let record = loaded[id] else { continue }
-            loaded[id] = try await migrateSourceIfNeeded(record)
-        }
         // A process cannot safely continue a live task after a restart. Keep
         // its part file and expose it as resumable instead of leaving a stale
         // "downloading" state that has no associated task.
@@ -2170,84 +2166,6 @@ public actor DownloadService {
             try credentialStore.remove(reference: reference)
         } catch {
             fputs("CoolDownloadCore: unable to remove source credential for \(record.id)\n", stderr)
-        }
-    }
-
-    private func sourceMigrationFailure(
-        _ record: DownloadRecord,
-        projection: DownloadSource
-    ) async throws -> DownloadRecord {
-        var waiting = record
-        waiting.source = projection
-        waiting.status = .waitingForSourceRefresh
-        waiting.sourceRefreshReason = .credentialsUnavailable
-        waiting.error = DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
-            .localizedDescription
-        waiting.updatedAt = Date()
-        waiting.revision += 1
-        try await store.saveSourceMigrationFailure(waiting)
-        return waiting
-    }
-
-    private func migrateSourceIfNeeded(_ record: DownloadRecord) async throws -> DownloadRecord {
-        if let reference = record.source.credentialReference,
-           !DownloadSourceSecurity.containsRestrictedData(record.source) {
-            do {
-                guard try credentialStore.read(reference: reference) != nil else {
-                    throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
-                }
-                return record
-            } catch {
-                var waiting = record
-                waiting.status = .waitingForSourceRefresh
-                waiting.sourceRefreshReason = .credentialsUnavailable
-                waiting.error = DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable).localizedDescription
-                waiting.updatedAt = Date()
-                waiting.revision += 1
-                try await store.save(waiting)
-                return waiting
-            }
-        }
-        let reference = record.source.credentialReference
-            ?? DownloadSourceSecurity.credentialReference(for: record.id)
-        let prepared = try DownloadSourceSecurity.prepare(record.source, reference: reference)
-        guard let secure = prepared.secureSource else {
-            return record
-        }
-        let existing: DownloadSecureSource?
-        do {
-            existing = try credentialStore.read(reference: reference)
-        } catch {
-            return try await sourceMigrationFailure(record, projection: prepared.projection)
-        }
-        do {
-            if existing == secure {
-                var migrated = record
-                migrated.source = prepared.projection
-                try await store.save(migrated)
-                return migrated
-            }
-            try writeCredentialVerified(
-                secure,
-                reference: reference,
-                previousSource: existing,
-                previousReference: existing == nil ? nil : reference
-            )
-            var migrated = record
-            migrated.source = prepared.projection
-            do {
-                try await store.save(migrated)
-            } catch {
-                try? restoreCredential(
-                    existing,
-                    oldReference: existing == nil ? nil : reference,
-                    writtenReference: reference
-                )
-                throw error
-            }
-            return migrated
-        } catch {
-            return try await sourceMigrationFailure(record, projection: prepared.projection)
         }
     }
 
