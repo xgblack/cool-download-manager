@@ -66,9 +66,24 @@ final class AppCoordinator: NSObject, ObservableObject {
         store.onBrowserDownloadRequest = { [weak self] request in
             self?.presentBrowserDownload(request)
         }
+        store.downloadList.onDownloadStarted = { [weak self] record in
+            self?.handleDownloadStarted(record)
+        }
         store.downloadList.onDownloadCompleted = { [weak self] record in
             self?.handleDownloadCompleted(record)
         }
+    }
+
+    private func handleDownloadStarted(_ record: DownloadRecord) {
+        store.downloadList.acknowledgeProgress()
+        guard store.settings.showDownloadProgressDialog else { return }
+        guard record.status == .preparing || record.status == .downloading || record.status == .retrying else {
+            return
+        }
+        showProgressPanel(
+            for: record,
+            focus: store.settings.focusDownloadProgressDialogOnStart
+        )
     }
 
     private func handleDownloadCompleted(_ record: DownloadRecord) {
@@ -430,7 +445,9 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         )
         progressPanel = panel
         progressRecordID = record.id
-        present(panel, focus: focus)
+        // Browser-triggered downloads may arrive while another app is active;
+        // order the panel in front without forcing activation when focus is off.
+        present(panel, focus: focus, orderFrontRegardless: true)
     }
 
     func closeProgress(for id: DownloadID) {
@@ -469,7 +486,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         floatsAboveNormalWindows: Bool,
         content: Content
     ) -> NSPanel {
-        let panel = existing ?? NSPanel(
+        let panel = existing ?? UtilityPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .resizable, .utilityWindow],
             backing: .buffered,
@@ -486,6 +503,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
+        panel.isMovableByWindowBackground = true
         panel.minSize = size
         panel.setContentSize(size)
         panel.contentViewController = LiquidGlassPanelViewController(rootView: content)
@@ -527,5 +545,54 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         }
         sender.orderOut(nil)
         return false
+    }
+}
+
+/// Captures the custom header area before SwiftUI content receives the mouse
+/// event and applies the pointer delta directly to the panel frame.
+private final class UtilityPanel: NSPanel {
+    private let movableHeaderHeight: CGFloat = 88
+    private var dragStartMouseLocation: NSPoint?
+    private var dragStartOrigin: NSPoint?
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            guard isMovableHeaderEvent(event) else {
+                super.sendEvent(event)
+                return
+            }
+            dragStartMouseLocation = NSEvent.mouseLocation
+            dragStartOrigin = frame.origin
+        case .leftMouseDragged:
+            guard let dragStartMouseLocation, let dragStartOrigin else {
+                super.sendEvent(event)
+                return
+            }
+            let current = NSEvent.mouseLocation
+            setFrameOrigin(NSPoint(
+                x: dragStartOrigin.x + current.x - dragStartMouseLocation.x,
+                y: dragStartOrigin.y + current.y - dragStartMouseLocation.y
+            ))
+        case .leftMouseUp:
+            guard dragStartMouseLocation != nil else {
+                super.sendEvent(event)
+                return
+            }
+            dragStartMouseLocation = nil
+            dragStartOrigin = nil
+        default:
+            super.sendEvent(event)
+        }
+    }
+
+    private func isMovableHeaderEvent(_ event: NSEvent) -> Bool {
+        guard let contentView, contentView.bounds.height > movableHeaderHeight else {
+            return false
+        }
+        let point = contentView.convert(event.locationInWindow, from: nil)
+        return contentView.bounds.contains(point)
+            && contentView.hitTest(point) != nil
+            && point.y >= contentView.bounds.maxY - movableHeaderHeight
     }
 }

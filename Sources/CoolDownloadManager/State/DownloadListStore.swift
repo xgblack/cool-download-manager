@@ -174,6 +174,10 @@ final class DownloadListStore: ObservableObject {
     /// SwiftUI window, so completion UI can still be presented when the main
     /// window is closed.
     var onDownloadCompleted: ((DownloadRecord) -> Void)?
+    /// Called after a task transitions into its initial preparing/downloading
+    /// state. Keep this at the lifecycle layer so progress UI does not depend
+    /// on the main list window being alive.
+    var onDownloadStarted: ((DownloadRecord) -> Void)?
     private var eventTask: Task<Void, Never>?
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
     private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
@@ -350,6 +354,7 @@ final class DownloadListStore: ObservableObject {
         }) {
             if suppressedProgressIDs.remove(started.id) == nil {
                 progressID = started.id
+                onDownloadStarted?(started)
             }
         }
         if announceCompletion, let failed = acceptedRecords.first(where: { record in

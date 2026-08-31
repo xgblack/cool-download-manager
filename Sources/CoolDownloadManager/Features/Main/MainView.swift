@@ -96,19 +96,6 @@ struct MainView: View {
         .onChange(of: store.settings.theme) { _, theme in
             coordinator.applyThemeToMainWindow(theme)
         }
-        .onChange(of: store.downloadList.progressID) { _, id in
-            guard let id else { return }
-            store.downloadList.acknowledgeProgress()
-            guard store.settings.showDownloadProgressDialog else { return }
-            guard let record = store.downloadList.record(id: id) else { return }
-            guard record.status == .preparing || record.status == .downloading || record.status == .retrying else {
-                return
-            }
-            coordinator.showProgressPanel(
-                for: record,
-                focus: store.settings.focusDownloadProgressDialogOnStart
-            )
-        }
         .onChange(of: store.downloadList.downloads) { _, downloads in
             guard case .downloadDetail(let id) = coordinator.mainPath.last,
                   !downloads.contains(where: { $0.id == id }) else { return }
