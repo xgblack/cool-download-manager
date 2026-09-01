@@ -27,7 +27,6 @@ public actor DownloadService {
     private let fileDescriptorBudget: HTTPFileDescriptorBudget
     private let globalRateLimiter: DownloadRateLimiter
     private let hostPerformanceStore: HostPerformanceStore?
-    private let credentialStore: any DownloadCredentialStore
     private let metrics: any DownloadMetricsSink
     private let metricsEnabled: Bool
     private var records: [DownloadID: DownloadRecord] = [:]
@@ -62,8 +61,7 @@ public actor DownloadService {
         schedulerConfiguration: DownloadSchedulerConfiguration = .init(),
         retryPolicy: DownloadRetryPolicy = .init(),
         metrics: any DownloadMetricsSink = NoopDownloadMetricsSink(),
-        hostPerformanceStore: HostPerformanceStore? = nil,
-        credentialStore: any DownloadCredentialStore = KeychainDownloadCredentialStore()
+        hostPerformanceStore: HostPerformanceStore? = nil
     ) {
         self.store = store
         self.downloader = downloader
@@ -86,7 +84,6 @@ public actor DownloadService {
             bytesPerSecond: schedulerConfiguration.speedLimit
         )
         self.hostPerformanceStore = hostPerformanceStore
-        self.credentialStore = credentialStore
     }
 
     public func boot() async throws {
@@ -322,7 +319,6 @@ public actor DownloadService {
             guard let record = records[id], record.status == .completed else { continue }
             try await store.remove(id: id)
             records[id] = nil
-            removeCredentialIfPresent(for: record)
             emit(.removed(id: id))
             if let queueID = record.queueID {
                 reconcileQueue(queueID)
@@ -333,10 +329,7 @@ public actor DownloadService {
 
     public func add(_ request: AddDownloadRequest) async throws -> DownloadID {
         let id = await store.nextID()
-        let preparedSource = try DownloadSourceSecurity.prepare(
-            request.source,
-            reference: DownloadSourceSecurity.credentialReference(for: id)
-        )
+        var source = try DownloadSourceSecurity.validatedForPersistence(request.source)
 
         let folderURL = URL(fileURLWithPath: request.folder ?? defaultFolder.path, isDirectory: true)
             .standardizedFileURL
@@ -345,15 +338,6 @@ public actor DownloadService {
             throw DownloadCoreError.permissionDenied(folderURL.path)
         }
 
-        if let secureSource = preparedSource.secureSource {
-            try writeCredentialVerified(
-                secureSource,
-                reference: preparedSource.projection.credentialReference!,
-                previousSource: nil,
-                previousReference: nil
-            )
-        }
-        var source = preparedSource.projection
         let requestedName = request.name?.nilIfBlank
         let suggestedName = source.suggestedName?.nilIfBlank
         // Persist the chosen name as the source hint as well. This lets later
@@ -384,14 +368,7 @@ public actor DownloadService {
                 ? "\(name).cooldm.part"
                 : nil
         )
-        do {
-            try await store.save(record)
-        } catch {
-            if let reference = record.source.credentialReference {
-                try? credentialStore.remove(reference: reference)
-            }
-            throw error
-        }
+        try await store.save(record)
         records[id] = record
         emit(.created(record))
 
@@ -435,22 +412,18 @@ public actor DownloadService {
         guard let baseline = records[id] else {
             throw DownloadCoreError.notFound(id)
         }
-        let oldReference = baseline.source.credentialReference
-        let oldSecureSource = try oldReference.flatMap { try credentialStore.read(reference: $0) }
         var continueAfterPatch = shouldContinue
         var current = baseline
-        var committedCredentialReference = oldReference
         do {
             let candidate = DownloadSource(
                 kind: baseline.source.kind,
                 link: patch.link,
                 headers: patch.headers,
-                downloadPage: oldSecureSource?.downloadPage ?? baseline.source.downloadPage,
+                downloadPage: baseline.source.downloadPage,
                 suggestedName: baseline.source.suggestedName
             )
-            let reference = DownloadSourceSecurity.credentialReference(for: id)
-            let prepared = try DownloadSourceSecurity.prepare(candidate, reference: reference)
-            let networkSource = try await effectiveSource(candidate)
+            let persistedSource = try DownloadSourceSecurity.validatedForPersistence(candidate)
+            let networkSource = try await effectiveSource(persistedSource)
             let metadata: SourcePatchMetadata
             switch candidate.kind {
             case .http:
@@ -486,16 +459,7 @@ public actor DownloadService {
             }
             try validateSourceIdentity(record: current, metadata: metadata)
 
-            if let secureSource = prepared.secureSource {
-                try writeCredentialVerified(
-                    secureSource,
-                    reference: reference,
-                    previousSource: oldSecureSource,
-                    previousReference: oldReference
-                )
-            }
-
-            current.source = prepared.projection
+            current.source = persistedSource
             current.sourceRefreshReason = nil
             current.error = nil
             switch metadata {
@@ -520,17 +484,7 @@ public actor DownloadService {
             }
             current.updatedAt = Date()
             current.revision += 1
-            do {
-                try await store.save(current)
-            } catch {
-                try? restoreCredential(
-                    oldSecureSource,
-                    oldReference: oldReference,
-                    writtenReference: prepared.projection.credentialReference
-                )
-                throw error
-            }
-            committedCredentialReference = prepared.projection.credentialReference
+            try await store.save(current)
         } catch {
             await resumeAfterFailedSourcePatch(
                 id: id,
@@ -540,10 +494,6 @@ public actor DownloadService {
             throw error
         }
         records[id] = current
-        if let oldReference,
-           oldReference != committedCredentialReference {
-            try? credentialStore.remove(reference: oldReference)
-        }
         emit(.updated(current))
 
         var continued = false
@@ -671,6 +621,9 @@ public actor DownloadService {
             guard var record = records[id] else {
                 throw DownloadCoreError.notFound(id)
             }
+            if let reason = record.sourceRefreshReason {
+                throw DownloadCoreError.sourceRefreshRequired(reason)
+            }
             if let task = tasks[id] {
                 task.cancel()
                 await task.value
@@ -784,7 +737,6 @@ public actor DownloadService {
             }
             try await store.remove(id: id)
             records[id] = nil
-            removeCredentialIfPresent(for: record)
             emit(.removed(id: id))
             if let queueID {
                 reconcileQueue(queueID)
@@ -2019,17 +1971,11 @@ public actor DownloadService {
     }
 
     private func effectiveSource(_ source: DownloadSource) async throws -> DownloadSource {
+        guard source.credentialReference == nil else {
+            throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
+        }
         var source = source
         var headers = source.headers ?? [:]
-
-        if let reference = source.credentialReference {
-            guard let secure = try credentialStore.read(reference: reference) else {
-                throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
-            }
-            source.link = secure.link
-            headers = secure.headers ?? [:]
-            source.downloadPage = secure.downloadPage ?? source.downloadPage
-        }
 
         func hasHeader(_ name: String) -> Bool {
             headers.keys.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
@@ -2122,52 +2068,6 @@ public actor DownloadService {
         return !normalized.lowercased().hasPrefix("w/") && !normalized.isEmpty
     }
 
-    private func restoreCredential(
-        _ source: DownloadSecureSource?,
-        oldReference: String?,
-        writtenReference: String?
-    ) throws {
-        if let oldReference {
-            if let source {
-                try credentialStore.write(source, reference: oldReference)
-            } else {
-                try credentialStore.remove(reference: oldReference)
-            }
-        }
-        if let writtenReference, writtenReference != oldReference {
-            try credentialStore.remove(reference: writtenReference)
-        }
-    }
-
-    private func writeCredentialVerified(
-        _ source: DownloadSecureSource,
-        reference: String,
-        previousSource: DownloadSecureSource?,
-        previousReference: String?
-    ) throws {
-        do {
-            try credentialStore.write(source, reference: reference)
-            guard try credentialStore.read(reference: reference) == source else {
-                throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
-            }
-        } catch {
-            try? restoreCredential(
-                previousSource,
-                oldReference: previousReference,
-                writtenReference: reference
-            )
-            throw error
-        }
-    }
-
-    private func removeCredentialIfPresent(for record: DownloadRecord) {
-        guard let reference = record.source.credentialReference else { return }
-        do {
-            try credentialStore.remove(reference: reference)
-        } catch {
-            fputs("CoolDownloadCore: unable to remove source credential for \(record.id)\n", stderr)
-        }
-    }
 
     private func emit(_ event: DownloadEvent) {
         guard metricsEnabled else {

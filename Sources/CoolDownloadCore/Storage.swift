@@ -439,9 +439,7 @@ public actor DownloadStore {
         into task: NSManagedObject,
         context: NSManagedObjectContext
     ) throws -> Int {
-        guard !DownloadSourceSecurity.containsRestrictedData(record.source) else {
-            throw DownloadCoreError.sourceRefreshRequired(.credentialsUnavailable)
-        }
+        try DownloadSourceSecurity.validate(record.source)
         var count = 0
         func set(_ value: Any?, _ key: String) {
             if setIfChanged(value, forKey: key, on: task) { count += 1 }

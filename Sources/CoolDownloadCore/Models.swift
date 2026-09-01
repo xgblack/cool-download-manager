@@ -103,8 +103,8 @@ public struct DownloadSource: Codable, Sendable, Equatable {
     public var headers: [String: String]?
     public var downloadPage: String?
     public var suggestedName: String?
-    /// Stable task-level lookup key. The referenced full URL and request
-    /// headers live in Keychain and are resolved only when a request starts.
+    /// Legacy marker retained for metadata model compatibility. New sources
+    /// store their complete request data in task metadata and leave this nil.
     public var credentialReference: String?
 
     public init(

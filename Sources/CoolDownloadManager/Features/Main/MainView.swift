@@ -709,7 +709,9 @@ private struct SidebarView: View {
         case .completed:
             return downloadList.downloads.filter { $0.status == .completed }.count
         case .failed:
-            return downloadList.downloads.filter { $0.status == .failed }.count
+            return downloadList.downloads.filter {
+                $0.status == .failed || $0.status == .waitingForSourceRefresh
+            }.count
         case .paused:
             return downloadList.downloads.filter { $0.status == .paused }.count
         case .queue(let id):
@@ -836,17 +838,19 @@ private struct DownloadTableRow: View {
                 Button("显示下载进度", systemImage: "chart.bar.xaxis", action: onShowProgress)
             }
             Divider()
-            switch record.status {
-            case .preparing, .downloading, .retrying:
-                Button("暂停", systemImage: "pause.fill", action: onPause)
-            case .failed, .cancelled:
-                Button("重试", systemImage: "arrow.clockwise", action: onRetry)
-            case .waitingForSourceRefresh:
+            if requiresSourceRefresh {
                 Button("更新来源", systemImage: "link.badge.plus", action: onOpenDetail)
-            case .completed:
-                Button("重新下载", systemImage: "arrow.clockwise", action: onRedownload)
-            default:
-                Button("继续", systemImage: "play.fill", action: onStart)
+            } else {
+                switch record.status {
+                case .preparing, .downloading, .retrying:
+                    Button("暂停", systemImage: "pause.fill", action: onPause)
+                case .failed, .cancelled:
+                    Button("重试", systemImage: "arrow.clockwise", action: onRetry)
+                case .completed:
+                    Button("重新下载", systemImage: "arrow.clockwise", action: onRedownload)
+                default:
+                    Button("继续", systemImage: "play.fill", action: onStart)
+                }
             }
             Button("复制链接", systemImage: "link", action: onCopyLink)
             if !categories.isEmpty {
@@ -895,6 +899,10 @@ private struct DownloadTableRow: View {
         case .added, .completed, .failed, .cancelled:
             return false
         }
+    }
+
+    private var requiresSourceRefresh: Bool {
+        record.status == .waitingForSourceRefresh || record.sourceRefreshReason != nil
     }
 
     private var statusIcon: String {

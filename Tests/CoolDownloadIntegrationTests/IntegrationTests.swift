@@ -333,6 +333,83 @@ struct IntegrationTests {
         #expect(String(data: ipv6Data, encoding: .utf8) == "pong")
     }
 
+    @Test("loopback source patch resumes an expired download and completes it")
+    func loopbackSourcePatchResumesDownload() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cdm-source-refresh-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let transport = SourceRefreshIntegrationTransport()
+        let service = DownloadService(
+            store: try DownloadStore(rootURL: root),
+            downloader: HTTPDownloader(transport: transport),
+            defaultFolder: root,
+            retryPolicy: DownloadRetryPolicy(maxAttempts: 1, delay: .milliseconds(1))
+        )
+        try await service.boot()
+        let id = try await service.add(AddDownloadRequest(
+            source: DownloadSource(
+                kind: .http,
+                link: "https://fixture.invalid/expired.bin",
+                suggestedName: "refreshed.bin"
+            ),
+            start: true
+        ))
+
+        let waitingDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < waitingDeadline,
+              await service.snapshot().downloads.first?.status != .waitingForSourceRefresh {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let waiting = try #require(await service.snapshot().downloads.first)
+        #expect(waiting.status == .waitingForSourceRefresh)
+        #expect(waiting.sourceRefreshReason == .authenticationRequired)
+
+        let router = IntegrationRouter(
+            handler: CoreDownloadIntegrationHandler(service: service),
+            apiKey: "secret"
+        )
+        let port = UInt16(25500 + Int.random(in: 0..<400))
+        let server = try LoopbackHTTPServer(port: port, router: router)
+        server.start()
+        defer { server.stop() }
+        try await Task.sleep(for: .milliseconds(50))
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/downloads/\(id)/source")!
+        )
+        request.httpMethod = "PATCH"
+        request.setValue("secret", forHTTPHeaderField: "X-Api-Key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(
+            #"{"link":"https://fixture.invalid/refreshed.bin?token=fresh","headers":{"Authorization":"Bearer fresh"}}"#.utf8
+        )
+        let (responseBody, response) = try await URLSession.shared.data(for: request)
+
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(!responseBody.contains(Data("fresh".utf8)))
+        let patchResult = try JSONDecoder().decode(DownloadSourcePatchResult.self, from: responseBody)
+        #expect(patchResult.id == id)
+        #expect(patchResult.continued)
+
+        let completionDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < completionDeadline,
+              await service.snapshot().downloads.first?.status != .completed {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let completed = try #require(await service.snapshot().downloads.first)
+        #expect(completed.status == .completed)
+        #expect(completed.sourceRefreshReason == nil)
+        #expect(completed.source.link == "https://fixture.invalid/refreshed.bin?token=fresh")
+        #expect(completed.source.headers?["Authorization"] == "Bearer fresh")
+        #expect(completed.source.credentialReference == nil)
+        #expect(try Data(contentsOf: completed.destinationURL) == Data("new!".utf8))
+        #expect(await transport.refreshedRequestCount >= 2)
+        #expect(await transport.receivedAuthorization == "Bearer fresh")
+        await service.shutdown()
+    }
+
     @Test("legacy queue files are exposed through the integration model")
     func legacyQueues() async throws {
         let root = URL(fileURLWithPath: "/tmp/cdm-queue-\(UUID().uuidString)", isDirectory: true)
@@ -613,5 +690,38 @@ private struct IntegrationTransport: HTTPTransport, Sendable {
             headers: ["Content-Length": String(body.count)],
             body: stream
         )
+    }
+}
+
+private actor SourceRefreshIntegrationTransport: HTTPTransport {
+    private(set) var refreshedRequestCount = 0
+    private(set) var receivedAuthorization: String?
+
+    func response(for request: URLRequest) async throws -> HTTPTransportResponse {
+        let path = request.url?.path
+        let status: Int
+        let body: Data
+        let headers: [String: String]
+        switch path {
+        case "/expired.bin":
+            status = 403
+            body = Data()
+            headers = [:]
+        case "/refreshed.bin":
+            refreshedRequestCount += 1
+            receivedAuthorization = request.value(forHTTPHeaderField: "Authorization")
+            status = 200
+            body = Data("new!".utf8)
+            headers = ["Content-Length": String(body.count)]
+        default:
+            status = 404
+            body = Data()
+            headers = [:]
+        }
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.yield(body)
+            continuation.finish()
+        }
+        return HTTPTransportResponse(statusCode: status, headers: headers, body: stream)
     }
 }

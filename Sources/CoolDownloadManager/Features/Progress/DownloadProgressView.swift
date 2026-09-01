@@ -341,23 +341,27 @@ struct DownloadProgressView: View {
 
     private var actionBar: some View {
         NativePageActionBar(usesGlass: false) {
-            switch currentRecord.status {
-            case .preparing, .downloading, .retrying:
-                Button("暂停", systemImage: "pause.fill") {
-                    store.pause(id: currentRecord.id)
+            if requiresSourceRefresh {
+                Button("更新来源", systemImage: "link.badge.plus") {
+                    coordinator.openDetail(for: currentRecord.id)
                 }
-            case .added, .paused:
-                Button("继续", systemImage: "play.fill") {
-                    store.start(id: currentRecord.id)
+            } else {
+                switch currentRecord.status {
+                case .preparing, .downloading, .retrying:
+                    Button("暂停", systemImage: "pause.fill") {
+                        store.pause(id: currentRecord.id)
+                    }
+                case .added, .paused:
+                    Button("继续", systemImage: "play.fill") {
+                        store.start(id: currentRecord.id)
+                    }
+                case .failed, .cancelled:
+                    Button("重试", systemImage: "arrow.clockwise") {
+                        store.retry(id: currentRecord.id)
+                    }
+                default:
+                    EmptyView()
                 }
-            case .failed, .cancelled:
-                Button("重试", systemImage: "arrow.clockwise") {
-                    store.retry(id: currentRecord.id)
-                }
-            case .waitingForSourceRefresh:
-                EmptyView()
-            default:
-                EmptyView()
             }
 
             Button("查看详情", systemImage: "info.circle") {
@@ -437,6 +441,10 @@ struct DownloadProgressView: View {
         case .paused, .cancelled: return .orange
         default: return .accentColor
         }
+    }
+
+    private var requiresSourceRefresh: Bool {
+        currentRecord.status == .waitingForSourceRefresh || currentRecord.sourceRefreshReason != nil
     }
 
     private var byteFormatter: ByteCountFormatter {

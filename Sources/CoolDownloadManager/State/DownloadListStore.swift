@@ -222,7 +222,9 @@ final class DownloadListStore: ObservableObject {
 
     var canStartSelection: Bool {
         selectedDownloads.contains { record in
-            record.status == .added || record.status == .paused || record.status == .failed || record.status == .cancelled
+            record.sourceRefreshReason == nil
+                && (record.status == .added || record.status == .paused
+                    || record.status == .failed || record.status == .cancelled)
         }
     }
 
@@ -234,7 +236,8 @@ final class DownloadListStore: ObservableObject {
 
     var canRetrySelection: Bool {
         selectedDownloads.contains { record in
-            record.status == .failed || record.status == .cancelled
+            record.sourceRefreshReason == nil
+                && (record.status == .failed || record.status == .cancelled)
         }
     }
 
@@ -517,7 +520,11 @@ final class DownloadListStore: ObservableObject {
 
     func startSelected() {
         let ids = selectedDownloads
-            .filter { $0.status == .added || $0.status == .paused || $0.status == .failed || $0.status == .cancelled }
+            .filter {
+                $0.sourceRefreshReason == nil
+                    && ($0.status == .added || $0.status == .paused
+                        || $0.status == .failed || $0.status == .cancelled)
+            }
             .map(\.id)
         suppressedProgressIDs.subtract(ids)
         perform(ids: ids) { service, ids in
@@ -530,6 +537,7 @@ final class DownloadListStore: ObservableObject {
     /// download list.
     func start(id: DownloadID) {
         guard let record = record(id: id),
+              record.sourceRefreshReason == nil,
               record.status == .added || record.status == .paused
                 || record.status == .failed || record.status == .cancelled else {
             return
@@ -563,7 +571,10 @@ final class DownloadListStore: ObservableObject {
 
     func retrySelected() {
         let ids = selectedDownloads
-            .filter { $0.status == .failed || $0.status == .cancelled }
+            .filter {
+                $0.sourceRefreshReason == nil
+                    && ($0.status == .failed || $0.status == .cancelled)
+            }
             .map(\.id)
         suppressedProgressIDs.subtract(ids)
         perform(ids: ids) { service, ids in
@@ -572,7 +583,9 @@ final class DownloadListStore: ObservableObject {
     }
 
     func retry(id: DownloadID) {
-        guard let record = record(id: id), record.status == .failed || record.status == .cancelled else {
+        guard let record = record(id: id),
+              record.sourceRefreshReason == nil,
+              record.status == .failed || record.status == .cancelled else {
             return
         }
         suppressedProgressIDs.remove(id)

@@ -82,9 +82,8 @@ public actor IntegrationRouter {
                 if request.method.uppercased() == "PATCH",
                    let id = sourcePatchDownloadID(from: request.path) {
                     let patch = try decoder.decode(DownloadSourcePatch.self, from: request.body)
-                    _ = try DownloadSourceSecurity.prepare(
-                        DownloadSource(kind: .http, link: patch.link, headers: patch.headers),
-                        reference: "integration.validation"
+                    try DownloadSourceSecurity.validate(
+                        DownloadSource(kind: .http, link: patch.link, headers: patch.headers)
                     )
                     let result = try await handler.patchSource(id: id, patch: patch)
                     return HTTPResponse(
