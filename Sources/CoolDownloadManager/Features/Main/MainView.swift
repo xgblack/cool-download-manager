@@ -688,8 +688,10 @@ private struct SidebarView: View {
 
     private func sidebarItem(_ filter: DownloadFilter, title: String? = nil, image: String? = nil) -> some View {
         HStack(spacing: 9) {
-            Label(title ?? filter.title, systemImage: image ?? filter.systemImage)
-                .labelStyle(.titleAndIcon)
+            Image(systemName: image ?? filter.systemImage)
+                .frame(width: 20, alignment: .center)
+                .accessibilityHidden(true)
+            Text(title ?? filter.title)
                 .lineLimit(1)
             Spacer(minLength: 8)
             Text("\(count(for: filter))")
