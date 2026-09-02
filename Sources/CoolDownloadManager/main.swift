@@ -93,6 +93,7 @@ struct CoolDownloadManagerApp: App {
                     appDelegate.terminationHandler = { [currentStore] in
                         await currentStore.shutdown()
                     }
+                    coordinator.startUpdaterIfConfigured()
                 }
         }
         .defaultSize(width: 1_280, height: 760)

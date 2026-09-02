@@ -1,0 +1,134 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing v<version> tag to build and publish"
+        required: false
+        type: string
+      version:
+        description: "Product version; on a tag this is inferred from the tag"
+        required: false
+        type: string
+      build_number:
+        description: "Optional monotonically increasing build number"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Xcode 27 and the macOS 27 SDK are required to build this package.
+    # GitHub's Xcode 27 preview image is separate from the general macOS 26
+    # image, whose default toolchain is Xcode 26.x.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Select Xcode 27
+        shell: bash
+        run: |
+          set -euo pipefail
+          developer_dir=""
+          for candidate in \
+            /Applications/Xcode_27*.app/Contents/Developer \
+            /Applications/Xcode-beta.app/Contents/Developer \
+            /Applications/Xcode.app/Contents/Developer; do
+            if [[ -x "$candidate/usr/bin/xcodebuild" ]]; then
+              developer_dir="$candidate"
+              break
+            fi
+          done
+          [[ -n "$developer_dir" ]] || { echo "Xcode 27 was not found" >&2; exit 1; }
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          "$developer_dir/usr/bin/xcodebuild" -version
+          sdk_version="$(DEVELOPER_DIR="$developer_dir" xcrun --sdk macosx --show-sdk-version)"
+          [[ "$sdk_version" == 27.* ]] || { echo "Expected macOS 27 SDK, found $sdk_version" >&2; exit 1; }
+
+      - name: Validate release reference
+        shell: bash
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_tag="${RELEASE_TAG_INPUT:-}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          elif [[ -z "$release_tag" ]]; then
+            echo "Manual runs must provide an existing v<version> release_tag" >&2
+            exit 1
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Release tag must match v<major.minor.patch>: $release_tag" >&2
+            exit 1
+          }
+          git show-ref --verify --quiet "refs/tags/$release_tag" || {
+            echo "Release tag does not exist locally: $release_tag" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$release_tag^{commit}")" == "$(git rev-parse HEAD)" ]] || {
+            echo "Checked out HEAD does not match release tag: $release_tag" >&2
+            exit 1
+          }
+
+      - name: Install DMG tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install create-dmg
+          command -v create-dmg
+
+      - name: Run Swift tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test --filter CoolDownloadManagerTests --disable-sandbox
+          swift test --filter CoolDownloadCoreTests --disable-sandbox
+          swift test --filter CoolDownloadIntegrationTests --disable-sandbox
+
+      - name: Build, sign, and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+          RELEASE_BUILD_NUMBER_INPUT: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          [[ -n "${SPARKLE_ED25519_PRIVATE_KEY:-}" ]] || {
+            echo "Repository secret SPARKLE_ED25519_PRIVATE_KEY is required" >&2
+            exit 1
+          }
+
+          release_tag="${RELEASE_TAG_INPUT:-}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          fi
+          [[ -n "$release_tag" ]] || { echo "An existing release tag is required" >&2; exit 1; }
+          version="${RELEASE_VERSION_INPUT:-${release_tag#v}}"
+          [[ "$version" == "${release_tag#v}" ]] || {
+            echo "version must match release_tag: $version != ${release_tag#v}" >&2
+            exit 1
+          }
+
+          args=(--publish --release-tag "$release_tag" --version "$version")
+          if [[ -n "${RELEASE_BUILD_NUMBER_INPUT:-}" ]]; then
+            args+=(--build-number "$RELEASE_BUILD_NUMBER_INPUT")
+          fi
+          ./scripts/publish-macos.sh "${args[@]}"

@@ -258,7 +258,7 @@ struct MainView: View {
                 NativePageSurface {
                     switch page {
                     case .thirdParty:
-                        Text("本应用使用 Swift 标准库、SwiftUI、AppKit、CryptoKit 和 UserNotifications。")
+                        Text("本应用使用 Swift 标准库、SwiftUI、AppKit、CryptoKit、UserNotifications 和 Sparkle 2.9.6；第三方许可文本随应用包提供。")
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     case .translators:

@@ -15,7 +15,7 @@
 </p>
 
 > [!IMPORTANT]
-> 当前仓库提供开发构建和本地打包能力，尚未提供经过 Developer ID 签名与 Apple 公证的正式安装包。
+> 当前发布链使用 Sparkle 2、Ed25519 appcast 签名、ad-hoc Apple Code Signing，并同时生成手工拖拽安装 DMG。发行物仅支持 Apple Silicon（arm64）。由于没有 Developer ID 和 Apple 公证，网络下载后的首次运行可能出现 Gatekeeper 提示；线上自动更新还必须先完成真实 GitHub Release 和旧版本升级验收。
 
 ## 目录
 
@@ -239,13 +239,16 @@ brew install create-dmg
 ./scripts/package-macos.sh --dmg --zip
 ```
 
-产物输出到 `dist/`。脚本默认生成临时（ad-hoc）签名的本地开发包；用于分发时应提供 Developer ID，并在构建后完成 Apple 公证：
+产物输出到 `dist/`。脚本默认读取根目录的 `VERSION` 和 `BUILD_NUMBER`，生成 ad-hoc 签名的 `.app`。ZIP 是 Sparkle 更新归档，DMG 只用于用户手工挂载并拖到“应用程序”；两者都不会要求 Developer ID：
+
+生成 Ed25519 签名 appcast（私钥只从钥匙串账户或环境变量读取，不写入仓库）：
 
 ```sh
-./scripts/package-macos.sh \
-  --signing-identity "Developer ID Application: 你的名称 (TEAMID)" \
-  --dmg --zip
+SPARKLE_ED25519_PRIVATE_KEY="$PRIVATE_KEY_SECRET" \
+  ./scripts/publish-macos.sh --version 1.0.5 --build-number 1005
 ```
+
+只有确认对应 `v<version>` Git tag 已推送且希望上传到 GitHub Releases 时才加 `--publish`。完整的版本、密钥、资产、回滚和 CI 约定见 [macOS 发布与更新](docs/macos-release.md)。
 
 ## 文档
 
@@ -253,13 +256,14 @@ brew install create-dmg
 - [下载核心性能评估](docs/download-core-performance-evaluation.md)：记录性能假设、实现依据、完整矩阵和证据边界。
 - [性能基准工具](Benchmarks/README.md)：说明本机夹具、外部源、代理、存储和恢复测试参数。
 - [macOS 开发与打包](macos/README.md)：记录 Scheme、应用包、DMG 与浏览器集成细节。
+- [macOS 发布与更新](docs/macos-release.md)：记录 Sparkle 2、版本管理、Ed25519 密钥、GitHub Release 和 CI 发布流程。
 - [本机 HTTP 接口](REST-API.yml)：OpenAPI 3.0 接口定义。
 
 ## 当前边界
 
 - HLS 暂不支持加密播放列表和 `EXT-X-BYTERANGE` 媒体分片。
 - 队列完成后的关机、睡眠、休眠和锁屏动作只会提示用户确认，不会直接执行系统命令。
-- 正式 Developer ID 签名、Apple 公证、自动更新和已安装浏览器的完整验收尚未完成。
+- 当前发行包使用 ad-hoc 签名，不提供 Developer ID 身份信誉或 Apple 公证；Sparkle 更新链已接入，但真实 Release、旧包升级、网络失败和 Gatekeeper 行为仍需在发布前验收。
 - USB HDD、NAS 与 NFS 下载性能尚未形成有效基准证据。
 
 ## 参与贡献

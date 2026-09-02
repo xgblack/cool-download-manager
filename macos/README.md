@@ -28,11 +28,15 @@ open Package.swift
 ```
 
 Run the `CoolDownloadManager` scheme for the SwiftUI/AppKit app. The checked-in
-script creates a local ad-hoc signed app bundle and DMG; Developer ID signing,
-notarization, installed-browser manifest verification, proxy/PAC request
-execution, custom DNS resolution, confirmed OS power actions, and full visual
-parity remain release-phase work. They are tracked in the Swift rewrite plan under
-`.helloagents/plans/swift-native-macos-rewrite/`.
+script creates a local arm64 ad-hoc signed app bundle, Sparkle ZIP enclosure,
+and drag-to-Applications DMG. Sparkle 2 is enabled only in the packaged bundle;
+SwiftPM/Xcode development launches without the release `SUFeedURL` do not start
+the updater. Developer ID signing and notarization are unavailable in the
+current release path, so Gatekeeper may require an explicit first-run approval.
+Installed-browser manifest verification, proxy/PAC request execution, custom DNS
+resolution, confirmed OS power actions, and full visual parity remain separate
+release-phase work. See [`docs/macos-release.md`](../docs/macos-release.md) for
+version, key, appcast, and GitHub Release procedures.
 
 Create a local app bundle or DMG from the repository root:
 
@@ -52,9 +56,10 @@ For local integration smoke tests, the app keeps the legacy default of an unauth
 The app uses at most three active downloads by default. Set `CDM_MAX_CONCURRENT_DOWNLOADS` to change that limit. A download has a default ceiling of eight HTTP requests; automatic Range scheduling still starts at one request and probes upward only when the server advertises or confirms Range support. Set `CDM_RANGE_CONNECTIONS` to override that ceiling for local smoke tests. Range metadata and validators are persisted with the download record so a paused task can resume without treating a changed resource as the same file.
 
 The current implementation deliberately does not claim release completeness:
-custom DNS resolution, confirmed power-action execution, updater, Xcode bundle
-signing/notarization, and real installed-browser acceptance are still open
-items in the plan. Queue automatic-stop and completion events are implemented;
+custom DNS resolution, confirmed power-action execution, Xcode notarization, and
+real installed-browser acceptance are still open items in the plan. The updater
+is configured for packaged builds, but a real published Release and an old-to-new
+upgrade run are still required before claiming production availability. Queue automatic-stop and completion events are implemented;
 the core surfaces configured power actions to the UI instead of issuing them
 without confirmation. Settings, categories, queues, task-level overrides, and
 checksum UI are part of the current native vertical slice.

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Sparkle
 import CoolDownloadCore
 import CoolDownloadIntegration
 
@@ -59,6 +60,8 @@ final class AppCoordinator: NSObject, ObservableObject {
     private var focusMainWindowWhenRegistered = false
     private var focusSettingsWindowWhenRegistered = false
     private var queuedBrowserRequests: [AddDownloadsRequest] = []
+    private var updaterController: SPUStandardUpdaterController?
+    private var updaterStarted = false
 
     init(store: AppStore) {
         self.store = store
@@ -383,28 +386,36 @@ final class AppCoordinator: NSObject, ObservableObject {
         noticeMessage = message
     }
 
+    /// Starts Sparkle only for a packaged application that declares a feed.
+    /// SwiftPM/Xcode development launches do not have the release Info.plist,
+    /// so they must remain usable without an updater configuration.
+    func startUpdaterIfConfigured() {
+        guard !updaterStarted else { return }
+        guard let feedString = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+              let feedURL = URL(string: feedString),
+              let scheme = feedURL.scheme?.lowercased(),
+              scheme == "https" else {
+            return
+        }
+
+        let controller = SPUStandardUpdaterController(
+            startingUpdater: false,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+        updaterController = controller
+        updaterStarted = true
+        controller.startUpdater()
+    }
+
     func checkForUpdates() {
         showMainWindow()
-        noticeMessage = "正在检查更新…"
-        let endpoint = URL(string: "https://api.github.com/repos/xgblack/cool-download-manager/releases/latest")!
-        Task { @MainActor [weak self] in
-            do {
-                var request = URLRequest(url: endpoint)
-                request.setValue("CoolDownloadManager/1.0", forHTTPHeaderField: "User-Agent")
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                    throw URLError(.badServerResponse)
-                }
-                struct Release: Decodable { let tagName: String; let htmlURL: String? }
-                let decoder = JSONDecoder()
-                decoder.keyDecodingStrategy = .convertFromSnakeCase
-                let release = try decoder.decode(Release.self, from: data)
-                let link = release.htmlURL.map { "\n\($0)" } ?? ""
-                self?.noticeMessage = "最新版本：\(release.tagName)\(link)"
-            } catch {
-                self?.noticeMessage = "更新检查失败：\(error.localizedDescription)"
-            }
+        startUpdaterIfConfigured()
+        guard let updaterController else {
+            showNotice("当前开发构建未配置 Sparkle 更新源。")
+            return
         }
+        updaterController.checkForUpdates(nil)
     }
 
     func copy(_ value: String) {

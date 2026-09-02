@@ -27,6 +27,17 @@ let testLinkerSettings: [LinkerSetting] = needsCommandLineToolsTestingWorkaround
     ])
 ] : []
 
+// SwiftPM links the manager tests against Sparkle.framework but does not copy
+// that dynamic framework into the test bundle. The framework is emitted next
+// to the test bundle's product directory, so keep the test executable able to
+// resolve it without requiring a machine-specific absolute path.
+let managerTestLinkerSettings: [LinkerSetting] = testLinkerSettings + [
+    .unsafeFlags([
+        "-Xlinker", "-rpath",
+        "-Xlinker", "@loader_path/../../.."
+    ])
+]
+
 let package = Package(
     name: "CoolDownloadManagerMacOS",
     platforms: [.macOS(.v26)],
@@ -37,6 +48,9 @@ let package = Package(
         .executable(name: "CoolDownloadManagerNativeMessagingHost", targets: ["CoolDownloadManagerNativeMessagingHost"]),
         .executable(name: "CoolDownloadManagerCLI", targets: ["CoolDownloadManagerCLI"]),
         .executable(name: "CoolDownloadBenchmark", targets: ["CoolDownloadBenchmark"])
+    ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6")
     ],
     targets: [
         .target(
@@ -50,7 +64,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "CoolDownloadManager",
-            dependencies: ["CoolDownloadCore", "CoolDownloadIntegration"],
+            dependencies: [
+                "CoolDownloadCore",
+                "CoolDownloadIntegration",
+                .product(name: "Sparkle", package: "sparkle")
+            ],
             path: "Sources/CoolDownloadManager"
         ),
         .executableTarget(
@@ -87,7 +105,7 @@ let package = Package(
             dependencies: ["CoolDownloadManager", "CoolDownloadCore"],
             path: "Tests/CoolDownloadManagerTests",
             swiftSettings: testSwiftSettings,
-            linkerSettings: testLinkerSettings
+            linkerSettings: managerTestLinkerSettings
         )
     ],
     swiftLanguageModes: [.v6]

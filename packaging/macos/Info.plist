@@ -25,7 +25,21 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.4</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.4</string>
+	<string>1004</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/xgblack/cool-download-manager/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>7ZXx8uW6s1+mWVhas1H/bD4mc6PtZNU+WavvwRSbGpQ=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<real>86400</real>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SURequireSignedFeed</key>
+	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
