@@ -233,7 +233,10 @@ struct IntegrationTests {
             try await Task.sleep(for: .milliseconds(5))
         }
         let client = PrivateSocketClient(socketURL: socketURL)
-        let response = try client.send(PrivateSocketMessage(requestId: "B_1", action: "ping"))
+        let response = try await sendWithoutBlockingExecutor(
+            PrivateSocketMessage(requestId: "B_1", action: "ping"),
+            using: client
+        )
         #expect(response.requestId == "B_1")
         #expect(response.payload == "true")
         var socketStat = stat()
@@ -247,8 +250,10 @@ struct IntegrationTests {
         let competingServer = PrivateSocketServer(socketURL: socketURL) { request in
             PrivateSocketMessage(requestId: request.requestId, action: request.action, payload: "false")
         }
-        #expect(throws: PrivateSocketServer.PrivateSocketServerError.alreadyRunning(socketURL)) {
-            try competingServer.start()
+        await #expect(throws: PrivateSocketServer.PrivateSocketServerError.alreadyRunning(socketURL)) {
+            try await performWithoutBlockingExecutor {
+                try competingServer.start()
+            }
         }
     }
 
@@ -298,7 +303,7 @@ struct IntegrationTests {
                         requestId: "B_\(index)",
                         action: "ping"
                     )
-                    return try client.send(request)
+                    return try await sendWithoutBlockingExecutor(request, using: client)
                 }
             }
             var values: [PrivateSocketMessage] = []
@@ -309,6 +314,25 @@ struct IntegrationTests {
         }
         #expect(Set(responses.map(\.requestId)) == Set((0..<8).map { "B_\($0)" }))
         #expect(responses.allSatisfy { $0.payload == $0.requestId })
+    }
+
+    private func sendWithoutBlockingExecutor(
+        _ message: PrivateSocketMessage,
+        using client: PrivateSocketClient
+    ) async throws -> PrivateSocketMessage {
+        try await performWithoutBlockingExecutor {
+            try client.send(message)
+        }
+    }
+
+    private func performWithoutBlockingExecutor<T: Sendable>(
+        _ operation: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            Thread.detachNewThread {
+                continuation.resume(with: Result(catching: operation))
+            }
+        }
     }
 
     @Test("loopback HTTP server binds locally and serves ping")
