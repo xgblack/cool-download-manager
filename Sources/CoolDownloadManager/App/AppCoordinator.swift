@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Sparkle
+import UniformTypeIdentifiers
 import CoolDownloadCore
 import CoolDownloadIntegration
 
@@ -39,6 +40,14 @@ enum SettingsRoute: Hashable {
     case perHost
 }
 
+private final class BrowserConfirmationSession {
+    let request: AddDownloadsRequest
+
+    init(request: AddDownloadsRequest) {
+        self.request = request
+    }
+}
+
 @MainActor
 final class AppCoordinator: NSObject, ObservableObject {
     @Published var mainPath: [MainDestination] = []
@@ -59,7 +68,8 @@ final class AppCoordinator: NSObject, ObservableObject {
     private var mainWindowCreationInFlight = false
     private var focusMainWindowWhenRegistered = false
     private var focusSettingsWindowWhenRegistered = false
-    private var queuedBrowserRequests: [AddDownloadsRequest] = []
+    private var browserRequests = BrowserDownloadRequestQueue()
+    private var browserConfirmationSession: BrowserConfirmationSession?
     private var updaterController: SPUStandardUpdaterController?
     private var updaterStarted = false
 
@@ -280,7 +290,6 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func presentAddDownload(fromClipboard: Bool = false) {
         showMainWindow()
-        activeBrowserRequest = nil
         if fromClipboard {
             pendingURLText = NSPasteboard.general.string(forType: .string) ?? ""
         }
@@ -289,26 +298,99 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     private func presentBrowserDownload(_ request: AddDownloadsRequest) {
         guard !request.items.isEmpty else { return }
-        guard mainSheet == nil, activeBrowserRequest == nil else {
-            queuedBrowserRequests.append(request)
-            return
-        }
+        guard let next = browserRequests.enqueue(request) else { return }
+        beginBrowserConfirmation(for: next)
+    }
 
+    private func beginBrowserConfirmation(for request: AddDownloadsRequest) {
+        let session = BrowserConfirmationSession(request: request)
+        browserConfirmationSession = session
         activeBrowserRequest = request
-        pendingURLText = ""
-        mainViewState.urlText = request.items.map(\.link).joined(separator: "\n")
-        mainViewState.nameText = request.items.count == 1
-            ? request.items[0].suggestedName ?? ""
-            : ""
-        mainViewState.folderURL = URL(
-            fileURLWithPath: store.settings.defaultDownloadFolder,
-            isDirectory: true
+        showBrowserConfirmation(session)
+    }
+
+    private func showBrowserConfirmation(_ session: BrowserConfirmationSession) {
+        let request = session.request
+        utilityPanels.showBrowserConfirmation(
+            request: request,
+            defaultFolder: URL(
+                fileURLWithPath: store.settings.defaultDownloadFolder,
+                isDirectory: true
+            ),
+            queues: store.queues,
+            categories: store.categories,
+            onChooseFolder: { [weak self] in
+                self?.utilityPanels.chooseBrowserFolder()
+            },
+            onCancel: { [weak self] in
+                self?.finishBrowserConfirmation(session, outcome: .cancelled)
+            },
+            onAdd: { [weak self] state, queueID, categoryID, startImmediately in
+                self?.addBrowserDownload(
+                    session: session,
+                    state: state,
+                    queueID: queueID,
+                    categoryID: categoryID,
+                    startImmediately: startImmediately
+                )
+            }
         )
-        mainViewState.queueID = nil
-        mainViewState.categoryID = nil
-        mainViewState.startImmediately = true
-        showMainWindow()
-        mainSheet = .addDownload
+    }
+
+    private func addBrowserDownload(
+        session: BrowserConfirmationSession,
+        state: BrowserDownloadConfirmationState,
+        queueID: DownloadID?,
+        categoryID: DownloadID?,
+        startImmediately: Bool
+    ) {
+        guard browserConfirmationSession === session,
+              browserRequests.active == session.request,
+              state.request == session.request else { return }
+        store.addDownload(
+            link: state.urlText,
+            name: state.nameText,
+            folder: state.folderURL,
+            queueID: queueID,
+            categoryID: categoryID,
+            startImmediately: startImmediately,
+            integrationItems: session.request.items
+        )
+        finishBrowserConfirmation(session, outcome: .completed)
+    }
+
+    private enum BrowserConfirmationOutcome {
+        case cancelled
+        case completed
+    }
+
+    private func finishBrowserConfirmation(
+        _ session: BrowserConfirmationSession,
+        outcome: BrowserConfirmationOutcome
+    ) {
+        guard browserConfirmationSession === session,
+              browserRequests.active == session.request else { return }
+        let next: AddDownloadsRequest?
+        switch outcome {
+        case .cancelled:
+            next = browserRequests.cancel(session.request)
+        case .completed:
+            next = browserRequests.complete(session.request)
+        }
+        // Invalidate callbacks from this view before tearing down the panel.
+        // A late SwiftUI/AppKit event must never finish a newer session.
+        browserConfirmationSession = nil
+        utilityPanels.closeBrowserConfirmation()
+        activeBrowserRequest = next
+        guard let next else { return }
+        // Let the current button/window-close event finish before presenting
+        // the next request.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.browserConfirmationSession == nil,
+                  self.browserRequests.active == next else { return }
+            self.beginBrowserConfirmation(for: next)
+        }
     }
 
     func presentSettings() {
@@ -361,12 +443,6 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func closeMainSheet() {
         mainSheet = nil
-        activeBrowserRequest = nil
-        guard !queuedBrowserRequests.isEmpty else { return }
-        let next = queuedBrowserRequests.removeFirst()
-        DispatchQueue.main.async { [weak self] in
-            self?.presentBrowserDownload(next)
-        }
     }
 
     func showProgressPanel(for record: DownloadRecord, focus: Bool) {
@@ -433,12 +509,203 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 }
 
+/// Owns browser requests independently from MainSheet. Cancellation leaves a
+/// short-lived tombstone so HTTP/native fallback duplicates cannot reopen a
+/// confirmation immediately after the user dismisses it.
+struct BrowserDownloadRequestQueue: Equatable {
+    static let cancellationSuppressionDuration: TimeInterval = 10
+
+    /// The browser and native-messaging paths can describe one download with
+    /// different presentation metadata. Compare only the source identity so a
+    /// fallback request cannot become a second confirmation session.
+    private struct BrowserDownloadRequestKey: Equatable {
+        private struct HeaderKey: Equatable {
+            let name: String
+            let value: String
+        }
+
+        private struct ItemKey: Equatable {
+            let type: String
+            let link: String
+            let headers: [HeaderKey]
+            let downloadPage: String?
+        }
+
+        private let items: [ItemKey]
+
+        init(_ request: AddDownloadsRequest) {
+            items = request.items.map { item in
+                ItemKey(
+                    type: item.type.rawValue.lowercased(),
+                    link: Self.normalizedURL(item.link),
+                    headers: Self.normalizedHeaders(item.headers),
+                    downloadPage: Self.normalizedOptionalURL(item.downloadPage)
+                )
+            }
+        }
+
+        /// HTTP and native-messaging integration can omit optional source
+        /// metadata on one path. Treat those requests as the same intent,
+        /// while retaining separate requests when both paths provide
+        /// conflicting credentials or referrers.
+        func isCompatible(with other: Self) -> Bool {
+            guard items.count == other.items.count else { return false }
+            return zip(items, other.items).allSatisfy { lhs, rhs in
+                lhs.type == rhs.type
+                    && lhs.link == rhs.link
+                    && optionalHeadersAreCompatible(lhs.headers, rhs.headers)
+                    && optionalValuesAreCompatible(lhs.downloadPage, rhs.downloadPage)
+            }
+        }
+
+        private func optionalHeadersAreCompatible(
+            _ lhs: [HeaderKey],
+            _ rhs: [HeaderKey]
+        ) -> Bool {
+            lhs.isEmpty || rhs.isEmpty || lhs == rhs
+        }
+
+        private func optionalValuesAreCompatible(
+            _ lhs: String?,
+            _ rhs: String?
+        ) -> Bool {
+            lhs == nil || rhs == nil || lhs == rhs
+        }
+
+        private static func normalizedOptionalURL(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return normalizedURL(trimmed)
+        }
+
+        private static func normalizedURL(_ value: String) -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  var components = URLComponents(string: trimmed) else {
+                return trimmed
+            }
+            components.scheme = components.scheme?.lowercased()
+            components.host = components.host?.lowercased()
+            return components.string ?? trimmed
+        }
+
+        private static func normalizedHeaders(
+            _ headers: [String: String]?
+        ) -> [HeaderKey] {
+            (headers ?? [:])
+                .map { name, value in
+                    HeaderKey(
+                        name: name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                        value: value
+                    )
+                }
+                .sorted {
+                    if $0.name != $1.name {
+                        return $0.name < $1.name
+                    }
+                    return $0.value < $1.value
+                }
+        }
+    }
+
+    private struct CancellationTombstone: Equatable {
+        let key: BrowserDownloadRequestKey
+        let expiresAt: Date
+    }
+
+    private(set) var active: AddDownloadsRequest?
+    private(set) var pending: [AddDownloadsRequest] = []
+    private var cancellationTombstones: [CancellationTombstone] = []
+
+    mutating func enqueue(
+        _ request: AddDownloadsRequest,
+        now: Date = Date()
+    ) -> AddDownloadsRequest? {
+        pruneTombstones(at: now)
+        guard !request.items.isEmpty else { return nil }
+        let key = BrowserDownloadRequestKey(request)
+        guard !isCancellationSuppressed(key, at: now) else { return nil }
+        guard active.map({ !BrowserDownloadRequestKey($0).isCompatible(with: key) }) ?? true,
+              !pending.contains(where: {
+                  BrowserDownloadRequestKey($0).isCompatible(with: key)
+              }) else {
+            return nil
+        }
+        guard active == nil else {
+            pending.append(request)
+            return nil
+        }
+        active = request
+        return request
+    }
+
+    mutating func cancel(
+        _ request: AddDownloadsRequest,
+        now: Date = Date()
+    ) -> AddDownloadsRequest? {
+        finish(request, suppressLateDuplicate: true, now: now)
+    }
+
+    mutating func complete(
+        _ request: AddDownloadsRequest,
+        now: Date = Date()
+    ) -> AddDownloadsRequest? {
+        finish(request, suppressLateDuplicate: false, now: now)
+    }
+
+    mutating func finish(
+        _ request: AddDownloadsRequest,
+        suppressLateDuplicate: Bool = false,
+        now: Date = Date()
+    ) -> AddDownloadsRequest? {
+        pruneTombstones(at: now)
+        guard let activeRequest = active, activeRequest == request else {
+            return nil
+        }
+        let activeKey = BrowserDownloadRequestKey(activeRequest)
+        if suppressLateDuplicate {
+            cancellationTombstones.removeAll {
+                $0.key.isCompatible(with: activeKey)
+            }
+            cancellationTombstones.append(CancellationTombstone(
+                key: activeKey,
+                expiresAt: now.addingTimeInterval(Self.cancellationSuppressionDuration)
+            ))
+        }
+        // A duplicate may already be queued from another integration path.
+        // It must not be promoted after this session is dismissed or completed.
+        pending.removeAll {
+            BrowserDownloadRequestKey($0).isCompatible(with: activeKey)
+        }
+        active = pending.isEmpty ? nil : pending.removeFirst()
+        return active
+    }
+
+    private mutating func pruneTombstones(at now: Date) {
+        cancellationTombstones.removeAll { $0.expiresAt <= now }
+    }
+
+    private func isCancellationSuppressed(
+        _ key: BrowserDownloadRequestKey,
+        at now: Date
+    ) -> Bool {
+        cancellationTombstones.contains {
+            $0.key.isCompatible(with: key) && $0.expiresAt > now
+        }
+    }
+}
+
 @MainActor
 private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private var progressPanel: NSPanel?
     private var progressRecordID: DownloadID?
     private var completionPanel: NSPanel?
     private var completionClose: (() -> Void)?
+    private var browserConfirmationPanel: NSPanel?
+    private var browserConfirmationState: BrowserDownloadConfirmationState?
+    private var browserConfirmationClose: (() -> Void)?
+    private var browserFolderPanel: NSOpenPanel?
 
     func showProgress(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
         let content = DownloadProgressView(
@@ -488,6 +755,70 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         // Put the completion panel in front once without keeping it at the
         // floating window level. Later user activity can cover it normally.
         present(panel, focus: focus, orderFrontRegardless: true)
+    }
+
+    func showBrowserConfirmation(
+        request: AddDownloadsRequest,
+        defaultFolder: URL,
+        queues: [IntegrationQueue],
+        categories: [DownloadCategory],
+        onChooseFolder: @escaping () -> Void,
+        onCancel: @escaping () -> Void,
+        onAdd: @escaping (BrowserDownloadConfirmationState, DownloadID?, DownloadID?, Bool) -> Void
+    ) {
+        // Each confirmation owns its panel. Reusing an NSWindow lets a stale
+        // close event from the previous request target the next request.
+        dismissBrowserConfirmationPanel()
+        let state = BrowserDownloadConfirmationState(
+            request: request,
+            defaultFolder: defaultFolder
+        )
+        browserConfirmationState = state
+        browserConfirmationClose = onCancel
+        let content = BrowserDownloadConfirmationView(
+            state: state,
+            queues: queues,
+            categories: categories,
+            onChooseFolder: onChooseFolder,
+            onCancel: onCancel,
+            onAdd: { queueID, categoryID, startImmediately in
+                onAdd(state, queueID, categoryID, startImmediately)
+            }
+        )
+        let panel = panel(
+            existing: nil,
+            title: "确认下载",
+            size: NSSize(width: 700, height: 620),
+            floatsAboveNormalWindows: false,
+            content: content
+        )
+        panel.identifier = NSUserInterfaceItemIdentifier(
+            "com.cooldownloadmanager.browser-confirmation"
+        )
+        browserConfirmationPanel = panel
+        present(panel, focus: true, orderFrontRegardless: true)
+    }
+
+    func chooseBrowserFolder() {
+        guard let panel = browserConfirmationPanel,
+              let state = browserConfirmationState else { return }
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseFiles = false
+        openPanel.canChooseDirectories = true
+        openPanel.allowsMultipleSelection = false
+        openPanel.allowedContentTypes = [.folder]
+        openPanel.directoryURL = state.folderURL
+        browserFolderPanel = openPanel
+        openPanel.beginSheetModal(for: panel) { [weak self] response in
+            defer {
+                if self?.browserFolderPanel === openPanel {
+                    self?.browserFolderPanel = nil
+                }
+            }
+            guard response == .OK, let url = openPanel.url else { return }
+            guard self?.browserConfirmationState === state else { return }
+            state.folderURL = url
+        }
     }
 
     private func panel<Content: View>(
@@ -548,7 +879,39 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         completionClose = nil
     }
 
+    func closeBrowserConfirmation() {
+        dismissBrowserConfirmationPanel()
+    }
+
+    private func dismissBrowserConfirmationPanel() {
+        let folderPanel = browserFolderPanel
+        browserFolderPanel = nil
+        browserConfirmationState = nil
+        browserConfirmationClose = nil
+        folderPanel?.cancel(nil)
+        guard let panel = browserConfirmationPanel else { return }
+        browserConfirmationPanel = nil
+        panel.delegate = nil
+        panel.contentViewController = nil
+        panel.orderOut(nil)
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender.identifier?.rawValue == "com.cooldownloadmanager.browser-confirmation" {
+            guard sender === browserConfirmationPanel else {
+                // This is a retired panel. It must not invoke the callback
+                // belonging to the currently visible confirmation.
+                sender.orderOut(nil)
+                return false
+            }
+            let close = browserConfirmationClose
+            if let close {
+                close()
+            } else {
+                dismissBrowserConfirmationPanel()
+            }
+            return false
+        }
         if sender === progressPanel {
             progressRecordID = nil
         }

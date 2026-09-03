@@ -102,7 +102,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CoolDownloadManagerTests",
-            dependencies: ["CoolDownloadManager", "CoolDownloadCore"],
+            dependencies: ["CoolDownloadManager", "CoolDownloadCore", "CoolDownloadIntegration"],
             path: "Tests/CoolDownloadManagerTests",
             swiftSettings: testSwiftSettings,
             linkerSettings: managerTestLinkerSettings

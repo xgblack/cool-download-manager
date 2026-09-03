@@ -184,7 +184,7 @@ struct MainView: View {
                     queueID: $viewState.queueID,
                     categoryID: $viewState.categoryID,
                     startImmediately: $viewState.startImmediately,
-                    title: coordinator.activeBrowserRequest == nil ? "新建下载" : "确认下载",
+                    title: "新建下载",
                     queues: store.queues,
                     categories: store.categories,
                     onChooseFolder: { viewState.isShowingFolderPicker = true },
@@ -199,8 +199,7 @@ struct MainView: View {
                             folder: viewState.folderURL,
                             queueID: queueID,
                             categoryID: categoryID,
-                            startImmediately: startImmediately,
-                            integrationItems: coordinator.activeBrowserRequest?.items
+                            startImmediately: startImmediately
                         )
                         resetAddForm()
                         coordinator.closeMainSheet()
