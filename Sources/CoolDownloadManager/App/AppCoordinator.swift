@@ -9,12 +9,6 @@ enum MainDestination: Hashable {
     case downloadDetail(DownloadID)
     case queues
     case categories
-    case appInfo(MainInfoPage)
-}
-
-enum MainInfoPage: String, Hashable {
-    case thirdParty
-    case translators
 }
 
 enum MainSheet: Identifiable, Equatable {

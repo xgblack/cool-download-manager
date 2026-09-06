@@ -167,8 +167,6 @@ struct MainView: View {
             QueueView(store: store)
         case .categories:
             CategoryView(store: store)
-        case .appInfo(let page):
-            infoView(page)
         }
     }
 
@@ -238,34 +236,6 @@ struct MainView: View {
             NavigationStack {
                 let records = ids.compactMap { store.downloadList.record(id: $0) }
                 ChecksumView(records: records, service: store.service, onClose: coordinator.closeMainSheet)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func infoView(_ page: MainInfoPage) -> some View {
-        VStack(spacing: 0) {
-            NativePageHeader(
-                title: page == .thirdParty ? "第三方库" : "翻译者",
-                subtitle: "酷的下载管理器",
-                systemImage: page == .thirdParty ? "shippingbox" : "person.2",
-                tint: page == .thirdParty ? .purple : .orange
-            )
-            Divider()
-
-            NativePageContent(maxWidth: NativePageLayout.compactContentWidth) {
-                NativePageSurface {
-                    switch page {
-                    case .thirdParty:
-                        Text("本应用使用 Swift 标准库、SwiftUI、AppKit、CryptoKit、UserNotifications 和 Sparkle 2.9.6；第三方许可文本随应用包提供。")
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    case .translators:
-                        Text("感谢所有为项目提供翻译和反馈的贡献者。")
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
             }
         }
     }

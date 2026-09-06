@@ -180,14 +180,6 @@ struct CoolDownloadManagerApp: App {
                 Button("支持") {
                     openExternal("https://github.com/xgblack/cool-download-manager/issues")
                 }
-                Button("第三方库") {
-                    coordinator.showMainWindow()
-                    coordinator.mainPath = [.appInfo(.thirdParty)]
-                }
-                Button("翻译者") {
-                    coordinator.showMainWindow()
-                    coordinator.mainPath = [.appInfo(.translators)]
-                }
                 Button("捐赠") {
                     openExternal("https://github.com/xgblack/cool-download-manager")
                 }
