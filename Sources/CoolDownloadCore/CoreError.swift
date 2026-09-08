@@ -21,6 +21,7 @@ public enum DownloadCoreError: Error, LocalizedError, Sendable, Equatable {
     case noSpace
     case permissionDenied(String)
     case cancelled
+    case identifierExhausted
 
     public var errorDescription: String? {
         switch self {
@@ -79,6 +80,8 @@ public enum DownloadCoreError: Error, LocalizedError, Sendable, Equatable {
             return "磁盘可用空间不足"
         case .permissionDenied(let path):
             return "没有权限访问：\(path)"
+        case .identifierExhausted:
+            return "下载任务编号已耗尽，无法创建新任务"
         case .cancelled:
             return "下载已取消"
         }

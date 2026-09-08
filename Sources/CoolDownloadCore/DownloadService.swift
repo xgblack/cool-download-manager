@@ -46,6 +46,9 @@ public actor DownloadService {
     private var lastProgressEvent: [DownloadID: ContinuousClock.Instant] = [:]
     private var activeConnectionCounts: [DownloadID: Int] = [:]
     private var shuttingDown = false
+    private var finalizingIDs: Set<DownloadID> = []
+    private var removingIDs: Set<DownloadID> = []
+    private var pendingDestinations: [DownloadID: Set<URL>] = [:]
 
     private static let progressPersistenceInterval: Duration = .seconds(2)
     // Avoid turning fast local or multi-gigabit transfers into an fsync loop.
@@ -328,7 +331,9 @@ public actor DownloadService {
     }
 
     public func add(_ request: AddDownloadRequest) async throws -> DownloadID {
-        let id = await store.nextID()
+        guard !shuttingDown else { throw DownloadCoreError.cancelled }
+        let id = try await store.reserveNextID()
+        guard !shuttingDown else { throw DownloadCoreError.cancelled }
         var source = try DownloadSourceSecurity.validatedForPersistence(request.source)
 
         let folderURL = URL(fileURLWithPath: request.folder ?? defaultFolder.path, isDirectory: true)
@@ -368,6 +373,9 @@ public actor DownloadService {
                 ? "\(name).cooldm.part"
                 : nil
         )
+        pendingDestinations[id] = [record.destinationURL.standardizedFileURL,
+                                   record.incompleteURL.standardizedFileURL]
+        defer { pendingDestinations[id] = nil }
         try await store.save(record)
         records[id] = record
         emit(.created(record))
@@ -382,6 +390,8 @@ public actor DownloadService {
         id: DownloadID,
         patch: DownloadSourcePatch
     ) async throws -> DownloadSourcePatchResult {
+        if finalizingIDs.contains(id), let task = tasks[id] { await task.value }
+        guard !removingIDs.contains(id) else { throw DownloadCoreError.cancelled }
         guard var record = records[id] else {
             throw DownloadCoreError.notFound(id)
         }
@@ -484,8 +494,13 @@ public actor DownloadService {
             }
             current.updatedAt = Date()
             current.revision += 1
+            records[id] = current
             try await store.save(current)
         } catch {
+            if current.source != baseline.source,
+               records[id]?.revision == current.revision {
+                records[id] = baseline
+            }
             await resumeAfterFailedSourcePatch(
                 id: id,
                 baseline: baseline,
@@ -493,8 +508,11 @@ public actor DownloadService {
             )
             throw error
         }
-        records[id] = current
-        emit(.updated(current))
+        guard let committed = records[id], !removingIDs.contains(id) else {
+            throw DownloadCoreError.notFound(id)
+        }
+        if committed.revision != current.revision { continueAfterPatch = false }
+        emit(.updated(committed))
 
         var continued = false
         if continueAfterPatch, !shuttingDown {
@@ -526,7 +544,7 @@ public actor DownloadService {
     }
 
     public func start(id: DownloadID) async throws {
-        guard !shuttingDown else {
+        guard !shuttingDown, !removingIDs.contains(id) else {
             throw DownloadCoreError.cancelled
         }
         guard var record = records[id] else {
@@ -547,7 +565,15 @@ public actor DownloadService {
         record.updatedAt = Date()
         record.revision += 1
         records[id] = record
-        try await store.save(record)
+        do {
+            try await store.save(record)
+        } catch {
+            reportPersistenceFailure("start state", id: id, error: error)
+            throw error
+        }
+        guard !shuttingDown, !removingIDs.contains(id),
+              let latest = records[id], latest.status == .preparing,
+              latest.revision == record.revision else { return }
         emit(.updated(record))
 
         if canLaunch(id) {
@@ -596,6 +622,7 @@ public actor DownloadService {
 
     public func pause(ids: [DownloadID]) async throws {
         for id in ids {
+            if finalizingIDs.contains(id), let task = tasks[id] { await task.value }
             guard var record = records[id] else {
                 throw DownloadCoreError.notFound(id)
             }
@@ -607,12 +634,17 @@ public actor DownloadService {
             record.updatedAt = Date()
             record.revision += 1
             records[id] = record
-            try await store.save(record)
-            emit(.updated(record))
-            if let task = tasks[id] {
-                task.cancel()
-                await task.value
+            let task = tasks[id]
+            task?.cancel()
+            do {
+                try await store.save(record)
+            } catch {
+                reportPersistenceFailure("paused state", id: id, error: error)
+                if let task { await task.value }
+                throw error
             }
+            if let latest = records[id] { emit(.updated(latest)) }
+            if let task { await task.value }
         }
     }
 
@@ -625,9 +657,13 @@ public actor DownloadService {
                 throw DownloadCoreError.sourceRefreshRequired(reason)
             }
             if let task = tasks[id] {
-                task.cancel()
+                if !finalizingIDs.contains(id) { task.cancel() }
                 await task.value
             }
+            guard !shuttingDown, !removingIDs.contains(id), let latest = records[id] else {
+                throw DownloadCoreError.cancelled
+            }
+            record = latest
             record.status = .added
             record.error = nil
             record.updatedAt = Date()
@@ -648,9 +684,13 @@ public actor DownloadService {
                 throw DownloadCoreError.notFound(id)
             }
             if let task = tasks[id] {
-                task.cancel()
+                if !finalizingIDs.contains(id) { task.cancel() }
                 await task.value
             }
+            guard !shuttingDown, !removingIDs.contains(id), let latest = records[id] else {
+                throw DownloadCoreError.cancelled
+            }
+            record = latest
             queuedIDs.removeAll { $0 == id }
             if FileManager.default.fileExists(atPath: record.destinationURL.path) {
                 try FileManager.default.removeItem(at: record.destinationURL)
@@ -717,9 +757,11 @@ public actor DownloadService {
             guard let record = records[id] else {
                 throw DownloadCoreError.notFound(id)
             }
+            guard removingIDs.insert(id).inserted else { continue }
+            defer { removingIDs.remove(id) }
             let queueID = record.queueID
             if let task = tasks[id] {
-                task.cancel()
+                if !finalizingIDs.contains(id) { task.cancel() }
                 await task.value
             }
             queuedIDs.removeAll { $0 == id }
@@ -745,7 +787,8 @@ public actor DownloadService {
     }
 
     private func launch(id: DownloadID) {
-        guard tasks[id] == nil, records[id] != nil else { return }
+        guard tasks[id] == nil, records[id]?.status == .preparing,
+              !removingIDs.contains(id), !shuttingDown else { return }
         activeIDs.insert(id)
         tasks[id] = Task { [weak self] in
             await self?.runAndRelease(id: id)
@@ -958,7 +1001,7 @@ public actor DownloadService {
                     reportPersistenceFailure("source refresh state", id: id, error: error)
                 }
                 emit(.updated(waiting))
-            } else if let current = records[id], current.status != .paused {
+            } else if let current = records[id], current.status != .paused, current.status != .failed {
                 var failed = current
                 failed.status = .failed
                 failed.error = error.localizedDescription
@@ -981,6 +1024,10 @@ public actor DownloadService {
     ) async throws {
         var record = initialRecord
         let hadIncompleteFile = FileManager.default.fileExists(atPath: record.incompleteURL.path)
+        if !hadIncompleteFile,
+           FileManager.default.fileExists(atPath: record.destinationURL.path) {
+            throw DownloadCoreError.duplicateDestination(record.destinationURL.path)
+        }
         let writer = try PartFileWriter(record: record)
 
         // Persisted parts describe bytes in the temporary file, not bytes in
@@ -1041,6 +1088,8 @@ public actor DownloadService {
         guard var completing = records[id] else {
             return
         }
+        finalizingIDs.insert(id)
+        defer { finalizingIDs.remove(id) }
         let completedName = resolvedCompletionName(
             for: completing,
             serverFileName: serverFileName
@@ -2104,7 +2153,15 @@ public actor DownloadService {
         // task is unwinding. There is no durable target to report in that
         // case; retain diagnostics for real storage failures only.
         guard FileManager.default.fileExists(atPath: store.rootURL.path) else { return }
-        fputs("CoolDownloadCore: failed to persist \(context) for \(id): \(error)\n", stderr)
+        fputs("CoolDownloadCore: failed to persist \(context) for \(id)\n", stderr)
+        guard var record = records[id] else { return }
+        record.status = .failed
+        record.error = "无法保存下载状态，已停止任务并保留文件。请检查磁盘空间与目录权限后重试。"
+        record.updatedAt = Date()
+        record.revision += 1
+        records[id] = record
+        tasks[id]?.cancel()
+        emit(.updated(record))
     }
 
     private func removeSubscriber(_ id: UUID) {
@@ -2173,6 +2230,11 @@ public actor DownloadService {
             || (incomplete.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
             return true
         }
+
+        if pendingDestinations.contains(where: { id, paths in
+            id != excludedID && (paths.contains(destination)
+                || incomplete.map(paths.contains) == true)
+        }) { return true }
 
         return records.values.contains { record in
             guard record.id != excludedID, record.status != .completed else { return false }

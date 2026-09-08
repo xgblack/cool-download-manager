@@ -1,11 +1,170 @@
 import Foundation
 import Darwin
+import Network
 import Testing
 import CoolDownloadCore
 @testable import CoolDownloadIntegration
 
 @Suite("CoolDownloadIntegration")
 struct IntegrationTests {
+    @Test("HTTP authentication fails closed unless anonymous mode is explicit")
+    func authenticationPolicy() async {
+        for key in [nil, "", "   "] as [String?] {
+            let router = IntegrationRouter(handler: RecordingHandler(), apiKey: key)
+            for path in ["/ping", "/queues", "/add", "/start-headless-download", "/downloads/7/source"] {
+                let response = await router.handle(HTTPRequest(method: "POST", path: path))
+                #expect(response.statusCode == 401)
+            }
+        }
+        let anonymous = IntegrationRouter(handler: RecordingHandler(), allowAnonymous: true)
+        #expect(await anonymous.handle(HTTPRequest(method: "POST", path: "/ping")).statusCode == 200)
+        let authenticated = IntegrationRouter(handler: RecordingHandler(), apiKey: "secret")
+        for value in ["", "wrong"] {
+            #expect(await authenticated.handle(HTTPRequest(method: "POST", path: "/ping", headers: ["X-Api-Key": value])).statusCode == 401)
+        }
+    }
+
+    @Test("HTTP rejects untrusted browser origins and rebinding hosts even with a token")
+    func browserBoundary() async {
+        let router = IntegrationRouter(handler: RecordingHandler(), apiKey: "secret")
+        for headers in [
+            ["Host": "attacker.test:15151"],
+            ["Host": "localhost:80"],
+            ["Origin": "https://attacker.test"],
+            ["Origin": "null"],
+            ["Origin": "http://localhost:15151.attacker.test"]
+        ] {
+            let request = HTTPRequest(method: "POST", path: "/ping", headers: headers.merging(["X-Api-Key": "secret"]) { _, new in new })
+            #expect(await router.handle(request).statusCode == 403)
+        }
+        for host in ["localhost:15151", "127.0.0.1:15151", "[::1]:15151"] {
+            #expect(await router.handle(HTTPRequest(method: "POST", path: "/ping", headers: ["Host": host, "X-Api-Key": "secret"])).statusCode == 200)
+        }
+    }
+
+    @Test("HTTP parser distinguishes incomplete bodies from invalid and overflowing lengths")
+    func boundedHTTPParser() throws {
+        for value in ["-1", "+1", "abc", "9223372036854775807", "9999999999999999999999999"] {
+            let bytes = Data("POST /add HTTP/1.1\r\nHost: localhost:15151\r\nContent-Length: \(value)\r\n\r\n".utf8)
+            #expect(throws: (any Error).self) { _ = try LoopbackHTTPServer.parseRequest(bytes) }
+        }
+        for extra in ["Content-Length: 0\r\ncontent-length: 0", "Transfer-Encoding: chunked", "Bad Header: x"] {
+            #expect(throws: (any Error).self) {
+                _ = try LoopbackHTTPServer.parseRequest(Data("POST /ping HTTP/1.1\r\nHost: localhost:15151\r\n\(extra)\r\n\r\n".utf8))
+            }
+        }
+        let prefix = Data("POST /add HTTP/1.1\r\nHost: localhost:15151\r\nContent-Length: 2\r\n\r\n".utf8)
+        #expect(try LoopbackHTTPServer.parseRequest(prefix + Data("x".utf8)) == nil)
+        #expect(try LoopbackHTTPServer.parseRequest(prefix + Data("xy".utf8))?.body == Data("xy".utf8))
+        #expect(try LoopbackHTTPServer.parseRequest(Data("POST /ping HTTP/1.1\r\nHost: localhost:15151\r\n\r\n".utf8))?.body.isEmpty == true)
+        #expect(throws: (any Error).self) { _ = try LoopbackHTTPServer.parseRequest(Data(repeating: 65, count: 16 * 1024 + 1)) }
+    }
+
+    @Test("stopping a stale socket server cannot unlink its replacement")
+    func staleSocketStop() throws {
+        let root = URL(fileURLWithPath: "/tmp/cdm-lifecycle-\(UUID().uuidString)")
+        let url = root.appendingPathComponent("s.sock")
+        let first = PrivateSocketServer(socketURL: url) { $0 }
+        let second = PrivateSocketServer(socketURL: url) { $0 }
+        try first.start()
+        first.stop()
+        try second.start()
+        defer { second.stop() }
+        first.stop()
+        let request = PrivateSocketMessage(requestId: "replacement", action: "ping")
+        #expect(try PrivateSocketClient(socketURL: url).send(request) == request)
+    }
+
+    @Test("HTTP cannot start with an absent or blank key")
+    func httpStartupAuthentication() throws {
+        for key in [nil, "", "  "] as [String?] {
+            let router = IntegrationRouter(handler: RecordingHandler(), apiKey: key)
+            #expect(throws: IntegrationServerError.authenticationRequired) {
+                _ = try LoopbackHTTPServer(router: router)
+            }
+        }
+    }
+
+    @Test("HTTP closes excess, expired and stopped connections")
+    func httpConnectionLifecycle() async throws {
+        let port = UInt16.random(in: 27000..<28000)
+        let server = try LoopbackHTTPServer(
+            port: port, router: IntegrationRouter(handler: RecordingHandler(), apiKey: "secret"),
+            maximumConnections: 1, connectionTimeout: 0.5
+        )
+        server.start()
+        defer { server.stop() }
+        try await waitForHTTP(port)
+        try await performWithoutBlockingExecutor {
+            // The first client occupies the sole slot with an incomplete request.
+            let first = try openTestTCP(port)
+            defer { _ = Darwin.close(first) }
+            let partial = Data("POST /ping HTTP/1.1\r\nHost: ".utf8)
+            try sendTestBytes(partial, to: first)
+            usleep(50_000)
+            let excess = try openTestTCP(port)
+            defer { _ = Darwin.close(excess) }
+            #expect(testPeerClosed(excess))
+            // A total deadline expires even though the peer has not completed its headers.
+            #expect(testPeerClosed(first))
+            let stopped = try openTestTCP(port)
+            defer { _ = Darwin.close(stopped) }
+            try sendTestBytes(partial, to: stopped)
+            usleep(50_000)
+            server.stop()
+            server.stop()
+            #expect(testPeerClosed(stopped))
+        }
+    }
+
+    @Test("HTTP listener conflict reports failure without stopping private socket")
+    func listenerConflict() async throws {
+        let port = UInt16.random(in: 28000..<29000)
+        let router = IntegrationRouter(handler: RecordingHandler(), apiKey: "secret")
+        let first = try LoopbackHTTPServer(port: port, router: router)
+        first.start()
+        defer { first.stop() }
+        try await waitForHTTP(port)
+        let failures = ListenerFailures()
+        let root = URL(fileURLWithPath: "/tmp/cdm-conflict-\(UUID().uuidString)")
+        let socket = PrivateSocketServer(socketURL: root.appendingPathComponent("s.sock")) { $0 }
+        try socket.start()
+        defer { socket.stop() }
+        do {
+            let second = try LoopbackHTTPServer(port: port, router: router) { failures.record($0) }
+            second.start()
+            defer { second.stop() }
+            let deadline = ContinuousClock.now + .seconds(2)
+            while failures.count == 0, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(failures.count == 1)
+        } catch {
+            // Network.framework may reject a conflicting bind synchronously.
+            #expect(error is NWError)
+        }
+        let message = PrivateSocketMessage(requestId: "independent", action: "ping")
+        #expect(try await sendWithoutBlockingExecutor(message, using: PrivateSocketClient(socketURL: socket.socketURL)) == message)
+    }
+
+    private func waitForHTTP(_ port: UInt16) async throws {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/ping")!)
+        request.httpMethod = "POST"
+        request.setValue("secret", forHTTPHeaderField: "X-Api-Key")
+        request.timeoutInterval = 0.5
+        let deadline = ContinuousClock.now + .seconds(2)
+        while true {
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                return
+            } catch {
+                guard ContinuousClock.now < deadline else { throw error }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
     @Test("HTTP routes preserve add, queues, ping and API key behavior")
     func routes() async throws {
         let handler = RecordingHandler(queues: [IntegrationQueue(id: 9, name: "Nightly")])
@@ -337,21 +496,23 @@ struct IntegrationTests {
 
     @Test("loopback HTTP server binds locally and serves ping")
     func loopbackHTTP() async throws {
-        let router = IntegrationRouter(handler: RecordingHandler())
+        let router = IntegrationRouter(handler: RecordingHandler(), apiKey: "secret")
         let port = UInt16(25000 + Int.random(in: 0..<500))
         let server = try LoopbackHTTPServer(port: port, router: router)
         server.start()
         defer { server.stop() }
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitForHTTP(port)
 
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/ping")!)
         request.httpMethod = "POST"
+        request.setValue("secret", forHTTPHeaderField: "X-Api-Key")
         let (data, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         #expect(String(data: data, encoding: .utf8) == "pong")
 
         var ipv6Request = URLRequest(url: URL(string: "http://[::1]:\(port)/ping")!)
         ipv6Request.httpMethod = "POST"
+        ipv6Request.setValue("secret", forHTTPHeaderField: "X-Api-Key")
         let (ipv6Data, ipv6Response) = try await URLSession.shared.data(for: ipv6Request)
         #expect((ipv6Response as? HTTPURLResponse)?.statusCode == 200)
         #expect(String(data: ipv6Data, encoding: .utf8) == "pong")
@@ -748,4 +909,47 @@ private actor SourceRefreshIntegrationTransport: HTTPTransport {
         }
         return HTTPTransportResponse(statusCode: status, headers: headers, body: stream)
     }
+}
+
+private final class ListenerFailures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+    var count: Int { lock.withLock { messages.count } }
+    func record(_ message: String) { lock.withLock { messages.append(message) } }
+}
+
+private func openTestTCP(_ port: UInt16) throws -> Int32 {
+    let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw PrivateSocketClientError.system(errno) }
+    var timeout = timeval(tv_sec: 3, tv_usec: 0)
+    var noSignal: Int32 = 1
+    _ = setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    _ = setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = port.bigEndian
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard connected == 0 else {
+        let error = errno
+        _ = Darwin.close(descriptor)
+        throw PrivateSocketClientError.system(error)
+    }
+    return descriptor
+}
+
+private func sendTestBytes(_ bytes: Data, to descriptor: Int32) throws {
+    let sent = bytes.withUnsafeBytes { Darwin.send(descriptor, $0.baseAddress, $0.count, 0) }
+    guard sent == bytes.count else { throw PrivateSocketClientError.system(errno) }
+}
+
+private func testPeerClosed(_ descriptor: Int32) -> Bool {
+    var byte: UInt8 = 0
+    let count = Darwin.recv(descriptor, &byte, 1, 0)
+    return count == 0 || (count < 0 && errno == ECONNRESET)
 }

@@ -32,9 +32,8 @@ public actor QueueStore {
             models = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
             if models.isEmpty {
                 let main = DownloadQueueModel(id: 0, name: "主队列")
-                try database.perform { context in
+                try database.transaction { context in
                     try persist(main, in: context)
-                    try context.save()
                 }
                 models[main.id] = main
             }
@@ -61,9 +60,8 @@ public actor QueueStore {
         let id = max(models.keys.max() ?? 0, 10) + 1
         let value = try DownloadQueueModel(id: id, name: name).validated()
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 try persist(value, in: context)
-                try context.save()
             }
         } catch let error as QueueStoreError {
             throw error
@@ -80,10 +78,9 @@ public actor QueueStore {
         let value = try model.validated()
         guard models[value.id] != nil else { throw QueueStoreError.notFound(value.id) }
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 try persist(value, in: context)
                 try persistMembership(value, in: context)
-                try context.save()
             }
             models[value.id] = value
         } catch let error as QueueStoreError {
@@ -104,7 +101,7 @@ public actor QueueStore {
             throw QueueStoreError.notFound(queueID)
         }
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 let taskRequest = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
                 let tasks = try context.fetch(taskRequest)
                 let queues = try context.fetch(NSFetchRequest<NSManagedObject>(entityName: "DownloadQueue"))
@@ -135,7 +132,6 @@ public actor QueueStore {
                         task.setValue(nil, forKey: "queueOrder")
                     }
                 }
-                try context.save()
             }
             loaded = false
             _ = try load()
@@ -151,7 +147,7 @@ public actor QueueStore {
         guard id != 0 else { throw QueueStoreError.cannotDeleteMainQueue }
         guard models[id] != nil else { throw QueueStoreError.notFound(id) }
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadQueue")
                 request.predicate = NSPredicate(format: "id == %lld", id)
                 request.fetchLimit = 1
@@ -159,7 +155,6 @@ public actor QueueStore {
                     throw QueueStoreError.notFound(id)
                 }
                 context.delete(object)
-                try context.save()
             }
             models[id] = nil
         } catch let error as QueueStoreError {

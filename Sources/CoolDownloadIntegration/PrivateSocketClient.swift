@@ -14,6 +14,10 @@ public final class PrivateSocketClient: @unchecked Sendable {
             throw PrivateSocketClientError.system(errno)
         }
         defer { _ = Darwin.close(descriptor) }
+        var noSignal: Int32 = 1
+        guard setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw PrivateSocketClientError.system(errno)
+        }
         configureTimeouts(for: descriptor)
 
         var address = sockaddr_un()

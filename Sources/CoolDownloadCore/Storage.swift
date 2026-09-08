@@ -36,6 +36,7 @@ public actor DownloadStore {
     private let database: MetadataDatabase
     private var records: [DownloadID: DownloadRecord] = [:]
     private var loaded = false
+    private var reservedID: DownloadID = 0
     private var metrics: any DownloadMetricsSink = NoopDownloadMetricsSink()
     private var metricsEnabled = false
     private var latestMutationStats = DownloadStoreMutationStats()
@@ -53,25 +54,17 @@ public actor DownloadStore {
 
     @discardableResult
     public func load() throws -> [DownloadRecord] {
-        let tasks: [NSManagedObject]
-        do {
-            tasks = try database.perform { context in
-                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
-                request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
-                return try context.fetch(request)
-            }
-        } catch let error as MetadataDatabaseError {
-            throw error
-        } catch {
-            throw MetadataDatabaseError.loadFailed(metadataURL, error.localizedDescription)
-        }
         let loadedRecords: [DownloadRecord]
         do {
-            loadedRecords = try tasks.map(Self.decodeRecord)
+            loadedRecords = try database.perform { context in
+                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
+                return try context.fetch(request).map(Self.decodeRecord)
+            }
         } catch let error as DownloadCoreError {
             throw error
         } catch {
-            throw DownloadCoreError.corruptRecord(metadataURL, error.localizedDescription)
+            throw MetadataDatabaseError.loadFailed(metadataURL, error.localizedDescription)
         }
         records = Dictionary(uniqueKeysWithValues: loadedRecords.map { ($0.id, $0) })
         loaded = true
@@ -86,14 +79,26 @@ public actor DownloadStore {
         records[id]
     }
 
-    public func nextID() -> DownloadID {
-        let maximum = (try? database.perform { context -> Int64 in
-            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
-            request.fetchLimit = 1
-            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: false)]
-            return (try context.fetch(request).first?.value(forKey: "id") as? NSNumber)?.int64Value ?? 0
-        }) ?? records.keys.max() ?? 0
-        return max(maximum, records.keys.max() ?? 0) + 1
+    /// Reserves an integer ID before yielding back to a caller. Failed adds
+    /// leave gaps; an ID is never returned twice by this store instance.
+    public func reserveNextID() throws -> DownloadID {
+        let maximum: Int64
+        do {
+            maximum = try database.perform { context in
+                let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.fetchLimit = 1
+                request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: false)]
+                return (try context.fetch(request).first?.value(forKey: "id") as? NSNumber)?.int64Value ?? 0
+            }
+        } catch {
+            throw MetadataDatabaseError.loadFailed(metadataURL, error.localizedDescription)
+        }
+        let highWater = max(maximum, reservedID)
+        guard highWater < DownloadID.max else {
+            throw DownloadCoreError.identifierExhausted
+        }
+        reservedID = highWater + 1
+        return reservedID
     }
 
     public func updateMetrics(_ metrics: any DownloadMetricsSink) {

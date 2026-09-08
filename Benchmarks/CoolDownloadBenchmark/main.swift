@@ -153,7 +153,14 @@ struct CoolDownloadBenchmarkMain {
             "cooldm-recovery-\(UUID().uuidString)",
             isDirectory: true
         )
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer {
+            if !configuration.keepFiles {
+                try? FileManager.default.removeItem(at: root)
+            }
+        }
+        if configuration.keepFiles {
+            fputs("files: \(root.path)\n", stderr)
+        }
 
         var childConfiguration = configuration
         childConfiguration.sourceURL = sourceURL.absoluteString

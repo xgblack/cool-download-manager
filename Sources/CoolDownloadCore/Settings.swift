@@ -29,6 +29,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
     public var apiEnabled: Bool
     public var apiPort: Int
     public var apiAuthEnabled: Bool
+    public var apiAnonymousAccessConfirmed: Bool
     public var apiAuthKey: String
     public var trackDeletedFilesOnDisk: Bool
     public var deletePartialFileOnDownloadCancellation: Bool
@@ -77,7 +78,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             defaultDownloadFolder: home.appendingPathComponent("Downloads/CoolDM", isDirectory: true).path,
             apiEnabled: true,
             apiPort: 15151,
-            apiAuthEnabled: false,
+            apiAuthEnabled: true,
             apiAuthKey: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
             trackDeletedFilesOnDisk: false,
             deletePartialFileOnDownloadCancellation: false,
@@ -136,7 +137,8 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         proxyPort: Int,
         proxyUsername: String,
         proxyPassword: String,
-        proxyPACURL: String
+        proxyPACURL: String,
+        apiAnonymousAccessConfirmed: Bool = false
     ) {
         self.theme = theme
         self.uiScale = uiScale
@@ -166,6 +168,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         self.apiPort = apiPort
         self.apiAuthEnabled = apiAuthEnabled
         self.apiAuthKey = apiAuthKey
+        self.apiAnonymousAccessConfirmed = apiAnonymousAccessConfirmed
         self.trackDeletedFilesOnDisk = trackDeletedFilesOnDisk
         self.deletePartialFileOnDownloadCancellation = deletePartialFileOnDownloadCancellation
         self.sizeUnit = sizeUnit
@@ -181,7 +184,22 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         self.proxyPACURL = proxyPACURL
     }
 
+    /// A legacy anonymous setting is preserved, but cannot start HTTP until acknowledged.
+    public var httpIntegrationConfigurationError: String? {
+        guard apiEnabled else { return nil }
+        guard (1...65535).contains(apiPort) else { return "HTTP 监听端口无效" }
+        if apiAuthEnabled {
+            guard !apiAuthKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "HTTP 访问认证已启用，但密钥为空。请在设置中生成认证密钥。"
+            }
+        } else if !apiAnonymousAccessConfirmed {
+            return "HTTP 连接已暂停：旧配置未启用认证。请在设置中启用访问认证，或明确确认允许本机匿名访问。浏览器 Native Messaging 不受影响。"
+        }
+        return nil
+    }
+
     private enum CodingKeys: String, CodingKey {
+        case apiAnonymousAccessConfirmed
         case theme, uiScale, mergeTopBarWithTitleBar, showIconLabels, useRelativeDateTime
         case threadCount, maxConcurrentDownloads, maxDownloadRetryCount, dynamicPartCreation
         case useServerLastModifiedTime, appendExtensionToIncompleteDownloads, useSparseFileAllocation
@@ -238,7 +256,8 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             proxyPort: try c.decodeIfPresent(Int.self, forKey: .proxyPort) ?? d.proxyPort,
             proxyUsername: try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? d.proxyUsername,
             proxyPassword: try c.decodeIfPresent(String.self, forKey: .proxyPassword) ?? d.proxyPassword,
-            proxyPACURL: try c.decodeIfPresent(String.self, forKey: .proxyPACURL) ?? d.proxyPACURL
+            proxyPACURL: try c.decodeIfPresent(String.self, forKey: .proxyPACURL) ?? d.proxyPACURL,
+            apiAnonymousAccessConfirmed: try c.decodeIfPresent(Bool.self, forKey: .apiAnonymousAccessConfirmed) ?? false
         )
     }
 }
@@ -414,6 +433,7 @@ public actor LegacyJSONSettingsStore {
         set("apiPort", .number(String(settings.apiPort)))
         set("apiAuthEnabled", .bool(settings.apiAuthEnabled))
         set("apiAuthKey", .string(settings.apiAuthKey))
+        set("apiAnonymousAccessConfirmed", .bool(settings.apiAnonymousAccessConfirmed))
         set("trackDeletedFilesOnDisk", .bool(settings.trackDeletedFilesOnDisk))
         set("deletePartialFileOnDownloadCancellation", .bool(settings.deletePartialFileOnDownloadCancellation))
         set("sizeUnit", .string(settings.sizeUnit))

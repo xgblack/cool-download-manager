@@ -100,15 +100,8 @@ public actor PartFileWriter {
         try handle.close()
 
         let destinationURL = overrideDestinationURL ?? self.destinationURL
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            _ = try FileManager.default.replaceItemAt(
-                destinationURL,
-                withItemAt: partURL,
-                backupItemName: nil,
-                options: []
-            )
-        } else {
-            try FileManager.default.moveItem(at: partURL, to: destinationURL)
-        }
+        // moveItem refuses an existing destination. Never replace a file that
+        // appeared after the service reserved this name (including crash recovery).
+        try FileManager.default.moveItem(at: partURL, to: destinationURL)
     }
 }

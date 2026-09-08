@@ -2,7 +2,24 @@ openapi: 3.0.0
 info:
   title: Download Service API
   version: 1.1.0
-  description: API for managing download tasks and queues.
+  description: |
+    Local HTTP API for managing download tasks and queues. X-Api-Key authentication
+    is enabled by default on every route, including ping. Empty configured keys
+    prevent HTTP startup. Legacy anonymous configurations pause HTTP until the user
+    enables authentication or explicitly accepts anonymous local access in Settings.
+    Native Messaging uses the private same-user socket and does not require this key.
+    Only HTTP/1.1 origin-form requests are accepted, with one Host header matching
+    localhost, 127.0.0.1 or [::1] and the configured port. Browser Origin, when present,
+    must exactly match an http loopback authority on that port; no CORS opt-in is given.
+    Requests are limited to 4 MiB including headers (16 KiB maximum headers), 32
+    simultaneous connections and 10 seconds total connection lifetime. Chunked
+    requests, duplicate headers, malformed lengths and pipelining are rejected.
+    Invalid framing returns 400, oversized input 413, untrusted Host/Origin 403,
+    and missing or incorrect keys 401. Excess or expired connections are closed.
+    Stopping cancels accepted connections and owned tasks; already committed commands
+    are not rolled back. Listener failures are displayed in the application.
+security:
+  - ApiKeyAuth: []
 servers:
   - url: http://localhost:15151
     description: Default server running on port 15151

@@ -10,6 +10,11 @@ public final class PrivateSocketServer: @unchecked Sendable {
     private var listener: Int32 = -1
     private let stateLock = NSLock()
     private var stopped = false
+    private var clients: [Int32: UUID] = [:]
+    private var cancelledClients: Set<Int32> = []
+    private var tasks: [Int32: Task<Void, Never>] = [:]
+    private var deadlines: [Int32: DispatchWorkItem] = [:]
+    private var socketIdentity: (dev_t, ino_t)?
 
     public init(
         socketURL: URL,
@@ -21,9 +26,8 @@ public final class PrivateSocketServer: @unchecked Sendable {
 
     public func start() throws {
         stateLock.lock()
-        let alreadyStarted = listener >= 0 && !stopped
-        stateLock.unlock()
-        if alreadyStarted {
+        defer { stateLock.unlock() }
+        if listener >= 0 && !stopped {
             throw PrivateSocketServerError.alreadyRunning(socketURL)
         }
         try FileManager.default.createDirectory(
@@ -31,7 +35,9 @@ public final class PrivateSocketServer: @unchecked Sendable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        _ = Darwin.chmod(socketURL.deletingLastPathComponent().path, 0o700)
+        guard Darwin.chmod(socketURL.deletingLastPathComponent().path, 0o700) == 0 else {
+            throw PrivateSocketClientError.system(errno)
+        }
         if FileManager.default.fileExists(atPath: socketURL.path) {
             var socketStat = stat()
             guard lstat(socketURL.path, &socketStat) == 0 else {
@@ -63,9 +69,9 @@ public final class PrivateSocketServer: @unchecked Sendable {
             }
         }
 
+        var address = try makeAddress()
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw PrivateSocketClientError.system(errno) }
-        var address = try makeAddress()
         let addressLength = socklen_t(MemoryLayout<sa_family_t>.size + socketURL.path.utf8.count + 1)
         let bindResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -83,14 +89,17 @@ public final class PrivateSocketServer: @unchecked Sendable {
             _ = Darwin.unlink(socketURL.path)
             throw PrivateSocketClientError.system(error)
         }
-        _ = Darwin.chmod(socketURL.path, 0o600)
-        stateLock.lock()
+        var identity = stat()
+        guard lstat(socketURL.path, &identity) == 0,
+              Darwin.chmod(socketURL.path, 0o600) == 0 else {
+            let error = errno
+            _ = Darwin.close(descriptor)
+            throw PrivateSocketClientError.system(error)
+        }
+        socketIdentity = (identity.st_dev, identity.st_ino)
         listener = descriptor
         stopped = false
-        stateLock.unlock()
-        acceptQueue.async { [weak self] in
-            self?.acceptLoop()
-        }
+        acceptQueue.async { [self] in acceptLoop(descriptor) }
     }
 
     public enum PrivateSocketServerError: Error, LocalizedError, Sendable, Equatable {
@@ -110,36 +119,78 @@ public final class PrivateSocketServer: @unchecked Sendable {
 
     public func stop() {
         stateLock.lock()
+        defer { stateLock.unlock() }
         stopped = true
         let descriptor = listener
         listener = -1
-        stateLock.unlock()
-        if descriptor >= 0 {
-            _ = Darwin.shutdown(descriptor, SHUT_RDWR)
-            _ = Darwin.close(descriptor)
+        // acceptLoop owns close; shutdown wakes accept without allowing FD reuse underneath it.
+        if descriptor >= 0 { _ = Darwin.shutdown(descriptor, SHUT_RDWR) }
+        for client in clients.keys {
+            cancelledClients.insert(client)
+            _ = Darwin.shutdown(client, SHUT_RDWR)
         }
-        _ = Darwin.unlink(socketURL.path)
+        for task in tasks.values { task.cancel() }
+        for deadline in deadlines.values { deadline.cancel() }
+        deadlines.removeAll()
+        if let identity = socketIdentity {
+            var current = stat()
+            if lstat(socketURL.path, &current) == 0,
+               current.st_dev == identity.0, current.st_ino == identity.1 {
+                _ = Darwin.unlink(socketURL.path)
+            }
+            socketIdentity = nil
+        }
     }
 
-    private func acceptLoop() {
+    private func acceptLoop(_ descriptor: Int32) {
+        defer { _ = Darwin.close(descriptor) }
         while true {
-            stateLock.lock()
-            let descriptor = listener
-            let shouldStop = stopped
-            stateLock.unlock()
-            guard !shouldStop, descriptor >= 0 else { return }
+            guard stateLock.withLock({ !stopped && listener == descriptor }) else { return }
             let client = Darwin.accept(descriptor, nil, nil)
-            guard client >= 0 else {
-                stateLock.lock()
-                let stopped = self.stopped
-                stateLock.unlock()
-                if stopped || errno == EBADF || errno == EINTR { return }
+            if client < 0 {
+                if errno == EINTR { continue }
+                return
+            }
+            var uid: uid_t = 0
+            var gid: gid_t = 0
+            var noSignal: Int32 = 1
+            guard getpeereid(client, &uid, &gid) == 0, uid == geteuid(),
+                  setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                _ = Darwin.close(client)
                 continue
             }
             configureTimeouts(for: client)
-            workerQueue.async { [weak self] in
-                self?.handleConnection(client)
+            stateLock.lock()
+            guard !stopped, listener == descriptor, clients.count < 32 else {
+                stateLock.unlock()
+                _ = Darwin.close(client)
+                continue
             }
+            let identity = UUID()
+            clients[client] = identity
+            let deadline = DispatchWorkItem { [weak self] in
+                self?.stateLock.withLock {
+                    guard let self, self.clients[client] == identity else { return }
+                    self.cancelledClients.insert(client)
+                    self.tasks[client]?.cancel()
+                    _ = Darwin.shutdown(client, SHUT_RDWR)
+                }
+            }
+            deadlines[client] = deadline
+            stateLock.unlock()
+            workerQueue.asyncAfter(deadline: .now() + 10, execute: deadline)
+            workerQueue.async { [self] in handleConnection(client) }
+        }
+    }
+
+    private func finish(_ descriptor: Int32) {
+        stateLock.withLock {
+            guard clients.removeValue(forKey: descriptor) != nil else { return }
+            cancelledClients.remove(descriptor)
+            deadlines.removeValue(forKey: descriptor)?.cancel()
+            tasks.removeValue(forKey: descriptor)
+            _ = Darwin.shutdown(descriptor, SHUT_RDWR)
+            _ = Darwin.close(descriptor)
         }
     }
 
@@ -147,23 +198,28 @@ public final class PrivateSocketServer: @unchecked Sendable {
         do {
             let frame = try readFrame(from: descriptor)
             let request = try PrivateSocketCodec.decodeFrame(frame).message
-            Task { [weak self] in
-                guard let self else {
-                    _ = Darwin.close(descriptor)
-                    return
-                }
-                let response = await self.handler(request)
-                do {
-                    try self.writeAll(try PrivateSocketCodec.encode(response), to: descriptor)
-                } catch {
-                    fputs("CoolDownloadIntegration socket write failed: \(error)\n", stderr)
-                }
-                _ = Darwin.shutdown(descriptor, SHUT_RDWR)
-                _ = Darwin.close(descriptor)
+            // Hold the lock until task registration to prevent stop from missing a new task.
+            stateLock.lock()
+            guard !stopped, clients[descriptor] != nil, !cancelledClients.contains(descriptor) else {
+                stateLock.unlock()
+                finish(descriptor)
+                return
             }
+            tasks[descriptor] = Task { [self] in
+                defer { finish(descriptor) }
+                guard !Task.isCancelled else { return }
+                let response = await handler(request)
+                guard !Task.isCancelled else { return }
+                do {
+                    try writeAll(try PrivateSocketCodec.encode(response), to: descriptor)
+                } catch {
+                    fputs("CoolDownloadIntegration socket response failed\n", stderr)
+                }
+            }
+            stateLock.unlock()
         } catch {
-            fputs("CoolDownloadIntegration socket read failed: \(error)\n", stderr)
-            _ = Darwin.close(descriptor)
+            fputs("CoolDownloadIntegration socket request failed\n", stderr)
+            finish(descriptor)
         }
     }
 

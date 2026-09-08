@@ -5,6 +5,29 @@ import CoolDownloadCore
 
 @Suite("设置持久化")
 struct SettingsPersistenceTests {
+    @Test("new HTTP settings require authentication and legacy anonymous settings require explicit acceptance")
+    func httpAuthenticationMigration() async throws {
+        #expect(AppSettingsModel.defaults().apiAuthEnabled)
+        let root = URL(fileURLWithPath: "/tmp/cdm-auth-\(UUID().uuidString)")
+        let store = try SettingsStore(dataRoot: root)
+        store.defaults.defaults.set(false, forKey: "apiAuthEnabled")
+        store.defaults.defaults.set(true, forKey: "apiEnabled")
+        let legacy = try await store.load()
+        #expect(legacy.apiEnabled)
+        #expect(!legacy.apiAuthEnabled)
+        #expect(!legacy.apiAnonymousAccessConfirmed)
+        #expect(legacy.httpIntegrationConfigurationError != nil)
+        var confirmed = legacy
+        confirmed.apiAnonymousAccessConfirmed = true
+        _ = try await store.save(confirmed)
+        let reopened = try SettingsStore(dataRoot: root)
+        #expect(try await reopened.load().httpIntegrationConfigurationError == nil)
+        var emptyKey = AppSettingsModel.defaults()
+        emptyKey.apiAuthKey = "  "
+        #expect(emptyKey.httpIntegrationConfigurationError != nil)
+        await #expect(throws: (any Error).self) { _ = try await store.save(emptyKey) }
+    }
+
     @Test("下载核心不可用时仍保存轻量设置")
     @MainActor
     func savesPreferencesWhenCoreIsUnavailable() async throws {

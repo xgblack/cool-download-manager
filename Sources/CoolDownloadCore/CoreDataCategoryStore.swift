@@ -38,9 +38,8 @@ public actor CategoryStore {
             models = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
             if models.isEmpty {
                 let defaults = Self.defaultCategories(folder: defaultFolder)
-                try database.perform { context in
+                try database.transaction { context in
                     for value in defaults { try persist(value, in: context) }
-                    try context.save()
                 }
                 models = Dictionary(uniqueKeysWithValues: defaults.map { ($0.id, $0) })
             }
@@ -86,9 +85,8 @@ public actor CategoryStore {
             acceptedURLPatterns: acceptedURLPatterns
         ).validated()
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 try persist(value, in: context)
-                try context.save()
             }
         } catch let error as CategoryStoreError {
             throw error
@@ -105,10 +103,9 @@ public actor CategoryStore {
         let value = try category.validated()
         guard models[value.id] != nil else { throw CategoryStoreError.notFound(value.id) }
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 try persist(value, in: context)
                 try replaceMembership(value.items, for: value.id, in: context)
-                try context.save()
             }
             models[value.id] = value
         } catch let error as CategoryStoreError {
@@ -123,7 +120,7 @@ public actor CategoryStore {
         _ = try load()
         guard models[id] != nil else { throw CategoryStoreError.notFound(id) }
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadCategory")
                 request.predicate = NSPredicate(format: "id == %lld", id)
                 request.fetchLimit = 1
@@ -131,7 +128,6 @@ public actor CategoryStore {
                     throw CategoryStoreError.notFound(id)
                 }
                 context.delete(object)
-                try context.save()
             }
             models[id] = nil
         } catch let error as CategoryStoreError {
@@ -149,7 +145,7 @@ public actor CategoryStore {
             throw CategoryStoreError.notFound(categoryID)
         }
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 let tasks = try context.fetch(NSFetchRequest<NSManagedObject>(entityName: "DownloadTask"))
                 let categories = try context.fetch(NSFetchRequest<NSManagedObject>(entityName: "DownloadCategory"))
                 let target = categories.first {
@@ -179,7 +175,6 @@ public actor CategoryStore {
                         task.setValue(nil, forKey: "categoryOrder")
                     }
                 }
-                try context.save()
             }
             loaded = false
             _ = try load()

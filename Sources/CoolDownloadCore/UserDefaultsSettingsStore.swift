@@ -84,6 +84,9 @@ public actor SettingsStore {
     @discardableResult
     public func save(_ settings: AppSettingsModel) throws -> AppSettingsModel {
         try validate(settings)
+        if settings.apiEnabled, settings.apiAuthEnabled, let error = settings.httpIntegrationConfigurationError {
+            throw SettingsStoreError.invalid(error)
+        }
         try write(settings)
         cached = settings
         loaded = true
@@ -132,7 +135,8 @@ public actor SettingsStore {
             proxyPort: typed.value(Keys.proxyPort, default: d.proxyPort),
             proxyUsername: try keychain.read(account: "proxy/username") ?? "",
             proxyPassword: try keychain.read(account: "proxy/password") ?? "",
-            proxyPACURL: typed.value(Keys.proxyPACURL, default: d.proxyPACURL)
+            proxyPACURL: typed.value(Keys.proxyPACURL, default: d.proxyPACURL),
+            apiAnonymousAccessConfirmed: typed.value(Keys.apiAnonymousAccessConfirmed, default: false)
         )
     }
 
@@ -166,6 +170,7 @@ public actor SettingsStore {
         typed.set(settings.apiPort, for: Keys.apiPort)
         typed.set(settings.apiAuthEnabled, for: Keys.apiAuthEnabled)
         typed.set(settings.apiAuthKey, for: Keys.apiAuthKey)
+        typed.set(settings.apiAnonymousAccessConfirmed, for: Keys.apiAnonymousAccessConfirmed)
         typed.set(settings.trackDeletedFilesOnDisk, for: Keys.trackDeletedFilesOnDisk)
         typed.set(settings.deletePartialFileOnDownloadCancellation, for: Keys.deletePartialFileOnDownloadCancellation)
         typed.set(settings.sizeUnit, for: Keys.sizeUnit)
@@ -264,6 +269,7 @@ public actor SettingsStore {
         static let apiEnabled = UserDefaultsKey<Bool>("apiEnabled")
         static let apiPort = UserDefaultsKey<Int>("apiPort")
         static let apiAuthEnabled = UserDefaultsKey<Bool>("apiAuthEnabled")
+        static let apiAnonymousAccessConfirmed = UserDefaultsKey<Bool>("apiAnonymousAccessConfirmed")
         static let apiAuthKey = UserDefaultsKey<String>("apiAuthKey")
         static let trackDeletedFilesOnDisk = UserDefaultsKey<Bool>("trackDeletedFilesOnDisk")
         static let deletePartialFileOnDownloadCancellation = UserDefaultsKey<Bool>("deletePartialFileOnDownloadCancellation")

@@ -154,10 +154,18 @@ struct DownloadPartSpeedSampler {
 @MainActor
 final class DownloadListStore: ObservableObject {
     @Published private(set) var downloads: [DownloadRecord] = []
-    @Published var selectedIDs: Set<DownloadID> = []
-    @Published var filter: DownloadFilter = .all
-    @Published var searchText = ""
-    @Published var sort: DownloadSort = .createdNewest
+    @Published var selectedIDs: Set<DownloadID> = [] {
+        didSet { selectedDownloadsCache = nil }
+    }
+    @Published var filter: DownloadFilter = .all {
+        didSet { visibleDownloadsCache = nil }
+    }
+    @Published var searchText = "" {
+        didSet { visibleDownloadsCache = nil }
+    }
+    @Published var sort: DownloadSort = .createdNewest {
+        didSet { visibleDownloadsCache = nil }
+    }
     @Published var errorMessage: String?
     @Published private(set) var completedID: DownloadID?
     @Published private(set) var progressID: DownloadID?
@@ -179,11 +187,21 @@ final class DownloadListStore: ObservableObject {
     /// on the main list window being alive.
     var onDownloadStarted: ((DownloadRecord) -> Void)?
     private var eventTask: Task<Void, Never>?
+    private var recordsByID: [DownloadID: DownloadRecord] = [:]
+    private var recordIndexes: [DownloadID: Int] = [:]
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
     private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
     private var averageSpeedSessions: [DownloadID: (bytes: Int64, date: Date)] = [:]
     private var partSpeedSampler = DownloadPartSpeedSampler()
     private var suppressedProgressIDs: Set<DownloadID> = []
+    private struct VisibleDownloadsCacheKey: Equatable {
+        let filter: DownloadFilter
+        let query: String
+        let sort: DownloadSort
+    }
+    private var visibleDownloadsCacheKey: VisibleDownloadsCacheKey?
+    private var visibleDownloadsCache: [DownloadRecord]?
+    private var selectedDownloadsCache: [DownloadRecord]?
 
     init(service: DownloadService?) {
         self.service = service
@@ -195,27 +213,38 @@ final class DownloadListStore: ObservableObject {
 
     var visibleDownloads: [DownloadRecord] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cacheKey = VisibleDownloadsCacheKey(filter: filter, query: query, sort: sort)
+        if visibleDownloadsCacheKey == cacheKey, let visibleDownloadsCache {
+            return visibleDownloadsCache
+        }
         let filtered = downloads.filter { record in
             matchesFilter(record) &&
                 (query.isEmpty || record.name.lowercased().contains(query) || record.source.link.lowercased().contains(query))
         }
 
+        let result: [DownloadRecord]
         switch sort {
         case .createdNewest:
-            return filtered.sorted { $0.createdAt > $1.createdAt }
+            result = filtered.sorted { $0.createdAt > $1.createdAt }
         case .name:
-            return filtered.sorted {
+            result = filtered.sorted {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
         case .status:
-            return filtered.sorted {
+            result = filtered.sorted {
                 statusRank($0.status) < statusRank($1.status)
             }
         }
+        visibleDownloadsCacheKey = cacheKey
+        visibleDownloadsCache = result
+        return result
     }
 
     var selectedDownloads: [DownloadRecord] {
-        downloads.filter { selectedIDs.contains($0.id) }
+        if let selectedDownloadsCache { return selectedDownloadsCache }
+        let result = downloads.filter { selectedIDs.contains($0.id) }
+        selectedDownloadsCache = result
+        return result
     }
 
     var hasSelection: Bool { !selectedIDs.isEmpty }
@@ -266,22 +295,92 @@ final class DownloadListStore: ObservableObject {
     func apply(_ event: DownloadEvent) {
         switch event {
         case .created(let record), .updated(let record):
-            if let current = downloads.first(where: { $0.id == record.id }),
+            if let current = recordsByID[record.id],
                shouldKeepCurrent(current, over: record) {
                 return
             }
             let now = Date()
             partSpeedSampler.update(record, at: now)
-            var next = downloads.filter { $0.id != record.id }
-            next.append(record)
-            apply(next, updatePartSpeeds: false, at: now)
+            applyEventRecord(record, at: now)
         case .removed(let id):
             setActiveConnectionCount(0, for: id)
             partSpeedSampler.remove(downloadID: id)
-            guard downloads.contains(where: { $0.id == id }) else { return }
-            apply(downloads.filter { $0.id != id }, updatePartSpeeds: false)
+            guard let index = recordIndexes[id] else { return }
+            downloads.remove(at: index)
+            recordsByID[id] = nil
+            recordIndexes.removeValue(forKey: id)
+            knownStatuses[id] = nil
+            previousProgress[id] = nil
+            averageSpeedSessions[id] = nil
+            speeds[id] = nil
+            activeConnectionCounts[id] = nil
+            selectedIDs.remove(id)
+            suppressedProgressIDs.remove(id)
+            rebuildRecordIndexes()
+            invalidateDerivedCaches()
+            onRemovedIDs?([id])
         case .activeConnectionCountChanged(let id, let count):
             setActiveConnectionCount(count, for: id)
+        }
+    }
+
+    private func applyEventRecord(_ record: DownloadRecord, at now: Date) {
+        let previous = recordsByID[record.id]
+        let previousStatus = knownStatuses[record.id]
+        if let index = recordIndexes[record.id] {
+            downloads[index] = record
+            if previous?.createdAt != record.createdAt {
+                downloads.sort { $0.createdAt > $1.createdAt }
+                rebuildRecordIndexes()
+            }
+        } else {
+            let insertionIndex = downloads.firstIndex {
+                $0.createdAt < record.createdAt
+            } ?? downloads.endIndex
+            downloads.insert(record, at: insertionIndex)
+            rebuildRecordIndexes()
+        }
+        recordsByID[record.id] = record
+        knownStatuses[record.id] = record.status
+
+        if let previousProgress = previousProgress[record.id] {
+            let elapsed = now.timeIntervalSince(previousProgress.date)
+            let delta = record.downloadedBytes - previousProgress.bytes
+            if elapsed > 0, delta >= 0 {
+                speeds[record.id] = Double(delta) / elapsed
+            } else {
+                speeds[record.id] = nil
+            }
+        } else {
+            speeds[record.id] = nil
+        }
+        self.previousProgress[record.id] = (record.downloadedBytes, now)
+
+        if record.status == .downloading {
+            let currentSession = averageSpeedSessions[record.id]
+            if previousStatus != .downloading
+                || currentSession == nil
+                || record.downloadedBytes < currentSession?.bytes ?? 0 {
+                averageSpeedSessions[record.id] = (record.downloadedBytes, now)
+            }
+        } else {
+            averageSpeedSessions[record.id] = nil
+            activeConnectionCounts[record.id] = nil
+        }
+
+        invalidateDerivedCaches()
+        if record.status == .completed, previousStatus != .completed {
+            completedID = record.id
+            onDownloadCompleted?(record)
+        }
+        if (record.status == .preparing || record.status == .downloading),
+           previousStatus != .preparing, previousStatus != .downloading,
+           suppressedProgressIDs.remove(record.id) == nil {
+            progressID = record.id
+            onDownloadStarted?(record)
+        }
+        if record.status == .failed, previousStatus != .failed {
+            failedID = record.id
         }
     }
 
@@ -332,6 +431,7 @@ final class DownloadListStore: ObservableObject {
             }
         }
         downloads = acceptedRecords.sorted { $0.createdAt > $1.createdAt }
+        rebuildRecordIndexes()
         knownStatuses = Dictionary(uniqueKeysWithValues: acceptedRecords.map { ($0.id, $0.status) })
         let downloadingIDs = Set(acceptedRecords.lazy.filter { $0.status == .downloading }.map(\.id))
         let staleRuntimeIDs = activeConnectionCounts.keys.filter { !downloadingIDs.contains($0) }
@@ -367,10 +467,22 @@ final class DownloadListStore: ObservableObject {
         }
         selectedIDs = selectedIDs.intersection(availableIDs)
         suppressedProgressIDs.formIntersection(availableIDs)
+        invalidateDerivedCaches()
+    }
+
+    private func rebuildRecordIndexes() {
+        recordsByID = Dictionary(uniqueKeysWithValues: downloads.map { ($0.id, $0) })
+        recordIndexes = Dictionary(uniqueKeysWithValues: downloads.enumerated().map { ($0.element.id, $0.offset) })
+    }
+
+    private func invalidateDerivedCaches() {
+        visibleDownloadsCacheKey = nil
+        visibleDownloadsCache = nil
+        selectedDownloadsCache = nil
     }
 
     func speed(for id: DownloadID, average: Bool = false, at date: Date = Date()) -> Double? {
-        guard let record = downloads.first(where: { $0.id == id }), record.downloadedBytes > 0 else {
+        guard let record = recordsByID[id], record.downloadedBytes > 0 else {
             return nil
         }
         if average {
@@ -393,7 +505,7 @@ final class DownloadListStore: ObservableObject {
 
     private func setActiveConnectionCount(_ count: Int, for id: DownloadID) {
         let normalized = max(0, count)
-        let isDownloading = downloads.first(where: { $0.id == id })?.status == .downloading
+        let isDownloading = recordsByID[id]?.status == .downloading
         let nextCount = isDownloading ? normalized : 0
         guard activeConnectionCounts[id] != nextCount else { return }
         var nextCounts = activeConnectionCounts
@@ -694,7 +806,7 @@ final class DownloadListStore: ObservableObject {
     }
 
     func record(id: DownloadID) -> DownloadRecord? {
-        downloads.first { $0.id == id }
+        recordsByID[id]
     }
 
     private func suppressProgressPresentation(for ids: [DownloadID]) {

@@ -4,6 +4,8 @@ import CoreData
 /// Persists non-sensitive host overrides in Core Data and keeps usernames and
 /// passwords in Keychain. The public value type remains unchanged for the UI
 /// and downloader, but SQLite only contains the credential account names.
+/// A failed save rolls back SQLite changes only: earlier Keychain writes may
+/// already have succeeded and cannot participate in the metadata transaction.
 public actor PerHostSettingsStore {
     public nonisolated let settingsURL: URL
     public nonisolated let metadataURL: URL
@@ -68,7 +70,7 @@ public actor PerHostSettingsStore {
     public func save(_ items: [PerHostSettingsItem]) throws -> [PerHostSettingsItem] {
         let normalized = try normalize(items)
         do {
-            try database.perform { context in
+            try database.transaction { context in
                 let existing = try context.fetch(NSFetchRequest<NSManagedObject>(entityName: "PerHostSettings"))
                 let incomingHosts = Set(normalized.map(\.host))
                 for object in existing {
@@ -98,14 +100,17 @@ public actor PerHostSettingsStore {
                     object.setValue(value.username == nil ? nil : usernameKey, forKey: "usernameKey")
                     object.setValue(value.password == nil ? nil : passwordKey, forKey: "passwordKey")
                 }
-                try context.save()
             }
             values = normalized
             loaded = true
             return values
         } catch let error as PerHostSettingsError {
+            loaded = false
             throw error
         } catch {
+            // Keychain may have changed before the metadata failure. Reload
+            // instead of returning a cached credential snapshot as authoritative.
+            loaded = false
             throw PerHostSettingsError.writeFailed(metadataURL, error.localizedDescription)
         }
     }

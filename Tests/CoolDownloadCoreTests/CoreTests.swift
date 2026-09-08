@@ -1495,8 +1495,8 @@ struct CoreTests {
         await service.shutdown()
     }
 
-    @Test("retrying complete range metadata without its part file performs a real download")
-    func retryMissingCompleteRangePart() async throws {
+    @Test("missing part retry downloads again or preserves an unverified destination", arguments: [false, true])
+    func retryMissingCompleteRangePart(destinationExists: Bool) async throws {
         let content = Data("abcdefgh".utf8)
         let transport = RangeTransport(content: content)
         let root = try makeTemporaryDirectory()
@@ -1519,7 +1519,9 @@ struct CoreTests {
             parts: [DownloadPart(id: 0, from: 0, to: 7, downloaded: 8, completed: true)]
         )
         try await store.save(record)
-        try Data("old-data".utf8).write(to: record.destinationURL)
+        if destinationExists {
+            try Data("old-data".utf8).write(to: record.destinationURL)
+        }
 
         let service = DownloadService(
             store: store,
@@ -1543,12 +1545,19 @@ struct CoreTests {
         let completed = try #require(
             await service.snapshot().downloads.first(where: { $0.id == record.id })
         )
-        #expect(completed.status == .completed)
-        #expect(transport.recordedRequests().contains {
-            guard let range = $0.value(forHTTPHeaderField: "Range") else { return false }
-            return range != "bytes=0-0"
-        })
-        #expect(try Data(contentsOf: completed.destinationURL) == content)
+        if destinationExists {
+            #expect(completed.status == .failed)
+            #expect(completed.error == DownloadCoreError.duplicateDestination(record.destinationURL.path).localizedDescription)
+            #expect(transport.recordedRequests().isEmpty)
+            #expect(try Data(contentsOf: completed.destinationURL) == Data("old-data".utf8))
+        } else {
+            #expect(completed.status == .completed)
+            #expect(transport.recordedRequests().contains {
+                guard let range = $0.value(forHTTPHeaderField: "Range") else { return false }
+                return range != "bytes=0-0"
+            })
+            #expect(try Data(contentsOf: completed.destinationURL) == content)
+        }
         await service.shutdown()
     }
 

@@ -44,18 +44,35 @@ public actor IntegrationRouter {
 
     private let handler: any DownloadIntegrationHandler
     private let apiKey: String?
+    private let allowAnonymous: Bool
+    nonisolated let canStartHTTP: Bool
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
-    public init(handler: any DownloadIntegrationHandler, apiKey: String? = nil) {
+    public init(handler: any DownloadIntegrationHandler, apiKey: String? = nil, allowAnonymous: Bool = false) {
         self.handler = handler
         self.apiKey = apiKey
+        self.allowAnonymous = allowAnonymous
+        self.canStartHTTP = apiKey.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? allowAnonymous
         self.decoder = JSONDecoder()
         self.encoder = JSONEncoder()
     }
 
-    public func handle(_ request: HTTPRequest) async -> HTTPResponse {
-        if let apiKey, request.header("X-Api-Key") != apiKey {
+    public func handle(_ request: HTTPRequest, port: UInt16 = defaultPort) async -> HTTPResponse {
+        guard !Task.isCancelled else { return .text(503, "Service stopped") }
+        let authorities: Set<String> = ["localhost:\(port)", "127.0.0.1:\(port)", "[::1]:\(port)"]
+        let permittedHosts = port == 80 ? authorities.union(["localhost", "127.0.0.1", "[::1]"]) : authorities
+        if let host = request.header("Host"), !permittedHosts.contains(host.lowercased()) {
+            return .text(403, "Forbidden host")
+        }
+        if let origin = request.header("Origin"), !permittedHosts.contains(String(origin.lowercased().dropFirst(7))) || !origin.lowercased().hasPrefix("http://") {
+            return .text(403, "Forbidden origin")
+        }
+        // Supplying an empty key is never equivalent to opting into anonymous mode.
+        if let apiKey {
+            guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  request.header("X-Api-Key") == apiKey else { return .text(401, "Unauthorized") }
+        } else if !allowAnonymous {
             return .text(401, "Unauthorized")
         }
 

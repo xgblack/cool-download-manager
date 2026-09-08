@@ -196,12 +196,29 @@ public final class MetadataDatabase: @unchecked Sendable {
         }
     }
 
+    /// Mutations and their save share the context queue. On any failure, discard
+    /// pending Core Data changes before another façade can use this context.
+    /// External effects (for example Keychain writes) are not rolled back.
+    func transaction<T>(_ body: (NSManagedObjectContext) throws -> T) throws -> T {
+        try perform { context in
+            do {
+                let result = try body(context)
+                if context.hasChanges { try context.save() }
+                return result
+            } catch {
+                context.rollback()
+                throw error
+            }
+        }
+    }
+
     public func saveIfNeeded() throws {
         try context.performAndWait {
             guard context.hasChanges else { return }
             do {
                 try context.save()
             } catch {
+                context.rollback()
                 throw MetadataDatabaseError.saveFailed(storeURL, error.localizedDescription)
             }
         }

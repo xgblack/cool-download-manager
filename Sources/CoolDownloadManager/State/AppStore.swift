@@ -28,6 +28,7 @@ final class AppStore: ObservableObject {
     private let perHostSettingsStore: PerHostSettingsStore?
     private let hostPerformanceStore: HostPerformanceStore?
     private var integrationServer: LoopbackHTTPServer?
+    private var integrationGeneration = UUID()
     private var privateSocketServer: PrivateSocketServer?
     private var queueScheduleTask: Task<Void, Never>?
     private var queueEventTask: Task<Void, Never>?
@@ -801,16 +802,30 @@ final class AppStore: ObservableObject {
                 try await self.requestBrowserDownloadConfirmation(request)
             }
         )
-        let server: LoopbackHTTPServer?
-        if settings.apiEnabled {
-            let configuredPort = UInt16(clamping: settings.apiPort)
-            let apiKey = settings.apiAuthEnabled ? settings.apiAuthKey : nil
-            let router = IntegrationRouter(handler: coreHandler, apiKey: apiKey)
-            let loopback = try LoopbackHTTPServer(port: configuredPort, router: router)
-            loopback.start()
-            server = loopback
-        } else {
-            server = nil
+        let generation = UUID()
+        integrationGeneration = generation
+        var server: LoopbackHTTPServer?
+        if let configurationError = settings.httpIntegrationConfigurationError {
+            errorMessage = configurationError
+        } else if settings.apiEnabled {
+            do {
+                let router = IntegrationRouter(
+                    handler: coreHandler,
+                    apiKey: settings.apiAuthEnabled ? settings.apiAuthKey : nil,
+                    allowAnonymous: !settings.apiAuthEnabled && settings.apiAnonymousAccessConfirmed
+                )
+                let loopback = try LoopbackHTTPServer(port: UInt16(settings.apiPort), router: router) { [weak self] message in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.integrationGeneration == generation else { return }
+                        self.integrationServer = nil
+                        self.errorMessage = message
+                    }
+                }
+                loopback.start()
+                server = loopback
+            } catch {
+                errorMessage = "HTTP 连接无法启动：\(error.localizedDescription)"
+            }
         }
 
         let socketURL = AppPaths.nativeMessagingSocketURL()
@@ -869,6 +884,7 @@ final class AppStore: ObservableObject {
     }
 
     private func stopIntegration() {
+        integrationGeneration = UUID()
         integrationServer?.stop()
         integrationServer = nil
         privateSocketServer?.stop()

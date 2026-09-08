@@ -189,7 +189,7 @@ struct NetworkSettingsPage: View {
         SettingsPage {
             NativeSettingsGroup(title: "浏览器连接") {
                 NativeSettingsToggleRow(
-                    "启用浏览器连接",
+                    "启用本机 HTTP API",
                     isOn: state.binding(\.apiEnabled),
                     showsDivider: state.model.apiEnabled
                 )
@@ -204,6 +204,19 @@ struct NetworkSettingsPage: View {
                         isOn: state.binding(\.apiAuthEnabled),
                         showsDivider: state.model.apiAuthEnabled
                     )
+                    if !state.model.apiAuthEnabled {
+                        NativeSettingsToggleRow(
+                            "我确认允许本机程序匿名访问（不推荐）",
+                            isOn: state.binding(\.apiAnonymousAccessConfirmed),
+                            showsDivider: false
+                        )
+                        Text("未确认时 HTTP 保持暂停；浏览器 Native Messaging 仍可使用。匿名模式允许本机程序读取队列和新增任务。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let error = state.model.httpIntegrationConfigurationError {
+                        Text(error).font(.caption).foregroundStyle(.orange)
+                    }
                     if state.model.apiAuthEnabled {
                         NativeSettingsRow(title: "认证密钥", showsDivider: false) {
                             HStack(spacing: 8) {
