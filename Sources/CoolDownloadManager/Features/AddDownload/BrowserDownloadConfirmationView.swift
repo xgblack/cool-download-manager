@@ -7,6 +7,8 @@ import CoolDownloadIntegration
 /// download-list window.
 @MainActor
 final class BrowserDownloadConfirmationState: ObservableObject {
+    let submission = DownloadSubmissionState()
+    let initialDefaultFolder: URL
     let request: AddDownloadsRequest
 
     @Published var urlText: String
@@ -17,6 +19,7 @@ final class BrowserDownloadConfirmationState: ObservableObject {
     @Published var startImmediately: Bool
 
     init(request: AddDownloadsRequest, defaultFolder: URL) {
+        self.initialDefaultFolder = defaultFolder
         self.request = request
         self.urlText = request.items.map(\.link).joined(separator: "\n")
         self.nameText = request.items.count == 1
@@ -45,6 +48,8 @@ struct BrowserDownloadConfirmationView: View {
             queueID: $state.queueID,
             categoryID: $state.categoryID,
             startImmediately: $state.startImmediately,
+            submission: state.submission,
+            defaultFolder: state.initialDefaultFolder,
             title: "确认下载",
             queues: queues,
             categories: categories,

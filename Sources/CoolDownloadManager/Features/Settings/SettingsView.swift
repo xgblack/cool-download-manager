@@ -91,7 +91,9 @@ struct SettingsView: View {
             Text(viewState.errorMessage ?? "")
         }
         .onChange(of: store.settings) { _, updated in
-            guard !viewState.isDirty, !viewState.isSaving else { return }
+            guard !viewState.isSaving else { return }
+            viewState.mergeDefaultFolder(updated.defaultDownloadFolder)
+            guard !viewState.isDirty else { return }
             viewState.markModelSaved(updated)
         }
         .onChange(of: viewState.model.theme) { _, theme in
@@ -213,6 +215,7 @@ struct SettingsView: View {
     }
 
     private func save() {
+        viewState.mergeDefaultFolder(store.settings.defaultDownloadFolder)
         viewState.isSaving = true
         viewState.errorMessage = nil
         Task { @MainActor in
@@ -405,6 +408,13 @@ final class SettingsViewState: ObservableObject {
 
     func regenerateAPIKey() {
         model.apiAuthKey = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    func mergeDefaultFolder(_ folder: String) {
+        if model.defaultDownloadFolder == savedModel.defaultDownloadFolder {
+            model.defaultDownloadFolder = folder
+        }
+        savedModel.defaultDownloadFolder = folder
     }
 
     func markModelSaved(_ model: AppSettingsModel) {

@@ -9,12 +9,21 @@ struct AddDownloadSheet: View {
     @Binding var queueID: DownloadID?
     @Binding var categoryID: DownloadID?
     @Binding var startImmediately: Bool
+    @ObservedObject var submission: DownloadSubmissionState
+    let defaultFolder: URL
     let title: String
     let queues: [IntegrationQueue]
     let categories: [DownloadCategory]
     let onChooseFolder: () -> Void
     let onCancel: () -> Void
     let onAdd: (_ queueID: DownloadID?, _ categoryID: DownloadID?, _ startImmediately: Bool) -> Void
+
+    private var submitTitle: String {
+        if submission.isSubmitting { return "正在提交…" }
+        if submission.tasksAdded { return "重试保存目录" }
+        if !submission.addedIDs.isEmpty { return "继续添加" }
+        return startImmediately ? "下载" : "添加"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +70,18 @@ struct AddDownloadSheet: View {
                             .help("选择下载目录")
                         }
                     }
+                    NativeSettingsRow(title: "默认位置") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("设为默认下载目录", isOn: $submission.rememberFolder)
+                                .toggleStyle(.checkbox)
+                                .disabled(!submission.canRemember(folder: folderURL, defaultFolder: defaultFolder))
+                            Text(submission.canRemember(folder: folderURL, defaultFolder: defaultFolder)
+                                 ? "添加成功后，用于后续新建下载；分类目录保持独立"
+                                 : "当前已是默认下载目录")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     NativeSettingsRow(title: "队列") {
                         Picker("队列", selection: $queueID) {
                             Text("不加入队列").tag(Optional<DownloadID>.none)
@@ -88,17 +109,34 @@ struct AddDownloadSheet: View {
                     )
                 }
             }
+            .disabled(submission.isSubmitting || !submission.addedIDs.isEmpty)
+
+            if let error = submission.errorMessage {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+            }
 
             NativePageActionBar {
                 Spacer()
-                Button("取消", action: onCancel)
+                Button(submission.addedIDs.isEmpty ? "取消" : "关闭", action: onCancel)
+                    .disabled(submission.isSubmitting)
                     .keyboardShortcut(.cancelAction)
-                Button(startImmediately ? "下载" : "添加") {
+                Button(submitTitle) {
                     onAdd(queueID, categoryID, startImmediately)
                 }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(submission.isSubmitting || urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .interactiveDismissDisabled(submission.isSubmitting)
+        .onChange(of: folderURL) { _, folder in
+            if !submission.canRemember(folder: folder, defaultFolder: defaultFolder) {
+                submission.rememberFolder = false
             }
         }
         .frame(minWidth: 620, idealWidth: 700, minHeight: 560, idealHeight: 620)

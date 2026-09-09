@@ -238,11 +238,15 @@ final class AppStore: ObservableObject {
     }
 
     func addAndStart(link: String, name: String?, folder: URL) {
-        addDownload(link: link, name: name, folder: folder)
+        Task {
+            let submission = DownloadSubmissionState()
+            if !(await addDownload(link: link, name: name, folder: folder, submission: submission)) {
+                errorMessage = submission.errorMessage
+            }
+        }
     }
 
-    /// Adds through the same path as the UI and applies the historical
-    /// "use category by default" rule before the core creates the record.
+    /// Explicit folder choices take precedence over automatic category paths.
     func addDownload(
         link: String,
         name: String?,
@@ -250,89 +254,128 @@ final class AppStore: ObservableObject {
         queueID: DownloadID? = nil,
         categoryID: DownloadID? = nil,
         startImmediately: Bool = true,
-        integrationItems: [IntegrationDownloadCredential]? = nil
-    ) {
+        integrationItems: [IntegrationDownloadCredential]? = nil,
+        submission: DownloadSubmissionState
+    ) async -> Bool {
+        guard !submission.isSubmitting else { return false }
+        submission.isSubmitting = true
+        submission.errorMessage = nil
+        defer { submission.isSubmitting = false }
         guard let service else {
-            errorMessage = "下载核心尚未准备好"
-            return
+            submission.errorMessage = "下载核心尚未准备好"
+            return false
+        }
+        // Retrying a preference failure must never create downloads again.
+        if submission.tasksAdded {
+            do {
+                if submission.rememberFolder { try await saveDefaultDownloadFolder(folder) }
+                return true
+            } catch {
+                submission.errorMessage = "任务已添加，默认目录未保存。" + error.localizedDescription
+                return false
+            }
         }
         let categoryStore = self.categoryStore
         let queueStore = self.queueStore
         let shouldUseCategories = settings.useCategoryByDefault && categoryID == nil
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            var resolvedCategoryID = categoryID
-            var resolvedFolder = folder
-            if shouldUseCategories, let categoryStore {
-                let firstLink = link
-                    .split(whereSeparator: \.isNewline)
-                    .map(String.init)
-                    .first ?? link
-                let candidateName: String
-                if let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedName.isEmpty {
-                    candidateName = trimmedName
-                } else {
-                    candidateName = URL(string: firstLink)?.lastPathComponent ?? ""
-                }
-                if let category = try? await categoryStore.matchingCategory(
-                    fileName: candidateName,
-                    url: firstLink
-                ) {
-                    resolvedCategoryID = category.id
-                    if let path = category.downloadPath {
-                        resolvedFolder = URL(fileURLWithPath: path, isDirectory: true)
-                    }
-                }
-            }
-            let trimmedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
-            let links = trimmedLink
+        var resolvedCategoryID = submission.resolvedCategoryID ?? categoryID
+        var resolvedFolder = submission.resolvedFolder ?? folder
+        if submission.resolvedFolder == nil, shouldUseCategories, let categoryStore {
+            let firstLink = link
                 .split(whereSeparator: \.isNewline)
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            guard !links.isEmpty else {
-                self.errorMessage = "请输入下载地址"
-                return
+                .map(String.init)
+                .first ?? link
+            let candidateName: String
+            if let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedName.isEmpty {
+                candidateName = trimmedName
+            } else {
+                candidateName = URL(string: firstLink)?.lastPathComponent ?? ""
             }
-            let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let explicitName = trimmedName?.isEmpty == false ? trimmedName : nil
-            do {
-                var ids: [DownloadID] = []
-                for (index, item) in links.enumerated() {
-                    var source: DownloadSource
-                    if let integrationItems, integrationItems.indices.contains(index) {
-                        source = integrationItems[index].asCoreSource()
-                        source.link = item
-                        if links.count == 1, let explicitName {
-                            source.suggestedName = explicitName
-                        }
-                    } else {
-                        source = DownloadSource(
-                            kind: item.lowercased().contains(".m3u8") ? .hls : .http,
-                            link: item,
-                            suggestedName: links.count == 1 ? explicitName : nil
-                        )
-                    }
-                    let id = try await service.add(AddDownloadRequest(
-                        source: source,
-                        folder: resolvedFolder.path,
-                        name: links.count == 1 ? explicitName : nil,
-                        queueID: queueID,
-                        categoryID: resolvedCategoryID,
-                        start: startImmediately
-                    ))
-                    ids.append(id)
+            if let category = try? await categoryStore.matchingCategory(
+                fileName: candidateName,
+                url: firstLink
+            ) {
+                resolvedCategoryID = category.id
+                if !submission.folderWasChosen, !submission.rememberFolder, let path = category.downloadPath {
+                    resolvedFolder = URL(fileURLWithPath: path, isDirectory: true)
                 }
-                if let queueID, let queueStore {
-                    try await queueStore.assignItems(ids, to: queueID)
-                }
-                if let resolvedCategoryID, let categoryStore {
-                    try await categoryStore.assignItems(ids, to: resolvedCategoryID)
-                }
-                await self.downloadList.reload()
-            } catch {
-                self.errorMessage = error.localizedDescription
             }
         }
+        let trimmedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let links = trimmedLink
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !links.isEmpty else {
+            submission.errorMessage = "请输入下载地址"
+            return false
+        }
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let explicitName = trimmedName?.isEmpty == false ? trimmedName : nil
+        do {
+            submission.resolvedFolder = resolvedFolder
+            submission.resolvedCategoryID = resolvedCategoryID
+            for (index, item) in links.enumerated().dropFirst(submission.addedIDs.count) {
+                var source: DownloadSource
+                if let integrationItems, integrationItems.indices.contains(index) {
+                    source = integrationItems[index].asCoreSource()
+                    source.link = item
+                    if links.count == 1, let explicitName {
+                        source.suggestedName = explicitName
+                    }
+                } else {
+                    source = DownloadSource(
+                        kind: item.lowercased().contains(".m3u8") ? .hls : .http,
+                        link: item,
+                        suggestedName: links.count == 1 ? explicitName : nil
+                    )
+                }
+                let id = try await service.add(AddDownloadRequest(
+                    source: source,
+                    folder: resolvedFolder.path,
+                    name: links.count == 1 ? explicitName : nil,
+                    queueID: queueID,
+                    categoryID: resolvedCategoryID,
+                    start: startImmediately
+                ))
+                submission.addedIDs.append(id)
+            }
+            if let queueID, let queueStore {
+                try await queueStore.assignItems(submission.addedIDs, to: queueID)
+            }
+            if let resolvedCategoryID, let categoryStore {
+                try await categoryStore.assignItems(submission.addedIDs, to: resolvedCategoryID)
+            }
+            submission.tasksAdded = true
+            await self.downloadList.reload()
+            if submission.rememberFolder {
+                try await self.saveDefaultDownloadFolder(folder)
+            }
+            return true
+        } catch {
+            if submission.addedIDs.isEmpty {
+                submission.resolvedFolder = nil
+                submission.resolvedCategoryID = nil
+            }
+            await self.downloadList.reload()
+            let prefix = submission.tasksAdded
+                ? "任务已添加，默认目录未保存。"
+                : (submission.addedIDs.isEmpty ? "" : "已添加 \(submission.addedIDs.count) 个任务，重试将继续处理剩余任务。")
+            submission.errorMessage = prefix + error.localizedDescription
+            return false
+        }
+    }
+
+    func saveDefaultDownloadFolder(_ folder: URL) async throws {
+        guard let settingsStore else {
+            throw settingsStoreInitializationError
+                ?? SettingsStoreError.writeFailed(settingsURL, "设置存储尚未初始化")
+        }
+        let saved = try await settingsStore.saveDefaultDownloadFolder(folder)
+        settings.defaultDownloadFolder = saved.defaultDownloadFolder
+        let normalized = URL(fileURLWithPath: saved.defaultDownloadFolder, isDirectory: true)
+        await service?.updateConfiguration(defaultFolder: normalized)
+        await categoryStore?.updateDefaultFolder(normalized)
     }
 
     func saveSettings(_ updated: AppSettingsModel) async throws {

@@ -341,16 +341,24 @@ final class AppCoordinator: NSObject, ObservableObject {
         guard browserConfirmationSession === session,
               browserRequests.active == session.request,
               state.request == session.request else { return }
-        store.addDownload(
-            link: state.urlText,
-            name: state.nameText,
-            folder: state.folderURL,
-            queueID: queueID,
-            categoryID: categoryID,
-            startImmediately: startImmediately,
-            integrationItems: session.request.items
-        )
-        finishBrowserConfirmation(session, outcome: .completed)
+        Task { @MainActor [weak self] in
+            guard let self,
+                  browserConfirmationSession === session,
+                  browserRequests.active == session.request else { return }
+            let succeeded = await store.addDownload(
+                link: state.urlText,
+                name: state.nameText,
+                folder: state.folderURL,
+                queueID: queueID,
+                categoryID: categoryID,
+                startImmediately: startImmediately,
+                integrationItems: session.request.items,
+                submission: state.submission
+            )
+            if succeeded {
+                finishBrowserConfirmation(session, outcome: .completed)
+            }
+        }
     }
 
     private enum BrowserConfirmationOutcome {
@@ -768,7 +776,10 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             defaultFolder: defaultFolder
         )
         browserConfirmationState = state
-        browserConfirmationClose = onCancel
+        browserConfirmationClose = {
+            guard !state.submission.isSubmitting else { return }
+            onCancel()
+        }
         let content = BrowserDownloadConfirmationView(
             state: state,
             queues: queues,
@@ -812,6 +823,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             guard response == .OK, let url = openPanel.url else { return }
             guard self?.browserConfirmationState === state else { return }
             state.folderURL = url
+            state.submission.folderWasChosen = true
         }
     }
 

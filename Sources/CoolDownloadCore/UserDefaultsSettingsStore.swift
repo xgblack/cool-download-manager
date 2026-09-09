@@ -93,6 +93,19 @@ public actor SettingsStore {
         return settings
     }
 
+    /// Update only this preference; unrelated credentials and settings stay untouched.
+    @discardableResult
+    public func saveDefaultDownloadFolder(_ folder: URL) throws -> AppSettingsModel {
+        guard folder.isFileURL, folder.path.hasPrefix("/") else {
+            throw SettingsStoreError.invalid("请选择有效的下载目录")
+        }
+        var settings = try load()
+        settings.defaultDownloadFolder = folder.standardizedFileURL.path
+        typed.set(settings.defaultDownloadFolder, for: Keys.defaultDownloadFolder)
+        cached = settings
+        return settings
+    }
+
     private func read(fallback d: AppSettingsModel) throws -> AppSettingsModel {
         AppSettingsModel(
             theme: typed.value(Keys.theme, default: d.theme),

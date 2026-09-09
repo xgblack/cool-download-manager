@@ -6,6 +6,7 @@ struct MainView: View {
     @ObservedObject var downloadList: DownloadListStore
     @ObservedObject var coordinator: AppCoordinator
 
+    @StateObject private var submission = DownloadSubmissionState()
     @ObservedObject var viewState: MainViewState
 
     init(store: AppStore, coordinator: AppCoordinator, viewState: MainViewState) {
@@ -114,6 +115,7 @@ struct MainView: View {
         ) { result in
             if case .success(let urls) = result, let url = urls.first {
                 viewState.folderURL = url
+                submission.folderWasChosen = true
             }
         }
         .appTheme(store.settings.theme)
@@ -182,6 +184,8 @@ struct MainView: View {
                     queueID: $viewState.queueID,
                     categoryID: $viewState.categoryID,
                     startImmediately: $viewState.startImmediately,
+                    submission: submission,
+                    defaultFolder: URL(fileURLWithPath: store.settings.defaultDownloadFolder),
                     title: "新建下载",
                     queues: store.queues,
                     categories: store.categories,
@@ -191,19 +195,26 @@ struct MainView: View {
                         coordinator.closeMainSheet()
                     },
                     onAdd: { queueID, categoryID, startImmediately in
-                        store.addDownload(
-                            link: viewState.urlText,
-                            name: viewState.nameText,
-                            folder: viewState.folderURL,
-                            queueID: queueID,
-                            categoryID: categoryID,
-                            startImmediately: startImmediately
-                        )
-                        resetAddForm()
-                        coordinator.closeMainSheet()
+                        Task { @MainActor in
+                            guard case .addDownload = coordinator.mainSheet else { return }
+                            let succeeded = await store.addDownload(
+                                link: viewState.urlText,
+                                name: viewState.nameText,
+                                folder: viewState.folderURL,
+                                queueID: queueID,
+                                categoryID: categoryID,
+                                startImmediately: startImmediately,
+                                submission: submission
+                            )
+                            if succeeded {
+                                resetAddForm()
+                                coordinator.closeMainSheet()
+                            }
+                        }
                     }
                 )
                 .onAppear {
+                    viewState.folderURL = URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true)
                     if !coordinator.pendingURLText.isEmpty {
                         viewState.urlText = coordinator.pendingURLText
                         coordinator.pendingURLText = ""
@@ -480,6 +491,15 @@ struct MainView: View {
     }
 
     private func resetAddForm() {
+        guard !submission.isSubmitting else { return }
+        submission.rememberFolder = false
+        submission.folderWasChosen = false
+        submission.errorMessage = nil
+        submission.addedIDs = []
+        submission.tasksAdded = false
+        submission.resolvedFolder = nil
+        submission.resolvedCategoryID = nil
+        viewState.folderURL = URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true)
         viewState.urlText = ""
         viewState.nameText = ""
         viewState.queueID = nil
