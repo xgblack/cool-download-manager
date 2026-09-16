@@ -86,6 +86,7 @@ func sendToMainApp(
             do {
                 let process = Process()
                 process.executableURL = appURL
+                process.arguments = [AppPaths.browserIntegrationLaunchArgument]
                 try process.run()
             } catch {
                 lastError = error

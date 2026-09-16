@@ -8,6 +8,7 @@ import Darwin
 /// directories and never probes the legacy location.
 public enum AppPaths {
     public static let bundleIdentifier = "com.cooldownloadmanager"
+    public static let browserIntegrationLaunchArgument = "--browser-integration"
 
     public static func applicationSupportDirectory(
         fileManager: FileManager = .default

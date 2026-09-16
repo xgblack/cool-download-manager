@@ -1,5 +1,12 @@
 import SwiftUI
 import AppKit
+import CoolDownloadCore
+
+enum AppLaunchContext {
+    static func shouldPresentMainWindow(arguments: [String]) -> Bool {
+        !arguments.contains(AppPaths.browserIntegrationLaunchArgument)
+    }
+}
 
 @MainActor
 final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
@@ -97,6 +104,11 @@ struct CoolDownloadManagerApp: App {
                 }
         }
         .defaultSize(width: 1_280, height: 760)
+        .defaultLaunchBehavior(
+            AppLaunchContext.shouldPresentMainWindow(arguments: CommandLine.arguments)
+                ? .presented
+                : .suppressed
+        )
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("新建下载") {
