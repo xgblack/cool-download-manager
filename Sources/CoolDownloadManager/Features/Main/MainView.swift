@@ -264,7 +264,10 @@ struct MainView: View {
 
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .automatic) {
+        // Keep list actions in the leading toolbar region. Using automatic
+        // and primaryAction makes AppKit place them provisionally, then move
+        // them after the window's toolbar finishes measuring.
+        ToolbarItemGroup(placement: .navigation) {
             Menu {
                 ForEach(DownloadSort.allCases, id: \.self) { sort in
                     Button {
@@ -303,7 +306,7 @@ struct MainView: View {
             .help("管理下载和应用设置")
         }
 
-        ToolbarItemGroup(placement: .primaryAction) {
+        ToolbarItemGroup(placement: .navigation) {
             Button {
                 coordinator.presentBatchDownload()
             } label: {
