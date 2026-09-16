@@ -11,6 +11,17 @@
 - 当前稳定 feed 不发布 beta/RC。若以后需要预发布，应增加独立 Sparkle channel 和独立 feed，不能让 GitHub `latest` 把预发布推送给稳定用户。
 - Core Data schema、REST API 和 Native Messaging 协议版本独立维护，不用应用构建号代替。
 
+### 提高版本号时需要修改的文件
+
+每次发布新版本时，提交前只需要同步修改以下两个版本元数据文件：
+
+1. `VERSION`：写入用户可见的三段式产品版本，例如 `1.0.11`。
+2. `BUILD_NUMBER`：写入严格大于所有历史 `v*` 发布标签的纯数字构建号，例如 `1011`。
+
+`Info.plist` 中的 `CFBundleShortVersionString` 和 `CFBundleVersion` 由
+`scripts/package-macos.sh` 根据这两个文件自动写入，不需要手工修改。提交后再创建匹配的
+Git 标签 `v<版本>`；标签不是版本文件，不要直接移动或复用已有标签。
+
 发布前至少执行：
 
 ```sh
