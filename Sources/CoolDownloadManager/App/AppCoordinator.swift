@@ -702,8 +702,8 @@ struct BrowserDownloadRequestQueue: Equatable {
 private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private var progressPanel: NSPanel?
     private var progressRecordID: DownloadID?
-    private var completionPanel: NSPanel?
-    private var completionClose: (() -> Void)?
+    private var completionPanels: [DownloadID: NSPanel] = [:]
+    private var completionCloses: [DownloadID: () -> Void] = [:]
     private var browserConfirmationPanel: NSPanel?
     private var browserConfirmationState: BrowserDownloadConfirmationState?
     private var browserConfirmationClose: (() -> Void)?
@@ -736,8 +736,9 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     }
 
     func showCompletion(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
+        let id = record.id
         let close: () -> Void = { [weak self, weak store] in
-            self?.hideCompletionPanel(store: store)
+            self?.hideCompletionPanel(for: id, store: store)
         }
         let content = CompletionView(
             record: record,
@@ -745,18 +746,34 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             coordinator: coordinator,
             onClose: close
         )
-        completionClose = close
         let panel = panel(
-            existing: completionPanel,
+            existing: nil,
             title: "下载完成",
             size: NSSize(width: 640, height: 360),
             floatsAboveNormalWindows: false,
             content: content
         )
-        completionPanel = panel
-        // Put the completion panel in front once without keeping it at the
-        // floating window level. Later user activity can cover it normally.
-        present(panel, focus: focus, orderFrontRegardless: true)
+        panel.identifier = NSUserInterfaceItemIdentifier(
+            "com.cooldownloadmanager.completion.\(id)"
+        )
+        completionPanels[id] = panel
+        completionCloses[id] = close
+        // Each completed task owns its own panel. Stagger newly created panels
+        // so two simultaneous completions remain visibly independent instead
+        // of appearing as one panel whose content was replaced.
+        positionCompletionPanel(panel, index: completionPanels.count - 1)
+        present(panel, focus: focus, orderFrontRegardless: true, centerIfNeeded: false)
+    }
+
+    private func positionCompletionPanel(_ panel: NSPanel, index: Int) {
+        panel.center()
+        let offset = CGFloat(index % 5) * 28
+        panel.setFrameOrigin(
+            NSPoint(
+                x: panel.frame.origin.x + offset,
+                y: panel.frame.origin.y - offset
+            )
+        )
     }
 
     func showBrowserConfirmation(
@@ -860,8 +877,13 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         return panel
     }
 
-    private func present(_ panel: NSPanel, focus: Bool, orderFrontRegardless: Bool = false) {
-        if !panel.isVisible {
+    private func present(
+        _ panel: NSPanel,
+        focus: Bool,
+        orderFrontRegardless: Bool = false,
+        centerIfNeeded: Bool = true
+    ) {
+        if centerIfNeeded, !panel.isVisible {
             panel.center()
         }
         if focus {
@@ -879,10 +901,12 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         progressRecordID = nil
     }
 
-    private func hideCompletionPanel(store: DownloadListStore?) {
+    private func hideCompletionPanel(for id: DownloadID, store: DownloadListStore?) {
         store?.acknowledgeCompletion()
-        completionPanel?.orderOut(nil)
-        completionClose = nil
+        completionCloses[id] = nil
+        guard let panel = completionPanels.removeValue(forKey: id) else { return }
+        panel.orderOut(nil)
+        panel.contentViewController = nil
     }
 
     func closeBrowserConfirmation() {
@@ -921,9 +945,12 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         if sender === progressPanel {
             progressRecordID = nil
         }
-        if sender === completionPanel {
-            completionClose?()
-            completionClose = nil
+        if let completionID = completionPanels.first(where: { $0.value === sender })?.key {
+            completionCloses[completionID]?()
+            // The close callback removes the panel from the dictionary. Keep
+            // this fallback for a callback that was already cleared.
+            completionPanels.removeValue(forKey: completionID)
+            completionCloses.removeValue(forKey: completionID)
         }
         sender.orderOut(nil)
         return false
