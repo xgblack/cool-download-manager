@@ -700,8 +700,7 @@ struct BrowserDownloadRequestQueue: Equatable {
 
 @MainActor
 private final class UtilityPanelController: NSObject, NSWindowDelegate {
-    private var progressPanel: NSPanel?
-    private var progressRecordID: DownloadID?
+    private var progressPanels: [DownloadID: NSPanel] = [:]
     private var completionPanels: [DownloadID: NSPanel] = [:]
     private var completionCloses: [DownloadID: () -> Void] = [:]
     private var browserConfirmationPanel: NSPanel?
@@ -710,33 +709,49 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private var browserFolderPanel: NSOpenPanel?
 
     func showProgress(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
+        let id = record.id
+        hideProgressPanel(for: id)
         let content = DownloadProgressView(
             record: record,
             store: store,
             coordinator: coordinator,
-            onClose: { [weak self] in self?.hideProgressPanel() }
+            onClose: { [weak self] in self?.hideProgressPanel(for: id) }
         )
         let panel = panel(
-            existing: progressPanel,
+            existing: nil,
             title: "下载进度",
             size: NSSize(width: 820, height: 540),
             floatsAboveNormalWindows: false,
             content: content
         )
-        progressPanel = panel
-        progressRecordID = record.id
+        panel.identifier = NSUserInterfaceItemIdentifier(
+            "com.cooldownloadmanager.progress.\(id)"
+        )
+        progressPanels[id] = panel
+        positionProgressPanel(panel, index: progressPanels.count - 1)
         // Browser-triggered downloads may arrive while another app is active;
         // order the panel in front without forcing activation when focus is off.
-        present(panel, focus: focus, orderFrontRegardless: true)
+        present(panel, focus: focus, orderFrontRegardless: true, centerIfNeeded: false)
     }
 
     func closeProgress(for id: DownloadID) {
-        guard progressRecordID == id else { return }
-        hideProgressPanel()
+        hideProgressPanel(for: id)
+    }
+
+    private func positionProgressPanel(_ panel: NSPanel, index: Int) {
+        panel.center()
+        let offset = CGFloat(index % 5) * 28
+        panel.setFrameOrigin(
+            NSPoint(
+                x: panel.frame.origin.x + offset,
+                y: panel.frame.origin.y - offset
+            )
+        )
     }
 
     func showCompletion(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
         let id = record.id
+        hideCompletionPanel(for: id, store: nil)
         let close: () -> Void = { [weak self, weak store] in
             self?.hideCompletionPanel(for: id, store: store)
         }
@@ -896,9 +911,10 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func hideProgressPanel() {
-        progressPanel?.orderOut(nil)
-        progressRecordID = nil
+    private func hideProgressPanel(for id: DownloadID) {
+        guard let panel = progressPanels.removeValue(forKey: id) else { return }
+        panel.orderOut(nil)
+        panel.contentViewController = nil
     }
 
     private func hideCompletionPanel(for id: DownloadID, store: DownloadListStore?) {
@@ -942,8 +958,9 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             }
             return false
         }
-        if sender === progressPanel {
-            progressRecordID = nil
+        if let progressID = progressPanels.first(where: { $0.value === sender })?.key {
+            progressPanels.removeValue(forKey: progressID)
+            sender.contentViewController = nil
         }
         if let completionID = completionPanels.first(where: { $0.value === sender })?.key {
             completionCloses[completionID]?()
