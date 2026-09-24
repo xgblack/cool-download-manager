@@ -7,12 +7,13 @@ import CoolDownloadIntegration
 @Suite("确认下载默认目录", .serialized)
 @MainActor
 struct DownloadSubmissionTests {
-    private func makeStore() async throws -> (AppStore, URL) {
+    private func makeStore(useCategoryByDefault: Bool = false) async throws -> (AppStore, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("cooldm-folder-\(UUID().uuidString)")
         let preferences = try SettingsStore(dataRoot: root)
         var settings = AppSettingsModel.defaults()
         settings.apiEnabled = false
         settings.defaultDownloadFolder = root.appendingPathComponent("original").path
+        settings.useCategoryByDefault = useCategoryByDefault
         _ = try await preferences.save(settings)
         let app = AppStore(dataRoot: root, cacheRoot: root.appendingPathComponent("cache"))
         for _ in 0..<500 {
@@ -24,7 +25,7 @@ struct DownloadSubmissionTests {
 
     @Test("显式目录优先于分类且仅勾选后持久化")
     func remembersOnlyWhenSelected() async throws {
-        let (app, root) = try await makeStore()
+        let (app, root) = try await makeStore(useCategoryByDefault: true)
         let folder = root.appendingPathComponent("chosen")
         let original = app.settings.defaultDownloadFolder
         let first = DownloadSubmissionState()
@@ -46,6 +47,25 @@ struct DownloadSubmissionTests {
         let next = BrowserDownloadConfirmationState(request: request, defaultFolder: URL(fileURLWithPath: app.settings.defaultDownloadFolder))
         #expect(next.folderURL.path == folder.path)
         #expect(!next.submission.rememberFolder)
+        await app.shutdown()
+    }
+
+    @Test("默认不使用分类时压缩文件保存在默认目录")
+    func archiveUsesDefaultFolderWithoutAutomaticCategory() async throws {
+        #expect(!AppSettingsModel.defaults().useCategoryByDefault)
+        let (app, _) = try await makeStore()
+        let folder = URL(fileURLWithPath: app.settings.defaultDownloadFolder, isDirectory: true)
+        let submission = DownloadSubmissionState()
+        #expect(await app.addDownload(
+            link: "https://example.com/archive.zip",
+            name: nil,
+            folder: folder,
+            startImmediately: false,
+            submission: submission
+        ))
+        let record = await app.service!.snapshot().downloads.first
+        #expect(record?.folder == folder.path)
+        #expect(record?.categoryID == nil)
         await app.shutdown()
     }
 

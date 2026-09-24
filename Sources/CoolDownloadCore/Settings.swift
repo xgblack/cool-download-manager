@@ -85,7 +85,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             sizeUnit: "BinaryBytes",
             speedUnit: "BinaryBytes",
             ignoreSSLCertificates: false,
-            useCategoryByDefault: true,
+            useCategoryByDefault: false,
             userAgent: "",
             proxyMode: "system",
             proxyHost: "",
