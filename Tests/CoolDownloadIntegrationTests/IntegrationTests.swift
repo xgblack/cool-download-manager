@@ -7,6 +7,42 @@ import CoolDownloadCore
 
 @Suite("CoolDownloadIntegration")
 struct IntegrationTests {
+    @Test("Native Messaging installs manifests for supported Chromium browser profiles")
+    func nativeMessagingManifestDirectories() {
+        let directories = NativeMessagingManifestInstaller.manifestDirectories.map(\.path)
+        #expect(directories.count == 5)
+        #expect(directories.contains { $0.hasSuffix("Google/Chrome/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Chromium/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Microsoft Edge/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Microsoft Edge Beta/NativeMessagingHosts") })
+    }
+
+    @Test("Native Messaging writes browser-specific manifests without truncating targets")
+    func nativeMessagingManifestContents() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("cdm-manifests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = URL(fileURLWithPath: "/Applications/Test.app/Contents/MacOS/Host")
+        let written = try NativeMessagingManifestInstaller.install(
+            hostExecutableURL: host,
+            applicationSupport: root
+        )
+        #expect(written.count == 5)
+        for url in written {
+            let data = try Data(contentsOf: url)
+            let manifest = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(manifest["name"] as? String == NativeMessagingManifestInstaller.hostName)
+            #expect(manifest["path"] as? String == host.path)
+            if url.path.contains("Mozilla/") {
+                #expect(manifest["allowed_extensions"] as? [String] == [NativeMessagingManifestInstaller.firefoxExtensionID])
+                #expect(manifest["allowed_origins"] == nil)
+            } else {
+                #expect(manifest["allowed_origins"] as? [String] == [NativeMessagingManifestInstaller.chromeExtensionOrigin])
+                #expect(manifest["allowed_extensions"] == nil)
+            }
+        }
+    }
+
     @Test("HTTP authentication fails closed unless anonymous mode is explicit")
     func authenticationPolicy() async {
         for key in [nil, "", "   "] as [String?] {

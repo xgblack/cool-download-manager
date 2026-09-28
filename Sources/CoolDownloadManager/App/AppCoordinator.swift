@@ -112,7 +112,7 @@ final class AppCoordinator: NSObject, ObservableObject {
         menuBarController = MenuBarController(
             actions: .init(
                 showMain: { [weak self] in self?.showMainWindow() },
-                newDownload: { [weak self] in self?.presentAddDownload() },
+                newDownload: { [weak self] in self?.presentAddDownload(fromClipboard: true) },
                 settings: { [weak self] in self?.presentSettings() },
                 quit: { NSApp.terminate(nil) }
             )
@@ -283,10 +283,15 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 
     func presentAddDownload(fromClipboard: Bool = false) {
-        showMainWindow()
         if fromClipboard {
-            pendingURLText = NSPasteboard.general.string(forType: .string) ?? ""
+            let clipboardText = NSPasteboard.general.string(forType: .string) ?? ""
+            if mainSheet == .addDownload {
+                mainViewState.urlText = clipboardText
+            } else {
+                pendingURLText = clipboardText
+            }
         }
+        showMainWindow()
         mainSheet = .addDownload
     }
 

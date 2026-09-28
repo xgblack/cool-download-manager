@@ -118,7 +118,6 @@ struct CoolDownloadManagerApp: App {
                 Button("从剪贴板新建") {
                     coordinator.presentAddDownload(fromClipboard: true)
                 }
-                .keyboardShortcut("v", modifiers: [.command])
             }
             CommandGroup(after: .newItem) {
                 Button("批量下载") {

@@ -6,12 +6,15 @@ public enum NativeMessagingManifestInstaller {
     public static let chromeExtensionOrigin = "chrome-extension://bbobopahenonfdgjgaleledndnnfhooj/"
 
     public static func install(hostExecutableURL: URL) throws -> [URL] {
+        try install(hostExecutableURL: hostExecutableURL, applicationSupport: applicationSupportURL)
+    }
+
+    static func install(hostExecutableURL: URL, applicationSupport: URL) throws -> [URL] {
         let hostPath = hostExecutableURL.standardizedFileURL.path
         guard hostExecutableURL.path.hasPrefix("/") else {
             throw ManifestInstallerError.nonAbsoluteHostPath(hostPath)
         }
         let fileManager = FileManager.default
-        let directories = manifestDirectories
         let firefox = try JSONSerialization.data(withJSONObject: [
             "name": hostName,
             "description": "酷的下载管理器",
@@ -27,8 +30,11 @@ public enum NativeMessagingManifestInstaller {
             "allowed_origins": [chromeExtensionOrigin]
         ], options: [.sortedKeys, .prettyPrinted])
 
+        let targets = manifestDirectories(in: applicationSupport).enumerated().map { index, directory in
+            (directory: directory, data: index == 0 ? firefox : chrome)
+        }
         var written: [URL] = []
-        for (directory, data) in zip(directories, [firefox, chrome, chrome]) {
+        for (directory, data) in targets {
             try fileManager.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true,
@@ -61,14 +67,23 @@ public enum NativeMessagingManifestInstaller {
     }
 
     public static var manifestDirectories: [URL] {
-        let applicationSupport = FileManager.default.urls(
+        manifestDirectories(in: applicationSupportURL)
+    }
+
+    private static var applicationSupportURL: URL {
+        FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+    }
+
+    private static func manifestDirectories(in applicationSupport: URL) -> [URL] {
         return [
             applicationSupport.appendingPathComponent("Mozilla/NativeMessagingHosts", isDirectory: true),
             applicationSupport.appendingPathComponent("Google/Chrome/NativeMessagingHosts", isDirectory: true),
-            applicationSupport.appendingPathComponent("Chromium/NativeMessagingHosts", isDirectory: true)
+            applicationSupport.appendingPathComponent("Chromium/NativeMessagingHosts", isDirectory: true),
+            applicationSupport.appendingPathComponent("Microsoft Edge/NativeMessagingHosts", isDirectory: true),
+            applicationSupport.appendingPathComponent("Microsoft Edge Beta/NativeMessagingHosts", isDirectory: true)
         ]
     }
 }
