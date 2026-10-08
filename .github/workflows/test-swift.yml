@@ -1,0 +1,61 @@
+name: Swift tests
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Package.swift"
+      - "Package.resolved"
+      - ".github/workflows/test-swift.yml"
+  pull_request:
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Package.swift"
+      - "Package.resolved"
+      - ".github/workflows/test-swift.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Select Xcode 27
+        shell: bash
+        run: |
+          set -euo pipefail
+          developer_dir=""
+          for candidate in \
+            /Applications/Xcode_27*.app/Contents/Developer \
+            /Applications/Xcode-beta.app/Contents/Developer \
+            /Applications/Xcode.app/Contents/Developer; do
+            if [[ -x "$candidate/usr/bin/xcodebuild" ]]; then
+              developer_dir="$candidate"
+              break
+            fi
+          done
+          [[ -n "$developer_dir" ]] || { echo "Xcode 27 was not found" >&2; exit 1; }
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          "$developer_dir/usr/bin/xcodebuild" -version
+          sdk_version="$(DEVELOPER_DIR="$developer_dir" xcrun --sdk macosx --show-sdk-version)"
+          [[ "$sdk_version" == 27.* ]] || { echo "Expected macOS 27 SDK, found $sdk_version" >&2; exit 1; }
+
+      - name: Run functional tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test --disable-sandbox

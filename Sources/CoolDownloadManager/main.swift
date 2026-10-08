@@ -110,6 +110,11 @@ struct CoolDownloadManagerApp: App {
                 : .suppressed
         )
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("关于酷的下载管理器") {
+                    openWindow(id: "about")
+                }
+            }
             CommandGroup(after: .appInfo) {
                 Button("检查更新") {
                     coordinator.checkForUpdates()
@@ -200,10 +205,26 @@ struct CoolDownloadManagerApp: App {
                     openExternal("https://github.com/xgblack/cool-download-manager")
                 }
                 Button("关于") {
-                    NSApp.orderFrontStandardAboutPanel(nil)
+                    openWindow(id: "about")
                 }
             }
         }
+        Window("关于酷的下载管理器", id: "about") {
+            AboutView(checkForUpdates: coordinator.checkForUpdates)
+                .appTheme(store.settings.theme)
+                .background {
+                    WindowAccessor { window in
+                        coordinator.registerAboutWindow(window)
+                    }
+                }
+                .onChange(of: store.settings.theme) { _, theme in
+                    coordinator.applyThemeToAboutWindow(theme)
+                }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         Window("下载管理器", id: "settings") {
             SettingsView(store: store, coordinator: coordinator)
                 .background {

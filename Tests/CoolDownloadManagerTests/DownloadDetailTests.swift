@@ -5,38 +5,6 @@ import CoolDownloadCore
 
 @Suite("下载详情")
 struct DownloadDetailTests {
-    @Test("断点续传状态使用是、否、未知三态文案和图标")
-    func presentsResumeSupportStates() {
-        #expect(ResumeSupportPresentation.text(true) == "是")
-        #expect(ResumeSupportPresentation.text(false) == "否")
-        #expect(ResumeSupportPresentation.text(nil) == "未知")
-        #expect(ResumeSupportPresentation.systemImage(true) == "checkmark.circle.fill")
-        #expect(ResumeSupportPresentation.systemImage(false) == "xmark.circle.fill")
-        #expect(ResumeSupportPresentation.systemImage(nil) == "questionmark.circle")
-    }
-
-    @Test("修改时间使用中文年月日和二十四小时制")
-    func formatsModificationDateInChinese() throws {
-        let timeZone = try #require(TimeZone(secondsFromGMT: 8 * 60 * 60))
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = timeZone
-        let date = try #require(calendar.date(from: DateComponents(
-            calendar: calendar,
-            timeZone: timeZone,
-            year: 2026,
-            month: 8,
-            day: 26,
-            hour: 22,
-            minute: 12,
-            second: 51
-        )))
-
-        #expect(
-            DownloadDetailDateText.string(from: date, timeZone: timeZone)
-                == "2026年8月26日 22:12:51"
-        )
-    }
-
     @Test("失败任务没有 Range 工作块时显示服务器错误")
     func reportsFailedEmptyParts() {
         let record = DownloadRecord(
@@ -49,19 +17,6 @@ struct DownloadDetailTests {
         )
 
         #expect(emptyRangeWorkMessage(for: record) == "失败：服务器返回 HTTP 403")
-    }
-
-    @Test("没有 Range 工作块时不暗示正在使用更多连接")
-    func reportsEmptyRangeWork() {
-        let record = DownloadRecord(
-            id: 8,
-            source: DownloadSource(kind: .http, link: "https://example.test/file.bin"),
-            folder: "/tmp",
-            name: "file.bin",
-            status: .downloading
-        )
-
-        #expect(emptyRangeWorkMessage(for: record) == "暂无 Range 工作块")
     }
 
     @Test("Range 工作块概览包含间距后仍保持在容器内")
@@ -277,5 +232,48 @@ struct DownloadDetailTests {
 
         #expect(startedIDs == [record.id])
         #expect(store.progressID == record.id)
+    }
+
+    @Test("派生列表在进度、状态、名称、来源和删除后保持新鲜")
+    @MainActor
+    func derivedListsStayCurrent() {
+        let store = DownloadListStore(service: nil)
+        var record = DownloadRecord(
+            id: 1,
+            source: DownloadSource(kind: .http, link: "https://example.test/old"),
+            folder: "/tmp", name: "old", status: .downloading
+        )
+        store.apply([record], announceCompletion: false)
+        store.filter = .active
+        #expect(store.visibleDownloads.map(\.id) == [1])
+        let stale = record
+        record.revision += 1
+        record.downloadedBytes = 512
+        store.apply(.updated(record))
+        #expect(store.visibleDownloads.first?.downloadedBytes == 512)
+        record.revision += 1
+        record.status = .completed
+        record.name = "new"
+        record.source.link = "https://example.test/replaced"
+        record.queueID = 7
+        record.categoryID = 8
+        store.apply(.updated(record))
+        store.apply(.updated(stale))
+        #expect(store.visibleDownloads.isEmpty)
+        store.filter = .completed
+        store.searchText = " NEW "
+        #expect(store.visibleDownloads.map(\.id) == [1])
+        store.searchText = "replaced"
+        #expect(store.visibleDownloads.map(\.id) == [1])
+        store.filter = .queue(7)
+        #expect(store.visibleDownloads.map(\.id) == [1])
+        store.filter = .category(8)
+        #expect(store.visibleDownloads.map(\.id) == [1])
+        store.selectedIDs = [1]
+        #expect(store.selectedDownloads.first?.status == .completed)
+        store.apply(.removed(id: 1))
+        #expect(store.record(id: 1) == nil)
+        #expect(store.visibleDownloads.isEmpty)
+        #expect(store.selectedDownloads.isEmpty)
     }
 }

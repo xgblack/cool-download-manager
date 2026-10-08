@@ -57,6 +57,7 @@ final class AppCoordinator: NSObject, ObservableObject {
     private let utilityPanels = UtilityPanelController()
     private weak var mainWindow: NSWindow?
     private weak var settingsWindow: NSWindow?
+    private weak var aboutWindow: NSWindow?
     private var openMainWindowAction: (() -> Void)?
     private var openSettingsWindowAction: (() -> Void)?
     private var mainWindowCreationInFlight = false
@@ -149,6 +150,17 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func applyThemeToSettingsWindow(_ rawValue: String) {
         applyTheme(rawValue, to: resolvedSettingsWindow())
+    }
+
+    func registerAboutWindow(_ window: NSWindow?) {
+        guard let window else { return }
+        aboutWindow = window
+        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.about-window")
+        applyTheme(store.settings.theme, to: window)
+    }
+
+    func applyThemeToAboutWindow(_ rawValue: String) {
+        applyTheme(rawValue, to: aboutWindow)
     }
 
     func configureMainWindowOpener(_ action: @escaping () -> Void) {

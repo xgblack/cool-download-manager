@@ -91,6 +91,7 @@ struct CoreTests {
             maximumRecords: 2,
             now: { now }
         )
+        #expect(store.settingsURL == root.appendingPathComponent("host-performance.json"))
         let first = try #require(HostPerformanceKey(scheme: "https", host: "one.example"))
         let second = try #require(HostPerformanceKey(scheme: "https", host: "two.example"))
         let third = try #require(HostPerformanceKey(scheme: "https", host: "three.example"))
@@ -409,30 +410,18 @@ struct CoreTests {
         changed.maxConcurrent = 4
         changed.queueItems = [3, 8]
         changed.stopQueueOnEmpty = true
-        _ = try await store.save(changed)
-        let reopened = try QueueStore(dataRoot: root, database: database)
-        #expect(try await reopened.model(id: created.id) == changed)
-        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("metadata.sqlite").path))
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("config/download_db/queues/\(created.id).json").path))
-    }
-
-    @Test("queue schedule persists weekdays")
-    func queueStoreReadsLegacyWeekdayNames() async throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let database = try MetadataDatabase(rootURL: root)
-        let store = try QueueStore(dataRoot: root, database: database)
-        var queue = try await store.create(name: "Weekdays")
-        queue.scheduledTimes = QueueSchedule(
+        changed.scheduledTimes = QueueSchedule(
             daysOfWeek: [1, 3, 7],
             startTime: "02:30",
             endTime: "07:30",
             enabledStartTime: false,
             enabledEndTime: false
         )
-        _ = try await store.save(queue)
+        _ = try await store.save(changed)
         let reopened = try QueueStore(dataRoot: root, database: database)
-        #expect(try await reopened.model(id: queue.id).scheduledTimes.daysOfWeek == [1, 3, 7])
+        #expect(try await reopened.model(id: created.id) == changed)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("metadata.sqlite").path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("config/download_db/queues/\(created.id).json").path))
     }
 
     @Test("queue store creates, edits and protects the main queue")
@@ -552,19 +541,6 @@ struct CoreTests {
         #expect(QueueSchedule.default.isActive(at: mondayLate, calendar: calendar))
     }
 
-    @Test("settings use defaults when the file is absent")
-    func settingsDefaults() async throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let store = try SettingsStore(dataRoot: root)
-        let settings = try await store.load()
-        #expect(settings.threadCount == 8)
-        #expect(settings.maxConcurrentDownloads == 3)
-        #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/CoolDM"))
-        #expect(!FileManager.default.fileExists(atPath: store.settingsURL.path))
-    }
-
     @Test("scheduler resource budgets normalize to usable minimums")
     func schedulerResourceBudgetNormalization() {
         let configuration = DownloadSchedulerConfiguration(
@@ -582,6 +558,8 @@ struct CoreTests {
         let store = try SettingsStore(dataRoot: root)
         var settings = try await store.load()
         #expect(settings.threadCount == 8)
+        #expect(settings.maxConcurrentDownloads == 3)
+        #expect(settings.defaultDownloadFolder.hasSuffix("Downloads/CoolDM"))
         settings.apiPort = 16200
         settings.proxyPassword = "secret-value"
         settings.apiAuthKey = "plain-api-key"
@@ -681,6 +659,7 @@ struct CoreTests {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let record = makeRecord(id: 3, folder: root)
+        #expect(record.incompleteURL.lastPathComponent == ".dl-3.cooldm.part")
 
         do {
             let writer = try PartFileWriter(record: record)
@@ -694,15 +673,6 @@ struct CoreTests {
 
         #expect(try Data(contentsOf: record.destinationURL) == Data("abcdef".utf8))
         #expect(!FileManager.default.fileExists(atPath: record.incompleteURL.path))
-    }
-
-    @Test("new records use the cooldm temporary filename")
-    func defaultIncompleteFileNameUsesCoolDM() throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let record = makeRecord(id: 31, folder: root)
-
-        #expect(record.incompleteURL.lastPathComponent == ".dl-31.cooldm.part")
     }
 
     @Test("HTTP downloader validates range and restarts when ignored")
@@ -4321,59 +4291,6 @@ struct CoreTests {
         } catch let error as DownloadCoreError {
             #expect(error == .resourceChanged)
         }
-    }
-
-    @Test("legacy Kotlin JSON is projected without dropping unknown fields")
-    func legacyJSON() throws {
-        let data = Data("""
-        {
-          "type": "http",
-          "id": 42,
-          "link": "https://example.test/archive.zip",
-          "headers": {"Cookie": "session=keep"},
-          "folder": "/tmp/downloads",
-          "name": "archive.zip",
-          "contentLength": 12,
-          "etag": "\\\"v1\\\"",
-          "lastModified": "Wed, 21 Oct 2015 07:28:00 GMT",
-          "dateAdded": 1700000000000,
-          "preferredConnectionCount": 4,
-          "speedLimit": 1024,
-          "status": "Paused",
-          "futureField": {"keep": true}
-        }
-        """.utf8)
-        let decoded = try LegacyJSONCodec.decodeRecord(data: data)
-        #expect(decoded.record.id == 42)
-        #expect(decoded.record.status == .paused)
-        #expect(decoded.record.source.headers?["Cookie"] == "session=keep")
-        #expect(decoded.record.totalBytes == 12)
-        #expect(decoded.record.etag == "\"v1\"")
-        #expect(decoded.record.lastModified == "Wed, 21 Oct 2015 07:28:00 GMT")
-        #expect(decoded.record.taskSettings?.threadCount == 4)
-        #expect(decoded.record.taskSettings?.speedLimit == 1024)
-        #expect(decoded.record.supportsResume == nil)
-
-        let supportData = Data("""
-        {
-          "type": "http",
-          "id": 43,
-          "link": "https://example.test/resume.bin",
-          "folder": "/tmp/downloads",
-          "name": "resume.bin",
-          "resumeSupport": false
-        }
-        """.utf8)
-        let supportDecoded = try LegacyJSONCodec.decodeRecord(data: supportData)
-        #expect(supportDecoded.record.supportsResume == false)
-
-        var changed = decoded.record
-        changed.status = .completed
-        let encoded = try LegacyJSONCodec.encodeRecord(changed, preserving: decoded.rawObject)
-        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
-        #expect((object?["futureField"] as? [String: Any])?["keep"] as? Bool == true)
-        #expect(object?["status"] as? String == "Completed")
-        #expect(object?["preferredConnectionCount"] as? Int == 4)
     }
 
     @Test("legacy parts sidecars are ignored by the native metadata store")

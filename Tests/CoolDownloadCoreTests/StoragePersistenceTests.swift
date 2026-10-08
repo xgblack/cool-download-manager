@@ -274,14 +274,6 @@ struct StoragePersistenceTests {
         #expect(loadedAgain.apiAuthKey == generated.apiAuthKey)
     }
 
-    @Test("host performance store is disposable cache data")
-    func hostPerformanceCachePath() throws {
-        let root = try makeRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = try HostPerformanceStore(dataRoot: root)
-        #expect(store.settingsURL == root.appendingPathComponent("host-performance.json"))
-    }
-
     private func makeRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cool-download-native-\(UUID().uuidString)", isDirectory: true)

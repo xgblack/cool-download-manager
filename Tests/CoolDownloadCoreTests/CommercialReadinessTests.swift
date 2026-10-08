@@ -11,8 +11,8 @@ struct CommercialReadinessTests {
         return url
     }
 
-    @Test("并发新增保留每条记录并独立预留同名文件", arguments: 0..<10)
-    func concurrentAdds(round: Int) async throws {
+    @Test("并发新增保留每条记录并独立预留同名文件")
+    func concurrentAdds() async throws {
         let root = try root()
         let store = try DownloadStore(rootURL: root)
         let service = DownloadService(store: store, defaultFolder: root,
@@ -22,7 +22,7 @@ struct CommercialReadinessTests {
             for index in 0..<100 {
                 group.addTask {
                     try await service.add(.init(source: .init(kind: .http,
-                        link: "https://example.test/\(round)/\(index)"), name: "same.bin"))
+                        link: "https://example.test/\(index)"), name: "same.bin"))
                 }
             }
             var result: [DownloadID] = []

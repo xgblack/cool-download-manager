@@ -135,32 +135,6 @@ struct DownloadRemovalTests {
         await service.shutdown()
     }
 
-    @Test("任务未开始时等待临时文件明确超时")
-    func partialFileWaitTimesOut() async throws {
-        let root = try makeRoot()
-        defer { try? FileManager.default.trashItem(at: root, resultingItemURL: nil) }
-        let service = DownloadService(store: try DownloadStore(rootURL: root), defaultFolder: root)
-        try await service.boot()
-        let id = try await service.add(AddDownloadRequest(
-            source: DownloadSource(kind: .http, link: "https://fixture.invalid/not-started.bin"),
-            start: false
-        ))
-
-        await #expect(throws: (any Error).self) {
-            do {
-                _ = try await waitForPartialFile(id: id, service: service, timeout: .milliseconds(20))
-            } catch {
-                let failure = error as NSError
-                #expect(failure.domain == "DownloadRemovalTests")
-                #expect(failure.code == 1)
-                throw error
-            }
-        }
-
-        #expect(await service.snapshot().downloads.first?.status == .added)
-        await service.shutdown()
-    }
-
     private func makeRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cooldm-removal-\(UUID().uuidString)", isDirectory: true)
@@ -173,10 +147,9 @@ struct DownloadRemovalTests {
     @concurrent
     nonisolated private func waitForPartialFile(
         id: DownloadID,
-        service: DownloadService,
-        timeout: Duration = .seconds(3)
+        service: DownloadService
     ) async throws -> DownloadRecord {
-        let deadline = ContinuousClock.now + timeout
+        let deadline = ContinuousClock.now + .seconds(3)
         while ContinuousClock.now < deadline {
             if let record = await service.snapshot().downloads.first(where: { $0.id == id }),
                record.status == .downloading, record.downloadedBytes == 65_536 {

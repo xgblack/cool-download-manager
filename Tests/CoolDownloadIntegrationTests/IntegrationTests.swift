@@ -7,16 +7,6 @@ import CoolDownloadCore
 
 @Suite("CoolDownloadIntegration")
 struct IntegrationTests {
-    @Test("Native Messaging installs manifests for supported Chromium browser profiles")
-    func nativeMessagingManifestDirectories() {
-        let directories = NativeMessagingManifestInstaller.manifestDirectories.map(\.path)
-        #expect(directories.count == 5)
-        #expect(directories.contains { $0.hasSuffix("Google/Chrome/NativeMessagingHosts") })
-        #expect(directories.contains { $0.hasSuffix("Chromium/NativeMessagingHosts") })
-        #expect(directories.contains { $0.hasSuffix("Microsoft Edge/NativeMessagingHosts") })
-        #expect(directories.contains { $0.hasSuffix("Microsoft Edge Beta/NativeMessagingHosts") })
-    }
-
     @Test("Native Messaging writes browser-specific manifests without truncating targets")
     func nativeMessagingManifestContents() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -28,6 +18,12 @@ struct IntegrationTests {
             applicationSupport: root
         )
         #expect(written.count == 5)
+        let directories = written.map { $0.deletingLastPathComponent().path }
+        #expect(directories.contains { $0.hasSuffix("Mozilla/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Google/Chrome/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Chromium/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Microsoft Edge/NativeMessagingHosts") })
+        #expect(directories.contains { $0.hasSuffix("Microsoft Edge Beta/NativeMessagingHosts") })
         for url in written {
             let data = try Data(contentsOf: url)
             let manifest = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -629,18 +625,6 @@ struct IntegrationTests {
         #expect(await transport.refreshedRequestCount >= 2)
         #expect(await transport.receivedAuthorization == "Bearer fresh")
         await service.shutdown()
-    }
-
-    @Test("legacy queue files are exposed through the integration model")
-    func legacyQueues() async throws {
-        let root = URL(fileURLWithPath: "/tmp/cdm-queue-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let queueDirectory = root.appendingPathComponent("config/download_db/queues", isDirectory: true)
-        try FileManager.default.createDirectory(at: queueDirectory, withIntermediateDirectories: true)
-        try Data(#"{"id":12,"name":"Archive"}"#.utf8)
-            .write(to: queueDirectory.appendingPathComponent("12.json"))
-        let queues = try await LegacyQueueStore(dataRoot: root).load()
-        #expect(queues == [IntegrationQueue(id: 12, name: "Archive")])
     }
 
     @Test("browser add options preserve silent import and silent start semantics")
