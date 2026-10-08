@@ -97,9 +97,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          swift test --filter CoolDownloadManagerTests --disable-sandbox
+          swift test --filter CoolDownloadManagerTests --skip 'DownloadListPerformanceTests/listWorkload' --disable-sandbox
           swift test --filter CoolDownloadCoreTests --disable-sandbox
           swift test --filter CoolDownloadIntegrationTests --disable-sandbox
+
+      - name: Run download list performance tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test --filter 'DownloadListPerformanceTests/listWorkload' --disable-sandbox
 
       - name: Build, sign, and publish
         shell: bash
