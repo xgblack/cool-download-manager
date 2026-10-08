@@ -79,15 +79,18 @@ extension NativePageHeader where Trailing == EmptyView {
 struct NativePageContent<Content: View>: View {
     let maxWidth: CGFloat
     let spacing: CGFloat
+    let insets: EdgeInsets
     @ViewBuilder let content: () -> Content
 
     init(
         maxWidth: CGFloat = NativePageLayout.contentWidth,
         spacing: CGFloat = 24,
+        insets: EdgeInsets = EdgeInsets(top: 26, leading: 30, bottom: 40, trailing: 30),
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.maxWidth = maxWidth
         self.spacing = spacing
+        self.insets = insets
         self.content = content
     }
 
@@ -97,9 +100,7 @@ struct NativePageContent<Content: View>: View {
                 content()
             }
             .frame(maxWidth: maxWidth, alignment: .topLeading)
-            .padding(.horizontal, 30)
-            .padding(.top, 26)
-            .padding(.bottom, 40)
+            .padding(insets)
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .scrollContentBackground(.hidden)

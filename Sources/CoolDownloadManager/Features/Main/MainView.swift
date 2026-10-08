@@ -367,12 +367,15 @@ struct MainView: View {
                                     store.assignSelectedToCategory(categoryID, ids: [record.id])
                                 }
                             )
-                            Divider()
+                            Rectangle()
+                                .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                                .frame(height: DownloadVisualStyle.hairline)
                                 .padding(.leading, MainTableLayout.leadingInset)
                         }
                     }
                 }
                 .scrollContentBackground(.hidden)
+                .background(Color(nsColor: .textBackgroundColor))
                 .transaction { transaction in
                     // Progress events arrive frequently; avoid implicit
                     // layout animation making rows lag behind the source.
@@ -389,6 +392,7 @@ struct MainView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: MainTableLayout.selectionWidth)
             Text("名称")
+                .padding(.leading, 41)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("状态 / 进度")
                 .frame(width: MainTableLayout.statusWidth, alignment: .leading)
@@ -397,11 +401,14 @@ struct MainView: View {
             Text("添加日期")
                 .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
         }
-        .font(.caption.weight(.semibold))
+        .font(DownloadVisualStyle.metadata.weight(.medium))
         .foregroundStyle(.secondary)
         .padding(.horizontal, MainTableLayout.horizontalInset)
         .padding(.vertical, 9)
-        .background(.bar)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
     }
 
     @ViewBuilder
@@ -687,8 +694,12 @@ private struct SidebarView: View {
                 .lineLimit(1)
             Spacer(minLength: 8)
             Text("\(count(for: filter))")
-                .font(.caption.monospacedDigit())
+                .font(.caption.weight(.medium).monospacedDigit())
                 .foregroundStyle(.secondary)
+                .frame(minWidth: 22)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.04), in: Capsule())
         }
         .tag(filter)
         .help(title ?? filter.title)
@@ -758,20 +769,19 @@ private struct DownloadTableRow: View {
             .toggleStyle(.checkbox)
             .frame(width: MainTableLayout.selectionWidth)
             .help(isSelected ? "取消选择" : "选择任务")
+            .accessibilityLabel("选择 \(record.name)")
 
             HStack(spacing: 9) {
-                Image(systemName: iconName)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(iconColor)
-                    .frame(width: 32, height: 32)
-                    .background(iconColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                DownloadIconTile(systemImage: iconName, tint: iconColor)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(record.name)
                         .lineLimit(1)
                         .font(.body.weight(.medium))
+                        .truncationMode(.middle)
+                        .help(record.name)
                     Text(record.source.link)
                         .lineLimit(1)
-                        .font(.caption)
+                        .font(DownloadVisualStyle.metadata)
                         .foregroundStyle(.secondary)
                         .truncationMode(.middle)
                 }
@@ -781,7 +791,10 @@ private struct DownloadTableRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Label(statusText, systemImage: statusIcon)
+                        .font(.caption.weight(.medium))
+                        .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(iconColor)
+                    Spacer(minLength: 4)
                     if let percent {
                         Text("\(percent)%")
                             .foregroundStyle(.secondary)
@@ -789,9 +802,10 @@ private struct DownloadTableRow: View {
                     }
                 }
                 if let total = record.totalBytes, total > 0 {
-                    ProgressView(value: Double(record.downloadedBytes), total: Double(total))
-                        .progressViewStyle(.linear)
-                        .tint(iconColor)
+                    DownloadProgressTrack(
+                        value: Double(record.downloadedBytes) / Double(total),
+                        tint: iconColor
+                    )
                 }
             }
             .font(.caption)
@@ -799,7 +813,7 @@ private struct DownloadTableRow: View {
 
             VStack(alignment: .trailing, spacing: 2) {
                 Text(sizeText)
-                    .font(.callout.monospacedDigit())
+                    .font(DownloadVisualStyle.numeric)
                     .foregroundStyle(.primary)
                 if let speedText {
                     Text(speedText)
@@ -819,9 +833,18 @@ private struct DownloadTableRow: View {
         .padding(.vertical, 11)
         .background(
             isSelected
-                ? Color.accentColor.opacity(0.13)
-                : isHovered ? Color(nsColor: .controlBackgroundColor).opacity(0.52) : Color.clear
+                ? Color.accentColor.opacity(0.08)
+                : isHovered ? Color.primary.opacity(0.035) : Color.clear
         )
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 12)
+                    .accessibilityHidden(true)
+            }
+        }
         .onHover { isHovered = $0 }
         .onTapGesture(count: 2, perform: onOpen)
         .contextMenu {
@@ -946,13 +969,6 @@ private struct DownloadTableRow: View {
     }
 
     private var iconColor: Color {
-        switch record.status {
-        case .completed: return .green
-        case .failed: return .red
-        case .waitingForSourceRefresh: return .yellow
-        case .paused: return .orange
-        case .retrying: return .yellow
-        default: return .accentColor
-        }
+        DownloadVisualStyle.tint(for: record.status)
     }
 }

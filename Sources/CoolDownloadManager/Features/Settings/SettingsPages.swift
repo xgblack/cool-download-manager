@@ -496,16 +496,19 @@ struct NativeSettingsGroup<Content: View>: View {
 struct NativeSettingsRow<Content: View>: View {
     let title: String
     let showsDivider: Bool
+    let minimumHeight: CGFloat
     @ViewBuilder let content: () -> Content
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     init(
         title: String,
         showsDivider: Bool = true,
+        minimumHeight: CGFloat = 50,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
         self.showsDivider = showsDivider
+        self.minimumHeight = minimumHeight
         self.content = content
     }
 
@@ -513,7 +516,7 @@ struct NativeSettingsRow<Content: View>: View {
         rowLayout
         .padding(.horizontal, 18)
         .padding(.vertical, usesStackedLayout ? 10 : 0)
-        .frame(minHeight: SettingsLayout.rowHeight)
+        .frame(minHeight: minimumHeight)
         .overlay(alignment: .bottom) {
             if showsDivider {
                 Divider()
@@ -565,15 +568,17 @@ struct NativeSettingsToggleRow: View {
     let title: String
     @Binding var isOn: Bool
     let showsDivider: Bool
+    let minimumHeight: CGFloat
 
-    init(_ title: String, isOn: Binding<Bool>, showsDivider: Bool = true) {
+    init(_ title: String, isOn: Binding<Bool>, showsDivider: Bool = true, minimumHeight: CGFloat = 50) {
         self.title = title
         _isOn = isOn
         self.showsDivider = showsDivider
+        self.minimumHeight = minimumHeight
     }
 
     var body: some View {
-        NativeSettingsRow(title: title, showsDivider: showsDivider) {
+        NativeSettingsRow(title: title, showsDivider: showsDivider, minimumHeight: minimumHeight) {
             Toggle(title, isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)

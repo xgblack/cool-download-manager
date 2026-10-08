@@ -129,6 +129,7 @@ struct DownloadProgressView: View {
             }
             actionBar
         }
+        .modifier(DownloadPanelSurface())
         .frame(minWidth: 820, maxWidth: .infinity, minHeight: 540, maxHeight: .infinity)
         .onChange(of: currentRecord.status) { _, status in
             if status == .completed {
@@ -164,7 +165,7 @@ struct DownloadProgressView: View {
     }
 
     private var header: some View {
-        NativePageHeader(
+        DownloadPanelHeader(
             title: currentRecord.name,
             subtitle: statusText,
             systemImage: headerIcon,
@@ -172,8 +173,9 @@ struct DownloadProgressView: View {
         ) {
             if let progress {
                 Text("\(Int((progress * 100).rounded()))%")
-                    .font(.title3.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(DownloadVisualStyle.percentage)
+                    .foregroundStyle(headerColor)
+                    .fixedSize()
             }
         }
     }
@@ -182,7 +184,7 @@ struct DownloadProgressView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text("总体进度")
-                    .font(.headline)
+                    .font(DownloadVisualStyle.sectionTitle)
                 Spacer()
                 Text(sizeText)
                     .font(.subheadline.monospacedDigit())
@@ -190,9 +192,7 @@ struct DownloadProgressView: View {
             }
 
             if let progress {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-                    .tint(headerColor)
+                DownloadProgressTrack(value: progress, tint: headerColor, height: 8)
             } else {
                 ProgressView()
                     .progressViewStyle(.linear)
@@ -201,11 +201,11 @@ struct DownloadProgressView: View {
             HStack(spacing: 0) {
                 metric("速度", value: speedText)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Divider().frame(height: 34)
+                Divider().frame(height: 40)
                 metric("剩余时间", value: remainingText ?? "--")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, 18)
-                Divider().frame(height: 34)
+                Divider().frame(height: 40)
                 metric(
                     "连接数（当前 / 设置上限）",
                     value: "\(activeConnectionCount) / \(connectionLimit)"
@@ -222,7 +222,8 @@ struct DownloadProgressView: View {
                 metric(
                     "断点续传",
                     value: ResumeSupportPresentation.text(currentRecord.supportsResume),
-                    valueColor: ResumeSupportPresentation.tint(currentRecord.supportsResume)
+                    valueColor: ResumeSupportPresentation.tint(currentRecord.supportsResume),
+                    valueFont: DownloadVisualStyle.numeric
                 )
             }
 
@@ -239,11 +240,11 @@ struct DownloadProgressView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Range 工作块")
-                    .font(.headline)
+                    .font(DownloadVisualStyle.sectionTitle)
                 Spacer()
                 if !currentRecord.parts.isEmpty {
                     Text("已完成 \(completedPartCount) / \(currentRecord.parts.count)")
-                        .font(.caption)
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 Button {
@@ -294,7 +295,7 @@ struct DownloadProgressView: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .frame(height: 12)
-        .background(Color.secondary.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
         .accessibilityLabel("各 Range 工作块总体进度")
     }
 
@@ -318,7 +319,7 @@ struct DownloadProgressView: View {
                 Text("速度")
                     .frame(width: 96, alignment: .trailing)
                 Text("范围")
-                    .foregroundStyle(Color.secondary.opacity(0.65))
+                    .foregroundStyle(.secondary)
                     .frame(width: 96, alignment: .trailing)
             }
             .font(.caption.weight(.semibold))
@@ -335,9 +336,7 @@ struct DownloadProgressView: View {
                         .labelStyle(.titleAndIcon)
                         .foregroundStyle(partColor(part))
                         .frame(width: 90, alignment: .leading)
-                    ProgressView(value: partProgress(part))
-                        .progressViewStyle(.linear)
-                        .tint(partColor(part))
+                    DownloadProgressTrack(value: partProgress(part), tint: partColor(part))
                         .frame(maxWidth: .infinity)
                     Text(partSizeText(part))
                         .font(.caption.monospacedDigit())
@@ -351,7 +350,7 @@ struct DownloadProgressView: View {
                         .frame(width: 96, alignment: .trailing)
                     Text(partRangeText(part))
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(Color.secondary.opacity(0.65))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(width: 96, alignment: .trailing)
@@ -408,6 +407,7 @@ struct DownloadProgressView: View {
             .keyboardShortcut(.cancelAction)
         }
         .disabled(viewState.isRemoving)
+        .controlSize(.large)
     }
 
     private func removeDownload(removePartialFiles: Bool) {
@@ -435,13 +435,18 @@ struct DownloadProgressView: View {
         }.count
     }
 
-    private func metric(_ title: String, value: String, valueColor: Color = .primary) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func metric(
+        _ title: String,
+        value: String,
+        valueColor: Color = .primary,
+        valueFont: Font = DownloadVisualStyle.metric
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.callout.monospacedDigit())
+                .font(valueFont)
                 .foregroundStyle(valueColor)
         }
     }
@@ -466,7 +471,7 @@ struct DownloadProgressView: View {
         case .retrying: return "重试中"
         case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
-        case .failed: return currentRecord.error.map { "失败：\($0)" } ?? "失败"
+        case .failed: return "下载失败"
         case .cancelled: return "已取消"
         }
     }
@@ -482,13 +487,7 @@ struct DownloadProgressView: View {
     }
 
     private var headerColor: Color {
-        switch currentRecord.status {
-        case .completed: return .green
-        case .failed: return .red
-        case .waitingForSourceRefresh: return .yellow
-        case .paused, .cancelled: return .orange
-        default: return .accentColor
-        }
+        DownloadVisualStyle.tint(for: currentRecord.status)
     }
 
     private var requiresSourceRefresh: Bool {
@@ -549,9 +548,9 @@ struct DownloadProgressView: View {
     }
 
     private func partColor(_ part: DownloadPart) -> Color {
-        if part.completed || partProgress(part) >= 1 { return .green }
-        if currentRecord.status == .failed || currentRecord.status == .cancelled { return .red }
-        if currentRecord.status == .paused { return .orange }
+        if part.completed || partProgress(part) >= 1 { return DownloadVisualStyle.success }
+        if currentRecord.status == .failed || currentRecord.status == .cancelled { return DownloadVisualStyle.failure }
+        if currentRecord.status == .paused { return DownloadVisualStyle.warning }
         if part.downloaded > 0 { return .accentColor }
         return .secondary.opacity(0.45)
     }
@@ -592,7 +591,7 @@ private struct PartProgressSegment: View {
 
     var body: some View {
         GeometryReader { proxy in
-            color.opacity(0.18)
+            Color.primary.opacity(0.07)
                 .overlay(alignment: .leading) {
                     color
                         .frame(width: proxy.size.width * CGFloat(progress))
