@@ -751,8 +751,21 @@ final class DownloadListStore: ObservableObject {
 
     func removeSelected(removeFiles: Bool = false) {
         perform(ids: Array(selectedIDs)) { service, ids in
-            try await service.remove(ids: ids, removeFiles: removeFiles)
+            try await service.remove(ids: ids, removeFiles: removeFiles, removePartialFiles: removeFiles)
         }
+    }
+
+    /// Progress panels remove only their own record and optional partial file,
+    /// preserving completed destinations and the main window's other selections.
+    func remove(id: DownloadID, removePartialFiles: Bool) async throws {
+        guard let service else {
+            throw NSError(domain: "DownloadListStore", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "下载核心尚未准备好"
+            ])
+        }
+        suppressProgressPresentation(for: [id])
+        try await service.remove(ids: [id], removeFiles: false, removePartialFiles: removePartialFiles)
+        await reload()
     }
 
     func removeCompleted() {

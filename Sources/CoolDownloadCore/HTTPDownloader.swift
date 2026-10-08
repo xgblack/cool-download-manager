@@ -349,6 +349,10 @@ public final class HTTPDownloader: @unchecked Sendable {
                     }
                 }
             }
+            // AsyncThrowingStream can finish normally when its consumer is
+            // cancelled. Preserve bytes already written instead of treating
+            // cancellation as a short response and truncating the part file.
+            try Task.checkCancellation()
             if !buffer.isEmpty {
                 try await writer.append(buffer)
                 writtenBytes += Int64(buffer.count)
@@ -480,6 +484,7 @@ public final class HTTPDownloader: @unchecked Sendable {
                 written += chunkLength
                 await progress?(written)
             }
+            try Task.checkCancellation()
             guard written == expectedBodyLength else {
                 throw DownloadCoreError.responseMismatch(
                     "请求范围实际接收 \(written) 字节，应为 \(expectedBodyLength) 字节"

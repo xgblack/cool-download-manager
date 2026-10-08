@@ -752,29 +752,41 @@ public actor DownloadService {
         }
     }
 
-    public func remove(ids: [DownloadID], removeFiles: Bool) async throws {
+    /// Stops active work before removing records. An explicit partial-file
+    /// choice takes precedence over the cancellation setting; nil keeps the
+    /// configured behavior. removeFiles also removes completed destinations.
+    public func remove(
+        ids: [DownloadID],
+        removeFiles: Bool,
+        removePartialFiles: Bool? = nil
+    ) async throws {
         for id in ids {
-            guard let record = records[id] else {
+            guard records[id] != nil else {
                 throw DownloadCoreError.notFound(id)
             }
             guard removingIDs.insert(id).inserted else { continue }
             defer { removingIDs.remove(id) }
-            let queueID = record.queueID
             if let task = tasks[id] {
                 if !finalizingIDs.contains(id) { task.cancel() }
                 await task.value
             }
+            guard let record = records[id] else {
+                throw DownloadCoreError.notFound(id)
+            }
+            let queueID = record.queueID
             queuedIDs.removeAll { $0 == id }
             tasks[id] = nil
             activeIDs.remove(id)
             if removeFiles {
                 if FileManager.default.fileExists(atPath: record.destinationURL.path) {
-                    try FileManager.default.removeItem(at: record.destinationURL)
+                    try FileManager.default.trashItem(at: record.destinationURL, resultingItemURL: nil)
                 }
             }
-            if removeFiles || (schedulerConfiguration.deletePartialFileOnDownloadCancellation && record.status != .completed) {
+            let shouldRemovePartialFiles = removePartialFiles
+                ?? (schedulerConfiguration.deletePartialFileOnDownloadCancellation && record.status != .completed)
+            if removeFiles || shouldRemovePartialFiles {
                 if FileManager.default.fileExists(atPath: record.incompleteURL.path) {
-                    try FileManager.default.removeItem(at: record.incompleteURL)
+                    try FileManager.default.trashItem(at: record.incompleteURL, resultingItemURL: nil)
                 }
             }
             try await store.remove(id: id)

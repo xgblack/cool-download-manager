@@ -135,6 +135,32 @@ struct DownloadProgressView: View {
                 onClose()
             }
         }
+        .onChange(of: store.record(id: record.id) == nil) { _, isRemoved in
+            if isRemoved { onClose() }
+        }
+        .confirmationDialog(
+            "停止并删除此下载？",
+            isPresented: $viewState.isShowingRemoveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("仅删除记录", role: .destructive) {
+                removeDownload(removePartialFiles: false)
+            }
+            Button("删除记录和临时文件", role: .destructive) {
+                removeDownload(removePartialFiles: true)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将停止“\(currentRecord.name)”的下载。仅删除记录会保留临时文件；同时删除临时文件会将其移到废纸篓。")
+        }
+        .alert("无法删除下载", isPresented: Binding(
+            get: { viewState.errorMessage != nil },
+            set: { if !$0 { viewState.errorMessage = nil } }
+        )) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text(viewState.errorMessage ?? "请重试。")
+        }
     }
 
     private var header: some View {
@@ -370,10 +396,32 @@ struct DownloadProgressView: View {
             .disabled(store.record(id: currentRecord.id) == nil)
 
             Spacer()
+            Button(viewState.isRemoving ? "正在停止并删除…" : "停止并删除", systemImage: "trash", role: .destructive) {
+                viewState.isShowingRemoveConfirmation = true
+            }
+            .foregroundStyle(.red)
+            .disabled(viewState.isRemoving || store.record(id: currentRecord.id) == nil)
+
             Button("关闭") {
                 onClose()
             }
             .keyboardShortcut(.cancelAction)
+        }
+        .disabled(viewState.isRemoving)
+    }
+
+    private func removeDownload(removePartialFiles: Bool) {
+        guard !viewState.isRemoving, store.record(id: record.id) != nil else { return }
+        viewState.isRemoving = true
+        viewState.errorMessage = nil
+        Task { @MainActor in
+            do {
+                try await store.remove(id: record.id, removePartialFiles: removePartialFiles)
+                onClose()
+            } catch {
+                viewState.isRemoving = false
+                viewState.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -532,6 +580,9 @@ struct DownloadProgressView: View {
 @MainActor
 private final class ProgressViewState: ObservableObject {
     @Published var showsPartDetails = false
+    @Published var isShowingRemoveConfirmation = false
+    @Published var isRemoving = false
+    @Published var errorMessage: String?
 }
 
 private struct PartProgressSegment: View {
