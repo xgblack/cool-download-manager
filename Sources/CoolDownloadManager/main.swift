@@ -110,6 +110,11 @@ struct CoolDownloadManagerApp: App {
                 : .suppressed
         )
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新") {
+                    coordinator.checkForUpdates()
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("新建下载") {
                     coordinator.presentAddDownload()
@@ -193,9 +198,6 @@ struct CoolDownloadManagerApp: App {
                 }
                 Button("捐赠") {
                     openExternal("https://github.com/xgblack/cool-download-manager")
-                }
-                Button("检查更新") {
-                    coordinator.checkForUpdates()
                 }
                 Button("关于") {
                     NSApp.orderFrontStandardAboutPanel(nil)
