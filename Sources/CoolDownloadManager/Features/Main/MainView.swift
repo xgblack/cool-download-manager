@@ -790,10 +790,15 @@ private struct DownloadTableRow: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Label(statusText, systemImage: statusIcon)
+                    Label {
+                        Text(statusText)
+                            .foregroundStyle(DownloadVisualStyle.tint(for: record.status))
+                    } icon: {
+                        Image(systemName: statusIcon)
+                            .foregroundStyle(iconColor)
+                    }
                         .font(.caption.weight(.medium))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(iconColor)
+                        .symbolRenderingMode(.monochrome)
                     Spacer(minLength: 4)
                     if let percent {
                         Text("\(percent)%")
@@ -804,7 +809,7 @@ private struct DownloadTableRow: View {
                 if let total = record.totalBytes, total > 0 {
                     DownloadProgressTrack(
                         value: Double(record.downloadedBytes) / Double(total),
-                        tint: DownloadVisualStyle.progressTint(for: record.status)
+                        tint: iconColor
                     )
                 }
             }
@@ -969,6 +974,6 @@ private struct DownloadTableRow: View {
     }
 
     private var iconColor: Color {
-        DownloadVisualStyle.tint(for: record.status)
+        DownloadVisualStyle.indicatorTint(for: record.status)
     }
 }

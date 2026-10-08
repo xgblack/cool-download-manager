@@ -169,7 +169,7 @@ struct DownloadProgressView: View {
             title: currentRecord.name,
             subtitle: statusText,
             systemImage: headerIcon,
-            tint: headerColor
+            tint: DownloadVisualStyle.indicatorTint(for: currentRecord.status)
         ) {
             if let progress {
                 Text("\(Int((progress * 100).rounded()))%")
@@ -194,7 +194,7 @@ struct DownloadProgressView: View {
             if let progress {
                 DownloadProgressTrack(
                     value: progress,
-                    tint: DownloadVisualStyle.progressTint(for: currentRecord.status),
+                    tint: DownloadVisualStyle.indicatorTint(for: currentRecord.status),
                     height: 8
                 )
             } else {
@@ -290,7 +290,7 @@ struct DownloadProgressView: View {
                 ForEach(Array(sortedParts.enumerated()), id: \.element.id) { index, part in
                     PartProgressSegment(
                         part: part,
-                        color: partColor(part, isProgressTrack: true),
+                        color: partColor(part, isIndicator: true),
                         width: layout.segmentWidths[index]
                     )
                 }
@@ -336,11 +336,17 @@ struct DownloadProgressView: View {
                 HStack(spacing: 12) {
                     Text("#\(part.id + 1)")
                         .frame(width: 50, alignment: .leading)
-                    Label(partStatus(part), systemImage: partIcon(part))
+                    Label {
+                        Text(partStatus(part))
+                            .foregroundStyle(partColor(part))
+                    } icon: {
+                        Image(systemName: partIcon(part))
+                            .foregroundStyle(partColor(part, isIndicator: true))
+                    }
                         .labelStyle(.titleAndIcon)
-                        .foregroundStyle(partColor(part))
+                        .symbolRenderingMode(.monochrome)
                         .frame(width: 90, alignment: .leading)
-                    DownloadProgressTrack(value: partProgress(part), tint: partColor(part, isProgressTrack: true))
+                    DownloadProgressTrack(value: partProgress(part), tint: partColor(part, isIndicator: true))
                         .frame(maxWidth: .infinity)
                     Text(partSizeText(part))
                         .font(.caption.monospacedDigit())
@@ -551,13 +557,13 @@ struct DownloadProgressView: View {
         return "circle"
     }
 
-    private func partColor(_ part: DownloadPart, isProgressTrack: Bool = false) -> Color {
+    private func partColor(_ part: DownloadPart, isIndicator: Bool = false) -> Color {
         if part.completed || partProgress(part) >= 1 {
-            return isProgressTrack ? DownloadVisualStyle.progressTint(for: .completed) : DownloadVisualStyle.success
+            return isIndicator ? DownloadVisualStyle.indicatorTint(for: .completed) : DownloadVisualStyle.success
         }
         if currentRecord.status == .failed || currentRecord.status == .cancelled { return DownloadVisualStyle.failure }
         if currentRecord.status == .paused {
-            return isProgressTrack ? DownloadVisualStyle.progressTint(for: .paused) : DownloadVisualStyle.warning
+            return isIndicator ? DownloadVisualStyle.indicatorTint(for: .paused) : DownloadVisualStyle.warning
         }
         if part.downloaded > 0 { return .accentColor }
         return .secondary.opacity(0.45)
