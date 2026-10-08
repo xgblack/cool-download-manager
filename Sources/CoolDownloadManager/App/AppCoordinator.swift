@@ -526,93 +526,16 @@ struct BrowserDownloadRequestQueue: Equatable {
     /// different presentation metadata. Compare only the source identity so a
     /// fallback request cannot become a second confirmation session.
     private struct BrowserDownloadRequestKey: Equatable {
-        private struct HeaderKey: Equatable {
-            let name: String
-            let value: String
-        }
-
-        private struct ItemKey: Equatable {
-            let type: String
-            let link: String
-            let headers: [HeaderKey]
-            let downloadPage: String?
-        }
-
-        private let items: [ItemKey]
+        private let items: [BrowserDownloadIdentity]
 
         init(_ request: AddDownloadsRequest) {
-            items = request.items.map { item in
-                ItemKey(
-                    type: item.type.rawValue.lowercased(),
-                    link: Self.normalizedURL(item.link),
-                    headers: Self.normalizedHeaders(item.headers),
-                    downloadPage: Self.normalizedOptionalURL(item.downloadPage)
-                )
-            }
+            items = request.items.map(BrowserDownloadIdentity.init)
         }
 
-        /// HTTP and native-messaging integration can omit optional source
-        /// metadata on one path. Treat those requests as the same intent,
-        /// while retaining separate requests when both paths provide
-        /// conflicting credentials or referrers.
         func isCompatible(with other: Self) -> Bool {
-            guard items.count == other.items.count else { return false }
-            return zip(items, other.items).allSatisfy { lhs, rhs in
-                lhs.type == rhs.type
-                    && lhs.link == rhs.link
-                    && optionalHeadersAreCompatible(lhs.headers, rhs.headers)
-                    && optionalValuesAreCompatible(lhs.downloadPage, rhs.downloadPage)
+            items.count == other.items.count && zip(items, other.items).allSatisfy {
+                $0.isCompatible(with: $1)
             }
-        }
-
-        private func optionalHeadersAreCompatible(
-            _ lhs: [HeaderKey],
-            _ rhs: [HeaderKey]
-        ) -> Bool {
-            lhs.isEmpty || rhs.isEmpty || lhs == rhs
-        }
-
-        private func optionalValuesAreCompatible(
-            _ lhs: String?,
-            _ rhs: String?
-        ) -> Bool {
-            lhs == nil || rhs == nil || lhs == rhs
-        }
-
-        private static func normalizedOptionalURL(_ value: String?) -> String? {
-            guard let value else { return nil }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return normalizedURL(trimmed)
-        }
-
-        private static func normalizedURL(_ value: String) -> String {
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty,
-                  var components = URLComponents(string: trimmed) else {
-                return trimmed
-            }
-            components.scheme = components.scheme?.lowercased()
-            components.host = components.host?.lowercased()
-            return components.string ?? trimmed
-        }
-
-        private static func normalizedHeaders(
-            _ headers: [String: String]?
-        ) -> [HeaderKey] {
-            (headers ?? [:])
-                .map { name, value in
-                    HeaderKey(
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-                        value: value
-                    )
-                }
-                .sorted {
-                    if $0.name != $1.name {
-                        return $0.name < $1.name
-                    }
-                    return $0.value < $1.value
-                }
         }
     }
 

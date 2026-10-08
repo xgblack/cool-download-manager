@@ -209,4 +209,27 @@ struct ThemeTests {
         #expect(queue.enqueue(hls) == nil)
         #expect(queue.pending == [hls])
     }
+
+    @Test("GitHub 原链接与重定向链接只显示一个确认窗口，取消也抑制另一种地址", arguments: [false, true])
+    func browserConfirmationQueueMatchesGitHubRedirects(cdnFirst: Bool) {
+        let page = "https://github.com/chen08209/FlClash/releases/tag/v0.8.99"
+        let original = AddDownloadsRequest(items: [IntegrationDownloadCredential(
+            link: "https://github.com/chen08209/FlClash/releases/download/v0.8.99/file.apk",
+            headers: ["Cookie": "fixture=value"], downloadPage: page
+        )])
+        let redirected = AddDownloadsRequest(items: [IntegrationDownloadCredential(
+            link: "https://release-assets.githubusercontent.com/github-production-release-asset/123/fixture?rscd=attachment%3B%20filename%3Dfile.apk",
+            downloadPage: page
+        )])
+        let first = cdnFirst ? redirected : original
+        let fallback = cdnFirst ? original : redirected
+        var queue = BrowserDownloadRequestQueue()
+        let now = Date(timeIntervalSince1970: 4_000)
+        #expect(queue.enqueue(first, now: now) == first)
+        #expect(queue.enqueue(fallback, now: now) == nil)
+        #expect(queue.pending.isEmpty)
+        #expect(queue.cancel(first, now: now) == nil)
+        #expect(queue.enqueue(fallback, now: now.addingTimeInterval(1)) == nil)
+        #expect(queue.enqueue(fallback, now: now.addingTimeInterval(11)) == fallback)
+    }
 }

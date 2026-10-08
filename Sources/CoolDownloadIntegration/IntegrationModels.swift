@@ -172,12 +172,32 @@ public extension DownloadIntegrationHandler {
     }
 }
 
-public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
+public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
     private let service: DownloadService
     private let queuesProvider: @Sendable () async throws -> [IntegrationQueue]
     private let queueItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)?
     private let categoryItemAdder: (@Sendable (DownloadID, DownloadID) async throws -> Void)?
     private let interactiveAddHandler: (@Sendable (AddDownloadsRequest) async throws -> Void)?
+
+    private struct BrowserSubmission {
+        let token: UUID
+        let identity: BrowserDownloadIdentity
+        let creation: Task<DownloadID, any Error>
+        var completedAt: ContinuousClock.Instant?
+        var start: BrowserStart?
+    }
+
+    private struct BrowserStart {
+        let token: UUID
+        let task: Task<Void, any Error>
+        var completedAt: ContinuousClock.Instant?
+    }
+
+    // The upstream protocol has no operation ID. Share this bounded-time
+    // defense across HTTP and native messaging, including actor reentrancy
+    // while a task is being persisted. Intentional later adds remain valid.
+    private var browserSubmissions: [BrowserSubmission] = []
+    private static let browserSuppressionDuration: Duration = .seconds(4)
 
     public init(
         service: DownloadService,
@@ -203,15 +223,89 @@ public struct CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
         }
 
         for item in request.items {
-            let id = try await service.add(
-                AddDownloadRequest(
-                    source: item.asCoreSource(),
-                    start: false
-                )
-            )
+            let (id, token) = try await addBrowserItem(item)
             if request.options.silentStart {
-                try await service.start(id: id)
+                try await startBrowserItem(id: id, token: token)
             }
+        }
+    }
+
+    private func addBrowserItem(_ item: IntegrationDownloadCredential) async throws -> (DownloadID, UUID) {
+        try DownloadSourceSecurity.validate(item.asCoreSource())
+        let now = ContinuousClock.now
+        browserSubmissions.removeAll { submission in
+            if let start = submission.start, start.completedAt == nil { return false }
+            let completedAt = submission.start?.completedAt ?? submission.completedAt
+            return completedAt.map { $0.duration(to: now) >= Self.browserSuppressionDuration } ?? false
+        }
+        let identity = BrowserDownloadIdentity(item)
+        let submission: BrowserSubmission
+        if let existing = browserSubmissions.first(where: { $0.identity.isCompatible(with: identity) }) {
+            submission = existing
+        } else {
+            submission = BrowserSubmission(
+                token: UUID(),
+                identity: identity,
+                creation: Task { [service] in
+                    try await service.add(AddDownloadRequest(source: item.asCoreSource(), start: false))
+                }
+            )
+            browserSubmissions.append(submission)
+        }
+        do {
+            let id = try await submission.creation.value
+            if let index = browserSubmissions.firstIndex(where: { $0.token == submission.token }),
+               browserSubmissions[index].completedAt == nil {
+                browserSubmissions[index].completedAt = .now
+            }
+            // A user can delete a just-created task and immediately try again.
+            guard await service.snapshot().downloads.contains(where: { $0.id == id }) else {
+                browserSubmissions.removeAll { $0.token == submission.token }
+                return try await addBrowserItem(item)
+            }
+            return (id, submission.token)
+        } catch {
+            // Do not poison the retry window on failure. Successful earlier
+            // items in a partially failed batch retain their own reservations.
+            browserSubmissions.removeAll { $0.token == submission.token }
+            throw error
+        }
+    }
+
+    private func startBrowserItem(id: DownloadID, token: UUID) async throws {
+        guard let index = browserSubmissions.firstIndex(where: { $0.token == token }) else {
+            throw DownloadCoreError.notFound(id)
+        }
+        let start: BrowserStart
+        if let existing = browserSubmissions[index].start {
+            start = existing
+        } else {
+            start = BrowserStart(token: UUID(), task: Task { [service] in
+                guard let record = await service.snapshot().downloads.first(where: { $0.id == id }) else {
+                    throw DownloadCoreError.notFound(id)
+                }
+                guard record.status != .completed else { return }
+                try await service.start(id: id)
+            })
+            browserSubmissions[index].start = start
+        }
+        do {
+            try await start.task.value
+            if let index = browserSubmissions.firstIndex(where: { $0.token == token }),
+               browserSubmissions[index].start?.token == start.token,
+               browserSubmissions[index].start?.completedAt == nil {
+                browserSubmissions[index].start?.completedAt = .now
+            }
+        } catch {
+            // Keep the created task when starting fails, so a transport retry
+            // retries the start rather than creating a second task. Matching
+            // tokens keep a late failed waiter from clearing a newer retry.
+            if let index = browserSubmissions.firstIndex(where: { $0.token == token }),
+               browserSubmissions[index].start?.token == start.token {
+                browserSubmissions[index].start = nil
+                browserSubmissions[index].completedAt = .now
+            }
+            throw error
         }
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-enum DownloadFileNameResolver {
+public enum DownloadFileNameResolver {
     private static let contentDispositionQueryNames = [
         "response-content-disposition",
         "rscd"
@@ -10,7 +10,7 @@ enum DownloadFileNameResolver {
         fromURLQuery(link) ?? pathOrHost(fromURL: link)
     }
 
-    static func fromURLQuery(_ link: String) -> String? {
+    public static func fromURLQuery(_ link: String) -> String? {
         guard let query = URLComponents(string: link)?.percentEncodedQuery else {
             return nil
         }
