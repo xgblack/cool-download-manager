@@ -804,7 +804,7 @@ private struct DownloadTableRow: View {
                 if let total = record.totalBytes, total > 0 {
                     DownloadProgressTrack(
                         value: Double(record.downloadedBytes) / Double(total),
-                        tint: iconColor
+                        tint: DownloadVisualStyle.progressTint(for: record.status)
                     )
                 }
             }

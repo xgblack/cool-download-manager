@@ -192,7 +192,11 @@ struct DownloadProgressView: View {
             }
 
             if let progress {
-                DownloadProgressTrack(value: progress, tint: headerColor, height: 8)
+                DownloadProgressTrack(
+                    value: progress,
+                    tint: DownloadVisualStyle.progressTint(for: currentRecord.status),
+                    height: 8
+                )
             } else {
                 ProgressView()
                     .progressViewStyle(.linear)
@@ -286,7 +290,7 @@ struct DownloadProgressView: View {
                 ForEach(Array(sortedParts.enumerated()), id: \.element.id) { index, part in
                     PartProgressSegment(
                         part: part,
-                        color: partColor(part),
+                        color: partColor(part, isProgressTrack: true),
                         width: layout.segmentWidths[index]
                     )
                 }
@@ -336,7 +340,7 @@ struct DownloadProgressView: View {
                         .labelStyle(.titleAndIcon)
                         .foregroundStyle(partColor(part))
                         .frame(width: 90, alignment: .leading)
-                    DownloadProgressTrack(value: partProgress(part), tint: partColor(part))
+                    DownloadProgressTrack(value: partProgress(part), tint: partColor(part, isProgressTrack: true))
                         .frame(maxWidth: .infinity)
                     Text(partSizeText(part))
                         .font(.caption.monospacedDigit())
@@ -547,10 +551,14 @@ struct DownloadProgressView: View {
         return "circle"
     }
 
-    private func partColor(_ part: DownloadPart) -> Color {
-        if part.completed || partProgress(part) >= 1 { return DownloadVisualStyle.success }
+    private func partColor(_ part: DownloadPart, isProgressTrack: Bool = false) -> Color {
+        if part.completed || partProgress(part) >= 1 {
+            return isProgressTrack ? DownloadVisualStyle.progressTint(for: .completed) : DownloadVisualStyle.success
+        }
         if currentRecord.status == .failed || currentRecord.status == .cancelled { return DownloadVisualStyle.failure }
-        if currentRecord.status == .paused { return DownloadVisualStyle.warning }
+        if currentRecord.status == .paused {
+            return isProgressTrack ? DownloadVisualStyle.progressTint(for: .paused) : DownloadVisualStyle.warning
+        }
         if part.downloaded > 0 { return .accentColor }
         return .secondary.opacity(0.45)
     }

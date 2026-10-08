@@ -17,6 +17,17 @@ enum DownloadVisualStyle {
     static let success = adaptiveColor(light: 0x24754A, dark: 0x63D995)
     static let warning = adaptiveColor(light: 0x986018, dark: 0xF3B866)
     static let failure = adaptiveColor(light: 0xB93237, dark: 0xFF827F)
+    // Progress fills can be brighter than small status labels on light surfaces.
+    private static let progressSuccess = adaptiveColor(light: 0x17B26A, dark: 0x47E58C)
+    private static let progressWarning = adaptiveColor(light: 0xF0A11A, dark: 0xFFC452)
+
+    static func progressTint(for status: DownloadStatus) -> Color {
+        switch status {
+        case .completed: return progressSuccess
+        case .paused, .retrying, .waitingForSourceRefresh: return progressWarning
+        default: return tint(for: status)
+        }
+    }
 
     static func tint(for status: DownloadStatus) -> Color {
         switch status {
