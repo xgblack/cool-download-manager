@@ -132,6 +132,11 @@ public actor DownloadService {
         }
     }
 
+    /// Changes only the shared limiter; active HTTP/HLS tasks retain their identity.
+    public func updateGlobalSpeedLimit(bytesPerSecond: Int64) async {
+        await globalRateLimiter.updateLimit(bytesPerSecond: bytesPerSecond)
+    }
+
     /// Applies settings that affect future scheduling and new destinations.
     /// Active jobs are normally left intact; lowering the FD budget can pause
     /// the newest excess jobs so every remaining task retains one part-file
@@ -699,6 +704,8 @@ public actor DownloadService {
                 try FileManager.default.removeItem(at: record.incompleteURL)
             }
             record.status = .added
+            record.startedAt = nil
+            record.completedAt = nil
             record.downloadedBytes = 0
             record.totalBytes = nil
             record.etag = nil
@@ -965,6 +972,7 @@ public actor DownloadService {
 
         do {
             record.status = .downloading
+            if record.startedAt == nil { record.startedAt = Date() }
             record.updatedAt = Date()
             record.revision += 1
             records[id] = record
@@ -1016,6 +1024,7 @@ public actor DownloadService {
             } else if let current = records[id], current.status != .paused, current.status != .failed {
                 var failed = current
                 failed.status = .failed
+                failed.completedAt = nil
                 failed.error = error.localizedDescription
                 failed.updatedAt = Date()
                 failed.revision += 1
@@ -1128,6 +1137,7 @@ public actor DownloadService {
             completed.incompleteFileName = "\(completedName).cooldm.part"
         }
         completed.status = .completed
+        completed.completedAt = Date()
         completed.downloadedBytes = finalLength
         completed.totalBytes = reportedTotal ?? finalLength
         completed.etag = etag ?? completed.etag

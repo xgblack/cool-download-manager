@@ -25,6 +25,9 @@ public enum DownloadSourceRefreshReason: String, Codable, Sendable, Equatable {
 }
 
 public struct DownloadSchedulerConfiguration: Sendable, Equatable {
+    public static let defaultMinimumPartSize: Int64 = 16 * 1024 * 1024
+    public static let minimumAllowedPartSize: Int64 = 1024
+    public static let maximumAllowedPartSize: Int64 = 2 * 1024 * 1024 * 1024
     public let maxConcurrentDownloads: Int
     public let maxConnectionsPerDownload: Int
     public let dynamicPartCreation: Bool
@@ -55,7 +58,7 @@ public struct DownloadSchedulerConfiguration: Sendable, Equatable {
         maxConcurrentDownloads: Int = 3,
         maxConnectionsPerDownload: Int = 1,
         dynamicPartCreation: Bool = true,
-        minimumPartSize: Int64 = 16 * 1024 * 1024,
+        minimumPartSize: Int64 = Self.defaultMinimumPartSize,
         maxTotalConnections: Int = 16,
         maxConcurrentRetries: Int = 2,
         maxOpenFileDescriptors: Int = 128,
@@ -199,6 +202,10 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
     public var queueID: DownloadID?
     public var categoryID: DownloadID?
     public var createdAt: Date
+    /// First execution in the current download cycle; queue waiting is excluded.
+    public var startedAt: Date?
+    /// Successful finalization time, independent of later metadata edits.
+    public var completedAt: Date?
     public var updatedAt: Date
     public var error: String?
     /// Optional expected checksum in the historical `ALGORITHM:hex` format.
@@ -236,7 +243,9 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         sourceRefreshReason: DownloadSourceRefreshReason? = nil,
         hlsResumeSnapshot: HLSResumeSnapshot? = nil,
         hlsRenditions: [HLSRendition]? = nil,
-        revision: Int64 = 1
+        revision: Int64 = 1,
+        startedAt: Date? = nil,
+        completedAt: Date? = nil
     ) {
         self.id = id
         self.source = source
@@ -252,6 +261,8 @@ public struct DownloadRecord: Codable, Sendable, Equatable, Identifiable {
         self.queueID = queueID
         self.categoryID = categoryID
         self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.completedAt = completedAt
         self.updatedAt = updatedAt
         self.error = error
         self.fileChecksum = fileChecksum

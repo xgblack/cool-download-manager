@@ -16,13 +16,19 @@ public enum DownloadFileNameResolver {
         }
 
         var values: [String: String] = [:]
+        var ordinaryFileName: String?
         for pair in query.split(separator: "&", omittingEmptySubsequences: false) {
             let components = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard let rawName = components.first else { continue }
             let name = decodeFormComponent(String(rawName)).lowercased()
-            guard contentDispositionQueryNames.contains(name) else { continue }
             let rawValue = components.count > 1 ? String(components[1]) : ""
-            values[name] = decodeFormComponent(rawValue)
+            let value = decodeFormComponent(rawValue)
+            if name == "filename", ordinaryFileName == nil {
+                ordinaryFileName = sanitized(value)
+            }
+            if contentDispositionQueryNames.contains(name) {
+                values[name] = value
+            }
         }
 
         for name in contentDispositionQueryNames {
@@ -30,7 +36,7 @@ public enum DownloadFileNameResolver {
                 return fileName
             }
         }
-        return nil
+        return ordinaryFileName
     }
 
     static func pathOrHost(fromURL link: String) -> String? {

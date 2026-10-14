@@ -149,7 +149,9 @@ public enum LegacyJSONCodec {
             error: string(object, keys: ["error", "errorMessage"]),
             fileChecksum: fileChecksum,
             taskSettings: taskSettings,
-            revision: integer(object, keys: ["revision"]) ?? 1
+            revision: integer(object, keys: ["revision"]) ?? 1,
+            startedAt: date(object, keys: ["startedAt", "startTime"]),
+            completedAt: date(object, keys: ["completedAt", "completeTime"])
         )
         return Decoded(record: record, rawObject: rawObject)
     }
@@ -206,6 +208,8 @@ public enum LegacyJSONCodec {
         object["supportsResume"] = record.supportsResume.map(JSONValue.bool) ?? .null
         object["dateAdded"] = .number(String(Int64(record.createdAt.timeIntervalSince1970 * 1000)))
         object["updatedAt"] = .number(String(Int64(record.updatedAt.timeIntervalSince1970 * 1000)))
+        object["startTime"] = record.startedAt.map { .number(String(Int64($0.timeIntervalSince1970 * 1000))) } ?? .null
+        object["completeTime"] = record.completedAt.map { .number(String(Int64($0.timeIntervalSince1970 * 1000))) } ?? .null
         object["status"] = .string(legacyStatus(record.status))
         object["downloadedBytes"] = .number(String(record.downloadedBytes))
         object["queueId"] = record.queueID.map { .number(String($0)) } ?? .null

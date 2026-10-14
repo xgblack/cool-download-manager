@@ -7,6 +7,7 @@ struct CompletionView: View {
     @ObservedObject var store: DownloadListStore
     @ObservedObject var coordinator: AppCoordinator
     let onClose: () -> Void
+    @State private var openError: String?
 
     private var currentRecord: DownloadRecord {
         store.record(id: record.id) ?? record
@@ -34,6 +35,9 @@ struct CompletionView: View {
             }
             actionBar
         }
+        .alert("无法打开文件", isPresented: Binding(
+            get: { openError != nil }, set: { if !$0 { openError = nil } }
+        )) { Button("确定", role: .cancel) {} } message: { Text(openError ?? "") }
         .frame(minWidth: 640, maxWidth: .infinity, minHeight: 360, maxHeight: .infinity)
     }
 
@@ -72,9 +76,13 @@ struct CompletionView: View {
             }
             .disabled(currentRecord.status != .completed)
 
+            OpenWithMenu(record: currentRecord, coordinator: coordinator, onFailure: { openError = $0 }, onOpened: onClose)
+
             Button("打开文件", systemImage: "arrow.up.right.square") {
-                coordinator.openFile(currentRecord)
-                onClose()
+                DownloadFileOpener.open(currentRecord) { message in
+                    if let message { openError = message }
+                    else { onClose() }
+                }
             }
             .buttonStyle(.borderedProminent)
             .disabled(currentRecord.status != .completed)

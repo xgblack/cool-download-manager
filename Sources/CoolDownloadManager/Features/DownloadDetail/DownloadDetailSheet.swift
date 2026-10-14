@@ -80,6 +80,9 @@ struct DownloadDetailSheet: View {
             NativeSettingsGroup(title: "下载信息") {
                 detailRow("状态", statusText)
                 detailRow("文件大小", sizeText)
+                detailRow("添加时间", DownloadTimePresentation.full(record.createdAt))
+                detailRow("开始时间", DownloadTimePresentation.full(record.startedAt))
+                detailRow("完成时间", DownloadTimePresentation.full(record.completedAt))
                 detailRow(
                     "已下载",
                     ByteCountText.string(fromByteCount: record.downloadedBytes, formatter: byteFormatter)

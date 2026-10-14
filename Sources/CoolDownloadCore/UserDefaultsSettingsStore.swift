@@ -73,7 +73,8 @@ public actor SettingsStore {
             throw SettingsStoreError.readFailed(settingsURL, error.localizedDescription)
         }
         let storedAPIKey = defaults.defaults.object(forKey: Keys.apiAuthKey.name) as? String
-        if typed.value(Keys.schemaVersion, default: 0) == 0 || storedAPIKey == nil {
+        if typed.value(Keys.schemaVersion, default: 0) == 0 || storedAPIKey == nil
+            || defaults.defaults.object(forKey: Keys.speedLimiterEnabled.name) == nil {
             try write(value)
         }
         cached = value
@@ -93,6 +94,21 @@ public actor SettingsStore {
         return settings
     }
 
+    public func toggleSpeedLimiter() throws -> AppSettingsModel {
+        let current = try load()
+        return try saveSpeedLimiterEnabled(!current.speedLimiterEnabled)
+    }
+
+    /// The menu-bar switch must not rewrite unrelated settings or credentials.
+    public func saveSpeedLimiterEnabled(_ enabled: Bool) throws -> AppSettingsModel {
+        var value = try load()
+        value.speedLimiterEnabled = enabled
+        try validate(value)
+        typed.set(enabled, for: Keys.speedLimiterEnabled)
+        cached = value
+        return value
+    }
+
     /// Update only this preference; unrelated credentials and settings stay untouched.
     @discardableResult
     public func saveDefaultDownloadFolder(_ folder: URL) throws -> AppSettingsModel {
@@ -107,7 +123,9 @@ public actor SettingsStore {
     }
 
     private func read(fallback d: AppSettingsModel) throws -> AppSettingsModel {
-        AppSettingsModel(
+        let storedLimit = defaults.defaults.object(forKey: Keys.speedLimit.name) as? Int64
+        let storedEnabled = defaults.defaults.object(forKey: Keys.speedLimiterEnabled.name) as? Bool
+        return AppSettingsModel(
             theme: typed.value(Keys.theme, default: d.theme),
             uiScale: defaults.defaults.object(forKey: Keys.uiScale.name) as? Double,
             mergeTopBarWithTitleBar: typed.value(Keys.mergeTopBarWithTitleBar, default: d.mergeTopBarWithTitleBar),
@@ -125,7 +143,7 @@ public actor SettingsStore {
             showDownloadCompletionDialog: typed.value(Keys.showDownloadCompletionDialog, default: d.showDownloadCompletionDialog),
             focusDownloadProgressDialogOnStart: typed.value(Keys.focusDownloadProgressDialogOnStart, default: d.focusDownloadProgressDialogOnStart),
             focusDownloadCompletionDialogOnFinish: typed.value(Keys.focusDownloadCompletionDialogOnFinish, default: d.focusDownloadCompletionDialogOnFinish),
-            speedLimit: typed.value(Keys.speedLimit, default: d.speedLimit),
+            speedLimit: storedLimit == 0 && storedEnabled == nil ? d.speedLimit : storedLimit ?? d.speedLimit,
             autoStartOnBoot: typed.value(Keys.autoStartOnBoot, default: d.autoStartOnBoot),
             notificationSound: typed.value(Keys.notificationSound, default: d.notificationSound),
             generalNotificationSound: typed.value(Keys.generalNotificationSound, default: d.generalNotificationSound),
@@ -149,7 +167,10 @@ public actor SettingsStore {
             proxyUsername: try keychain.read(account: "proxy/username") ?? "",
             proxyPassword: try keychain.read(account: "proxy/password") ?? "",
             proxyPACURL: typed.value(Keys.proxyPACURL, default: d.proxyPACURL),
-            apiAnonymousAccessConfirmed: typed.value(Keys.apiAnonymousAccessConfirmed, default: false)
+            apiAnonymousAccessConfirmed: typed.value(Keys.apiAnonymousAccessConfirmed, default: false),
+            speedLimiterEnabled: storedEnabled ?? ((storedLimit ?? 0) > 0),
+            limitWhileUsingOtherApps: typed.value(Keys.limitWhileUsingOtherApps, default: false),
+            minimumPartSize: typed.value(Keys.minimumPartSize, default: d.minimumPartSize)
         )
     }
 
@@ -173,6 +194,9 @@ public actor SettingsStore {
         typed.set(settings.focusDownloadProgressDialogOnStart, for: Keys.focusDownloadProgressDialogOnStart)
         typed.set(settings.focusDownloadCompletionDialogOnFinish, for: Keys.focusDownloadCompletionDialogOnFinish)
         typed.set(settings.speedLimit, for: Keys.speedLimit)
+        typed.set(settings.speedLimiterEnabled, for: Keys.speedLimiterEnabled)
+        typed.set(settings.limitWhileUsingOtherApps, for: Keys.limitWhileUsingOtherApps)
+        typed.set(settings.minimumPartSize, for: Keys.minimumPartSize)
         typed.set(settings.autoStartOnBoot, for: Keys.autoStartOnBoot)
         typed.set(settings.notificationSound, for: Keys.notificationSound)
         typed.set(settings.generalNotificationSound, for: Keys.generalNotificationSound)
@@ -215,6 +239,12 @@ public actor SettingsStore {
         }
         guard (0...100).contains(settings.maxDownloadRetryCount) else {
             throw SettingsStoreError.invalid("最大重试次数必须在 0 到 100 之间")
+        }
+        guard (DownloadSchedulerConfiguration.minimumAllowedPartSize...DownloadSchedulerConfiguration.maximumAllowedPartSize).contains(settings.minimumPartSize) else {
+            throw SettingsStoreError.invalid("最小 Range 工作块大小必须在 1 KiB 到 2 GiB 之间")
+        }
+        guard !settings.speedLimiterEnabled || settings.speedLimit > 0 else {
+            throw SettingsStoreError.invalid("启用全局限速时，上限必须大于 0")
         }
         guard settings.speedLimit >= 0 else {
             throw SettingsStoreError.invalid("全局速度限制不能为负数")
@@ -273,6 +303,9 @@ public actor SettingsStore {
         static let focusDownloadProgressDialogOnStart = UserDefaultsKey<Bool>("focusDownloadProgressDialogOnStart")
         static let focusDownloadCompletionDialogOnFinish = UserDefaultsKey<Bool>("focusDownloadCompletionDialogOnFinish")
         static let speedLimit = UserDefaultsKey<Int64>("speedLimit")
+        static let speedLimiterEnabled = UserDefaultsKey<Bool>("speedLimiterEnabled")
+        static let limitWhileUsingOtherApps = UserDefaultsKey<Bool>("limitWhileUsingOtherApps")
+        static let minimumPartSize = UserDefaultsKey<Int64>("minimumPartSize")
         static let autoStartOnBoot = UserDefaultsKey<Bool>("autoStartOnBoot")
         static let notificationSound = UserDefaultsKey<Bool>("notificationSound")
         static let generalNotificationSound = UserDefaultsKey<String>("generalNotificationSound")

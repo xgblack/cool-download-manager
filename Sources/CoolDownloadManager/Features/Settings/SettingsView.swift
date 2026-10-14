@@ -93,6 +93,7 @@ struct SettingsView: View {
         .onChange(of: store.settings) { _, updated in
             guard !viewState.isSaving else { return }
             viewState.mergeDefaultFolder(updated.defaultDownloadFolder)
+            viewState.mergeSpeedLimiterSettings(updated)
             guard !viewState.isDirty else { return }
             viewState.markModelSaved(updated)
         }
@@ -164,9 +165,9 @@ struct SettingsView: View {
         case .general:
             GeneralSettingsPage(store: store, state: viewState)
         case .downloads:
-            DownloadSettingsPage(state: viewState) {
+            DownloadSettingsPage(state: viewState, onChooseFolder: {
                 viewState.isFolderPickerPresented = true
-            }
+            }, limiterStatus: store.speedLimiterStatus, monitoringWarning: store.speedLimitMonitoringWarning)
         case .network:
             NetworkSettingsPage(state: viewState, onOpenPerHostSettings: openPerHostSettings)
         case .notifications:
@@ -212,10 +213,17 @@ struct SettingsView: View {
 
     private func resetToDefaults() {
         viewState.model = AppSettingsModel.defaults()
+        viewState.quantityInputErrors.removeAll()
+        viewState.quantityInputRevision += 1
     }
 
     private func save() {
         viewState.mergeDefaultFolder(store.settings.defaultDownloadFolder)
+        viewState.mergeSpeedLimiterSettings(store.settings)
+        guard viewState.quantityInputErrors.isEmpty else {
+            viewState.errorMessage = "请先修正限速或最小工作块的输入。"
+            return
+        }
         viewState.isSaving = true
         viewState.errorMessage = nil
         Task { @MainActor in
@@ -356,6 +364,8 @@ final class SettingsViewState: ObservableObject {
     @Published var isFolderPickerPresented = false
     @Published var isSaving = false
     @Published var errorMessage: String?
+    @Published var quantityInputErrors: Set<String> = []
+    @Published var quantityInputRevision = 0
     let perHostState: PerHostSettingsViewState
     private var savedModel: AppSettingsModel
 
@@ -366,7 +376,7 @@ final class SettingsViewState: ObservableObject {
     }
 
     var isDirty: Bool {
-        model != savedModel || perHostState.isDirty
+        model != savedModel || perHostState.isDirty || !quantityInputErrors.isEmpty
     }
 
     func binding<Value>(_ keyPath: WritableKeyPath<AppSettingsModel, Value>) -> Binding<Value> {
@@ -417,9 +427,20 @@ final class SettingsViewState: ObservableObject {
         savedModel.defaultDownloadFolder = folder
     }
 
+    func mergeSpeedLimiterSettings(_ updated: AppSettingsModel) {
+        func merge<Value: Equatable>(_ key: WritableKeyPath<AppSettingsModel, Value>) {
+            if model[keyPath: key] == savedModel[keyPath: key] { model[keyPath: key] = updated[keyPath: key] }
+            savedModel[keyPath: key] = updated[keyPath: key]
+        }
+        merge(\.speedLimiterEnabled)
+        merge(\.speedLimit)
+        merge(\.limitWhileUsingOtherApps)
+    }
+
     func markModelSaved(_ model: AppSettingsModel) {
         self.model = model
         savedModel = model
+        quantityInputErrors.removeAll()
     }
 
     func markPerHostSaved(_ items: [PerHostSettingsItem]) {

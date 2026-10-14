@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 import ServiceManagement
 import CoolDownloadCore
@@ -14,6 +15,12 @@ final class AppStore: ObservableObject {
     @Published private(set) var categories: [DownloadCategory] = []
     @Published private(set) var perHostSettings: [PerHostSettingsItem] = []
     @Published private(set) var settings: AppSettingsModel
+    @Published private(set) var appliedGlobalSpeedLimit: Int64 = 0
+    @Published private(set) var speedLimitMonitoringWarning: String?
+    private let activityMonitor = ApplicationActivityMonitor()
+    private var desiredGlobalSpeedLimit: Int64 = 0
+    private var speedLimitUpdateTask: Task<Void, Never>?
+
     @Published private(set) var autoStartStatus = SMAppService.mainApp.status
 
     let service: DownloadService?
@@ -101,10 +108,11 @@ final class AppStore: ObservableObject {
                     maxConcurrentDownloads: maxConcurrent,
                     maxConnectionsPerDownload: rangeConnections,
                     dynamicPartCreation: initialSettings.dynamicPartCreation,
+                    minimumPartSize: initialSettings.minimumPartSize,
                     appendExtensionToIncompleteDownloads: initialSettings.appendExtensionToIncompleteDownloads,
                     useSparseFileAllocation: initialSettings.useSparseFileAllocation,
                     deletePartialFileOnDownloadCancellation: initialSettings.deletePartialFileOnDownloadCancellation,
-                    speedLimit: initialSettings.speedLimit,
+                    speedLimit: initialSettings.speedLimiterEnabled ? initialSettings.speedLimit : 0,
                     userAgent: initialSettings.userAgent,
                     useServerLastModifiedTime: initialSettings.useServerLastModifiedTime
                 ),
@@ -127,6 +135,7 @@ final class AppStore: ObservableObject {
             self?.removeMetadataReferences(for: ids)
         }
 
+        activityMonitor.onChange = { [weak self] _ in self?.refreshSpeedLimiter() }
         Task { [weak self] in
             await self?.boot()
         }
@@ -137,6 +146,7 @@ final class AppStore: ObservableObject {
         queueEventTask?.cancel()
         downloadEventTask?.cancel()
         missingFileTask?.cancel()
+        speedLimitUpdateTask?.cancel()
         integrationServer?.stop()
         privateSocketServer?.stop()
     }
@@ -208,6 +218,7 @@ final class AppStore: ObservableObject {
             } catch {
                 errorMessage = error.localizedDescription
             }
+            refreshSpeedLimiter()
             isReady = true
         } catch {
             errorMessage = error.localizedDescription
@@ -217,6 +228,8 @@ final class AppStore: ObservableObject {
     func shutdown() async {
         guard !isShuttingDown else { return }
         isShuttingDown = true
+        activityMonitor.setMonitoring(false)
+        speedLimitUpdateTask?.cancel()
         queueScheduleTask?.cancel()
         queueScheduleTask = nil
         queueEventTask?.cancel()
@@ -389,7 +402,7 @@ final class AppStore: ObservableObject {
 
         // UserDefaults preferences remain durable even when Core Data could
         // not initialize. The next healthy launch applies them to the core.
-        guard let service else { return }
+        guard let service else { refreshSpeedLimiter(); return }
 
         await service.updateConfiguration(
             schedulerConfiguration: schedulerConfiguration(for: saved),
@@ -400,6 +413,7 @@ final class AppStore: ObservableObject {
             defaultFolder: URL(fileURLWithPath: saved.defaultDownloadFolder, isDirectory: true),
             networkConfiguration: networkConfiguration(for: saved)
         )
+        refreshSpeedLimiter()
         do {
             try applyAutoStartOnBoot(saved.autoStartOnBoot)
             if saved.trackDeletedFilesOnDisk {
@@ -751,11 +765,14 @@ final class AppStore: ObservableObject {
     }
 
     private func handleDownloadEvent(_ event: DownloadEvent) {
+        var lifecycleChanged = false
         switch event {
         case .created(let record):
+            lifecycleChanged = true
             notificationStatuses[record.id] = record.status
         case .updated(let record):
             let previous = notificationStatuses[record.id]
+            lifecycleChanged = previous != record.status
             if record.status == .completed, previous != .completed {
                 NotificationController.shared.notifyCompletion(
                     record: record,
@@ -775,9 +792,65 @@ final class AppStore: ObservableObject {
             }
             notificationStatuses[record.id] = record.status
         case .removed(let id):
+            lifecycleChanged = true
             notificationStatuses[id] = nil
         case .activeConnectionCountChanged:
             break
+        }
+        if lifecycleChanged { refreshSpeedLimiter() }
+    }
+
+    var speedLimiterStatus: String {
+        guard settings.speedLimiterEnabled else { return "全局限速已关闭" }
+        if speedLimitMonitoringWarning != nil { return "检测不可用，使用固定限速" }
+        if settings.limitWhileUsingOtherApps {
+            let active = notificationStatuses.values.contains { $0 == .preparing || $0 == .downloading || $0 == .retrying }
+            return active && appliedGlobalSpeedLimit > 0 ? "自动限速中" : "自动限速待命"
+        }
+        return "固定限速"
+    }
+
+    func toggleSpeedLimiter() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let settingsStore else {
+                    throw settingsStoreInitializationError ?? SettingsStoreError.invalid("设置存储尚未初始化")
+                }
+                let saved = try await settingsStore.toggleSpeedLimiter()
+                settings.speedLimiterEnabled = saved.speedLimiterEnabled
+                refreshSpeedLimiter()
+            } catch { noticeMessage = error.localizedDescription }
+        }
+    }
+
+    private func refreshSpeedLimiter() {
+        guard !isShuttingDown else { return }
+        let hasActiveDownloads = notificationStatuses.values.contains {
+            $0 == .preparing || $0 == .downloading || $0 == .retrying
+        }
+        activityMonitor.setMonitoring(
+            settings.speedLimiterEnabled && settings.limitWhileUsingOtherApps && hasActiveDownloads
+        )
+        let sample = activityMonitor.sample
+        speedLimitMonitoringWarning = settings.speedLimiterEnabled && settings.limitWhileUsingOtherApps
+            && hasActiveDownloads && sample.isUserInteracting == nil
+            ? "无法检测系统空闲状态，已使用固定全局上限。" : nil
+        desiredGlobalSpeedLimit = settings.effectiveGlobalSpeedLimit(
+            isAppActive: sample.isAppActive, isUserInteracting: sample.isUserInteracting
+        )
+        guard speedLimitUpdateTask == nil, let service else { return }
+        // A single drain loop serializes updates. Activity changes during an
+        // actor hop are applied next, so an older cap cannot overwrite a new one.
+        speedLimitUpdateTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { speedLimitUpdateTask = nil }
+            while !Task.isCancelled {
+                let limit = desiredGlobalSpeedLimit
+                await service.updateGlobalSpeedLimit(bytesPerSecond: limit)
+                appliedGlobalSpeedLimit = limit
+                if desiredGlobalSpeedLimit == limit { break }
+            }
         }
     }
 
@@ -964,10 +1037,14 @@ final class AppStore: ObservableObject {
             maxConcurrentDownloads: settings.maxConcurrentDownloads,
             maxConnectionsPerDownload: settings.threadCount,
             dynamicPartCreation: settings.dynamicPartCreation,
+            minimumPartSize: settings.minimumPartSize,
             appendExtensionToIncompleteDownloads: settings.appendExtensionToIncompleteDownloads,
             useSparseFileAllocation: settings.useSparseFileAllocation,
             deletePartialFileOnDownloadCancellation: settings.deletePartialFileOnDownloadCancellation,
-            speedLimit: settings.speedLimit,
+            speedLimit: settings.effectiveGlobalSpeedLimit(
+                isAppActive: activityMonitor.sample.isAppActive,
+                isUserInteracting: activityMonitor.sample.isUserInteracting
+            ),
             userAgent: settings.userAgent,
             useServerLastModifiedTime: settings.useServerLastModifiedTime
         )

@@ -358,7 +358,9 @@ public actor DownloadStore {
                 .map { try MetadataJSON.decode(HLSResumeSnapshot.self, from: $0) },
             hlsRenditions: try (task.value(forKey: "hlsRenditionsJSON") as? String)
                 .map { try MetadataJSON.decode([HLSRendition].self, from: $0) },
-            revision: (task.value(forKey: "revision") as? NSNumber)?.int64Value ?? 1
+            revision: (task.value(forKey: "revision") as? NSNumber)?.int64Value ?? 1,
+            startedAt: task.value(forKey: "startedAt") as? Date,
+            completedAt: task.value(forKey: "completedAt") as? Date
         )
     }
 
@@ -465,6 +467,8 @@ public actor DownloadStore {
         set(record.lastModified, "lastModified")
         set(record.supportsResume, "supportsResume")
         set(record.createdAt, "createdAt")
+        set(record.startedAt, "startedAt")
+        set(record.completedAt, "completedAt")
         set(record.updatedAt, "updatedAt")
         set(record.error, "error")
         set(record.fileChecksum, "fileChecksum")

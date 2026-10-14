@@ -20,6 +20,9 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
     public var focusDownloadProgressDialogOnStart: Bool
     public var focusDownloadCompletionDialogOnFinish: Bool
     public var speedLimit: Int64
+    public var speedLimiterEnabled: Bool
+    public var limitWhileUsingOtherApps: Bool
+    public var minimumPartSize: Int64
     public var autoStartOnBoot: Bool
     public var notificationSound: Bool
     public var generalNotificationSound: String
@@ -69,7 +72,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             showDownloadCompletionDialog: true,
             focusDownloadProgressDialogOnStart: false,
             focusDownloadCompletionDialogOnFinish: false,
-            speedLimit: 0,
+            speedLimit: 256 * 1024,
             autoStartOnBoot: true,
             notificationSound: true,
             generalNotificationSound: "",
@@ -92,7 +95,8 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             proxyPort: 8080,
             proxyUsername: "",
             proxyPassword: "",
-            proxyPACURL: ""
+            proxyPACURL: "",
+            speedLimiterEnabled: false
         )
     }
 
@@ -138,7 +142,10 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         proxyUsername: String,
         proxyPassword: String,
         proxyPACURL: String,
-        apiAnonymousAccessConfirmed: Bool = false
+        apiAnonymousAccessConfirmed: Bool = false,
+        speedLimiterEnabled: Bool? = nil,
+        limitWhileUsingOtherApps: Bool = false,
+        minimumPartSize: Int64 = DownloadSchedulerConfiguration.defaultMinimumPartSize
     ) {
         self.theme = theme
         self.uiScale = uiScale
@@ -158,6 +165,9 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         self.focusDownloadProgressDialogOnStart = focusDownloadProgressDialogOnStart
         self.focusDownloadCompletionDialogOnFinish = focusDownloadCompletionDialogOnFinish
         self.speedLimit = speedLimit
+        self.speedLimiterEnabled = speedLimiterEnabled ?? (speedLimit > 0)
+        self.limitWhileUsingOtherApps = limitWhileUsingOtherApps
+        self.minimumPartSize = minimumPartSize
         self.autoStartOnBoot = autoStartOnBoot
         self.notificationSound = notificationSound
         self.generalNotificationSound = generalNotificationSound
@@ -184,6 +194,14 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         self.proxyPACURL = proxyPACURL
     }
 
+    /// nil interaction means detection is unavailable: retain the fixed cap.
+    public func effectiveGlobalSpeedLimit(isAppActive: Bool, isUserInteracting: Bool?) -> Int64 {
+        guard speedLimiterEnabled else { return 0 }
+        guard limitWhileUsingOtherApps else { return max(0, speedLimit) }
+        guard let isUserInteracting else { return max(0, speedLimit) }
+        return !isAppActive && isUserInteracting ? max(0, speedLimit) : 0
+    }
+
     /// A legacy anonymous setting is preserved, but cannot start HTTP until acknowledged.
     public var httpIntegrationConfigurationError: String? {
         guard apiEnabled else { return nil }
@@ -200,6 +218,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case apiAnonymousAccessConfirmed
+        case speedLimiterEnabled, limitWhileUsingOtherApps, minimumPartSize
         case theme, uiScale, mergeTopBarWithTitleBar, showIconLabels, useRelativeDateTime
         case threadCount, maxConcurrentDownloads, maxDownloadRetryCount, dynamicPartCreation
         case useServerLastModifiedTime, appendExtensionToIncompleteDownloads, useSparseFileAllocation
@@ -215,6 +234,8 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = Self.defaults()
+        let storedLimit = try c.decodeIfPresent(Int64.self, forKey: .speedLimit)
+        let limitEnabled = try c.decodeIfPresent(Bool.self, forKey: .speedLimiterEnabled)
         self.init(
             theme: try c.decodeIfPresent(String.self, forKey: .theme) ?? d.theme,
             uiScale: try c.decodeIfPresent(Double.self, forKey: .uiScale),
@@ -233,7 +254,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             showDownloadCompletionDialog: try c.decodeIfPresent(Bool.self, forKey: .showDownloadCompletionDialog) ?? d.showDownloadCompletionDialog,
             focusDownloadProgressDialogOnStart: try c.decodeIfPresent(Bool.self, forKey: .focusDownloadProgressDialogOnStart) ?? d.focusDownloadProgressDialogOnStart,
             focusDownloadCompletionDialogOnFinish: try c.decodeIfPresent(Bool.self, forKey: .focusDownloadCompletionDialogOnFinish) ?? d.focusDownloadCompletionDialogOnFinish,
-            speedLimit: try c.decodeIfPresent(Int64.self, forKey: .speedLimit) ?? d.speedLimit,
+            speedLimit: storedLimit == 0 && limitEnabled == nil ? d.speedLimit : storedLimit ?? d.speedLimit,
             autoStartOnBoot: try c.decodeIfPresent(Bool.self, forKey: .autoStartOnBoot) ?? d.autoStartOnBoot,
             notificationSound: try c.decodeIfPresent(Bool.self, forKey: .notificationSound) ?? d.notificationSound,
             generalNotificationSound: try c.decodeIfPresent(String.self, forKey: .generalNotificationSound) ?? d.generalNotificationSound,
@@ -257,7 +278,10 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             proxyUsername: try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? d.proxyUsername,
             proxyPassword: try c.decodeIfPresent(String.self, forKey: .proxyPassword) ?? d.proxyPassword,
             proxyPACURL: try c.decodeIfPresent(String.self, forKey: .proxyPACURL) ?? d.proxyPACURL,
-            apiAnonymousAccessConfirmed: try c.decodeIfPresent(Bool.self, forKey: .apiAnonymousAccessConfirmed) ?? false
+            apiAnonymousAccessConfirmed: try c.decodeIfPresent(Bool.self, forKey: .apiAnonymousAccessConfirmed) ?? false,
+            speedLimiterEnabled: limitEnabled ?? ((storedLimit ?? 0) > 0),
+            limitWhileUsingOtherApps: try c.decodeIfPresent(Bool.self, forKey: .limitWhileUsingOtherApps) ?? false,
+            minimumPartSize: try c.decodeIfPresent(Int64.self, forKey: .minimumPartSize) ?? d.minimumPartSize
         )
     }
 }

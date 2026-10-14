@@ -114,9 +114,15 @@ final class AppCoordinator: NSObject, ObservableObject {
             actions: .init(
                 showMain: { [weak self] in self?.showMainWindow() },
                 newDownload: { [weak self] in self?.presentAddDownload(fromClipboard: true) },
+                toggleSpeedLimiter: { [weak self] in self?.store.toggleSpeedLimiter() },
                 settings: { [weak self] in self?.presentSettings() },
                 quit: { NSApp.terminate(nil) }
-            )
+            ),
+            speedLimiterState: { [weak self] in
+                guard let self else { return .init(enabled: false, summary: "全局限速已关闭") }
+                let cap = ByteQuantityText.format(bytes: store.settings.speedLimit, unit: store.settings.speedUnit, isSpeed: true)
+                return .init(enabled: store.settings.speedLimiterEnabled, summary: "\(store.speedLimiterStatus) · \(cap)")
+            }
         )
     }
 
@@ -520,7 +526,9 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func openFile(_ record: DownloadRecord) {
         guard record.status == .completed else { return }
-        NSWorkspace.shared.open(record.destinationURL)
+        DownloadFileOpener.open(record) { [weak self] message in
+            if let message { self?.showNotice(message) }
+        }
     }
 
     func revealFile(_ record: DownloadRecord) {

@@ -66,7 +66,7 @@ public enum MetadataDatabaseError: Error, LocalizedError, Sendable, Equatable {
 /// in code so SwiftPM does not need to copy a model bundle. Pre-release builds
 /// open only the current schema and intentionally do not migrate older stores.
 public final class MetadataDatabase: @unchecked Sendable {
-    public static let modelVersion = "2"
+    public static let modelVersion = "3"
 
     private final class Registry: @unchecked Sendable {
         let lock = NSLock()
@@ -180,7 +180,11 @@ public final class MetadataDatabase: @unchecked Sendable {
         }
         semaphore.wait()
         if let loadError {
-            throw MetadataDatabaseError.loadFailed(storeURL, loadError.localizedDescription)
+            let nsError = loadError as NSError
+            let reason = nsError.code == NSPersistentStoreIncompatibleVersionHashError
+                ? "元数据库模型与当前开发版本不兼容。旧数据已保留，未自动清空；请使用新的开发数据目录。"
+                : loadError.localizedDescription
+            throw MetadataDatabaseError.loadFailed(storeURL, reason)
         }
 
         self.container = container
@@ -267,6 +271,8 @@ public final class MetadataDatabase: @unchecked Sendable {
             attribute("lastModified", .stringAttributeType, optional: true),
             attribute("supportsResume", .booleanAttributeType, optional: true),
             attribute("createdAt", .dateAttributeType),
+            attribute("startedAt", .dateAttributeType, optional: true),
+            attribute("completedAt", .dateAttributeType, optional: true),
             attribute("updatedAt", .dateAttributeType),
             attribute("error", .stringAttributeType, optional: true),
             attribute("fileChecksum", .stringAttributeType, optional: true),

@@ -354,6 +354,7 @@ struct MainView: View {
                                 onDelete: { selectAndDelete(record) },
                                 onCopyLink: { coordinator.copy(record.source.link) },
                                 onChecksum: { coordinator.presentChecksum(for: [record.id]) },
+                                coordinator: coordinator,
                                 categories: store.categories,
                                 speed: store.downloadList.speed(
                                     for: record.id,
@@ -398,7 +399,7 @@ struct MainView: View {
                 .frame(width: MainTableLayout.statusWidth, alignment: .leading)
             Text("大小")
                 .frame(width: MainTableLayout.sizeWidth, alignment: .trailing)
-            Text("添加日期")
+            Text("时间")
                 .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
         }
         .font(DownloadVisualStyle.metadata.weight(.medium))
@@ -491,7 +492,8 @@ struct MainView: View {
         if store.downloadList.selectedIDs.isEmpty {
             return "\(total) 个任务 · \(active) 个进行中"
         }
-        return "\(total) 个任务 · \(active) 个进行中 · 已选 \(store.downloadList.selectedIDs.count)"
+        let summary = DownloadSelectionSummary(records: store.downloadList.selectedDownloads)
+        return "\(total) 个任务 · \(active) 个进行中 · \(summary.text(unit: store.settings.sizeUnit))"
     }
 
     private var hasActiveDownloads: Bool {
@@ -622,7 +624,7 @@ private enum MainTableLayout {
     static let selectionWidth: CGFloat = 24
     static let statusWidth: CGFloat = 190
     static let sizeWidth: CGFloat = 150
-    static let dateWidth: CGFloat = 132
+    static let dateWidth: CGFloat = 174
     static let horizontalInset: CGFloat = 20
     static let leadingInset: CGFloat = horizontalInset + selectionWidth + 12
 }
@@ -745,6 +747,7 @@ private struct DownloadTableRow: View {
     let onDelete: () -> Void
     let onCopyLink: () -> Void
     let onChecksum: () -> Void
+    @ObservedObject var coordinator: AppCoordinator
     let categories: [DownloadCategory]
     let speed: Double?
     let relativeDate: Bool
@@ -828,10 +831,14 @@ private struct DownloadTableRow: View {
             }
             .frame(width: MainTableLayout.sizeWidth, alignment: .trailing)
 
-            DownloadDateLabel(date: record.createdAt, relative: relativeDate)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: 3) {
+                timeRow("添加", record.createdAt)
+                timeRow("开始", record.startedAt)
+                timeRow("完成", record.completedAt)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
         }
         .contentShape(Rectangle())
         .padding(.horizontal, MainTableLayout.horizontalInset)
@@ -855,6 +862,7 @@ private struct DownloadTableRow: View {
         .contextMenu {
             Button("打开文件", systemImage: "arrow.up.right.square") { onOpen() }
                 .disabled(record.status != .completed)
+            OpenWithMenu(record: record, coordinator: coordinator)
             Button("查看详情", systemImage: "info.circle") { onOpenDetail() }
             if canShowProgress {
                 Button("显示下载进度", systemImage: "chart.bar.xaxis", action: onShowProgress)
@@ -893,6 +901,16 @@ private struct DownloadTableRow: View {
             Divider()
             Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
         }
+    }
+
+    private func timeRow(_ label: String, _ date: Date?) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+            if let date { DownloadDateLabel(date: date, relative: relativeDate) }
+            else { Text("—") }
+        }
+        .help("\(label)：\(DownloadTimePresentation.full(date))")
+        .accessibilityElement(children: .combine)
     }
 
     private var statusText: String {

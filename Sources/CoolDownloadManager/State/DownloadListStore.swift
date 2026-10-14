@@ -38,12 +38,16 @@ enum DownloadFilter: Hashable, Sendable {
 
 enum DownloadSort: String, CaseIterable, Sendable {
     case createdNewest
+    case startedNewest
+    case completedNewest
     case name
     case status
 
     var title: String {
         switch self {
         case .createdNewest: return "添加日期"
+        case .startedNewest: return "开始日期"
+        case .completedNewest: return "完成日期"
         case .name: return "名称"
         case .status: return "状态"
         }
@@ -226,6 +230,17 @@ final class DownloadListStore: ObservableObject {
         switch sort {
         case .createdNewest:
             result = filtered.sorted { $0.createdAt > $1.createdAt }
+        case .startedNewest, .completedNewest:
+            let key: KeyPath<DownloadRecord, Date?> = sort == .startedNewest ? \.startedAt : \.completedAt
+            result = filtered.sorted { lhs, rhs in
+                switch (lhs[keyPath: key], rhs[keyPath: key]) {
+                case let (left?, right?) where left != right: return left > right
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default:
+                    return lhs.createdAt == rhs.createdAt ? lhs.id > rhs.id : lhs.createdAt > rhs.createdAt
+                }
+            }
         case .name:
             result = filtered.sorted {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending

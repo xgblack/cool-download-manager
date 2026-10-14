@@ -1,4 +1,5 @@
 import SwiftUI
+import CoolDownloadCore
 import AppKit
 import UniformTypeIdentifiers
 
@@ -103,6 +104,8 @@ struct GeneralSettingsPage: View {
 struct DownloadSettingsPage: View {
     @ObservedObject var state: SettingsViewState
     let onChooseFolder: () -> Void
+    var limiterStatus = ""
+    var monitoringWarning: String?
 
     var body: some View {
         SettingsPage {
@@ -143,13 +146,31 @@ struct DownloadSettingsPage: View {
                     value: state.intBinding(\.maxDownloadRetryCount, range: 0...100),
                     range: 0...100
                 )
-                NativeSettingsInt64Row(
-                    "全局速度限制",
-                    value: state.int64Binding(\.speedLimit, range: 0...Int64.max),
-                    range: 0...Int64.max,
-                    suffix: "字节/秒"
-                )
-                .help("0 表示不设置全局上限；任务和主机限速只能进一步收紧")
+                NativeSettingsToggleRow("启用全局限速", isOn: state.binding(\.speedLimiterEnabled))
+                NativeSettingsRow(title: "全局限速上限") {
+                    ByteQuantityField(bytes: state.binding(\.speedLimit), unit: state.model.speedUnit, isSpeed: true, range: 1...Int64.max) { valid in
+                        if valid { state.quantityInputErrors.remove("speedLimit") }
+                        else { state.quantityInputErrors.insert("speedLimit") }
+                    }
+                }
+                .id("speed-limit-\(state.quantityInputRevision)")
+                .help("关闭全局限速后保留此上限；任务和主机限速始终独立生效")
+                NativeSettingsToggleRow("仅在使用其他应用时限速", isOn: state.binding(\.limitWhileUsingOtherApps))
+                    .help("本应用在后台且最近 30 秒有输入时限速；回到前台或进入空闲后解除全局上限")
+                NativeSettingsRow(title: "最小 Range 工作块大小") {
+                    ByteQuantityField(bytes: state.binding(\.minimumPartSize), unit: state.model.sizeUnit, isSpeed: false,
+                                      range: DownloadSchedulerConfiguration.minimumAllowedPartSize...DownloadSchedulerConfiguration.maximumAllowedPartSize) { valid in
+                        if valid { state.quantityInputErrors.remove("minimumPartSize") }
+                        else { state.quantityInputErrors.insert("minimumPartSize") }
+                    }
+                }
+                .id("part-size-\(state.quantityInputRevision)")
+                .help("范围为 1 KiB 到 2 GiB，默认 16 MiB。仅影响尚未生成工作块的 HTTP 任务；已有任务按原边界恢复")
+                NativeSettingsRow(title: "当前限速状态") {
+                    Text(monitoringWarning ?? limiterStatus)
+                        .font(.caption)
+                        .foregroundStyle(monitoringWarning == nil ? Color.secondary : Color.orange)
+                }
                 NativeSettingsToggleRow(
                     "启用 HTTP Range 下载",
                     isOn: state.binding(\.dynamicPartCreation),
