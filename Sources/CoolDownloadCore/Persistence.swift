@@ -63,8 +63,8 @@ public enum MetadataDatabaseError: Error, LocalizedError, Sendable, Equatable {
 }
 
 /// A single Core Data stack shared by the metadata façades. The model is built
-/// in code so SwiftPM does not need to copy a model bundle. Pre-release builds
-/// open only the current schema and intentionally do not migrate older stores.
+/// in code so SwiftPM does not need to copy a model bundle. Known older models
+/// are migrated under the writer lock before any metadata façade is opened.
 public final class MetadataDatabase: @unchecked Sendable {
     public static let modelVersion = "3"
 
@@ -162,6 +162,7 @@ public final class MetadataDatabase: @unchecked Sendable {
         }
 
         let model = Self.makeModel()
+        try MetadataMigration.prepareStore(at: storeURL, model: model, readOnly: readOnly)
         let container = NSPersistentContainer(name: "CoolDownloadManagerMetadata", managedObjectModel: model)
         let description = NSPersistentStoreDescription(url: storeURL)
         description.type = NSSQLiteStoreType
@@ -182,7 +183,7 @@ public final class MetadataDatabase: @unchecked Sendable {
         if let loadError {
             let nsError = loadError as NSError
             let reason = nsError.code == NSPersistentStoreIncompatibleVersionHashError
-                ? "元数据库模型与当前开发版本不兼容。旧数据已保留，未自动清空；请使用新的开发数据目录。"
+                ? "元数据库模型不受当前版本支持。旧数据已保留，请使用支持该模型的应用版本。"
                 : loadError.localizedDescription
             throw MetadataDatabaseError.loadFailed(storeURL, reason)
         }
@@ -236,6 +237,22 @@ public final class MetadataDatabase: @unchecked Sendable {
     }
 
     static func makeModel() -> NSManagedObjectModel {
+        let model = makeVersion2Model()
+        let task = model.entitiesByName["DownloadTask"]!
+        for name in ["startedAt", "completedAt"] {
+            let attribute = NSAttributeDescription()
+            attribute.name = name
+            attribute.attributeType = .dateAttributeType
+            attribute.isOptional = true
+            task.properties.append(attribute)
+        }
+        model.versionIdentifiers = [modelVersion]
+        return model
+    }
+
+    /// The historical v2 definition must remain unchanged so its entity hashes
+    /// continue to identify existing stores, including all inverse relationships.
+    static func makeVersion2Model() -> NSManagedObjectModel {
         let model = NSManagedObjectModel()
 
         func attribute(
@@ -271,8 +288,6 @@ public final class MetadataDatabase: @unchecked Sendable {
             attribute("lastModified", .stringAttributeType, optional: true),
             attribute("supportsResume", .booleanAttributeType, optional: true),
             attribute("createdAt", .dateAttributeType),
-            attribute("startedAt", .dateAttributeType, optional: true),
-            attribute("completedAt", .dateAttributeType, optional: true),
             attribute("updatedAt", .dateAttributeType),
             attribute("error", .stringAttributeType, optional: true),
             attribute("fileChecksum", .stringAttributeType, optional: true),
@@ -391,7 +406,7 @@ public final class MetadataDatabase: @unchecked Sendable {
         queue.properties += [queueTasks]
         category.properties += [categoryTasks]
         model.entities = [task, part, queue, category, host]
-        model.versionIdentifiers = [modelVersion]
+        model.versionIdentifiers = ["2"]
         return model
     }
 }

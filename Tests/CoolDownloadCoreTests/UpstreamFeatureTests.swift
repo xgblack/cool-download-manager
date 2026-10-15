@@ -209,21 +209,25 @@ struct UpstreamFeatureTests {
         #expect(old.record.startedAt == nil && old.record.completedAt == nil)
     }
 
-    @Test("unsupported old metadata remains intact and reports the new-directory requirement")
+    @Test("unsupported metadata remains intact and reports an incompatible model")
     func oldDatabasePreserved() throws {
         let root = temporaryRoot()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let model = MetadataDatabase.makeModel()
         let entity = try #require(model.entitiesByName["DownloadTask"])
-        entity.properties = entity.properties.filter { !["startedAt", "completedAt"].contains($0.name) }
-        model.versionIdentifiers = ["2"]
+        let unknown = NSAttributeDescription()
+        unknown.name = "futureAttribute"
+        unknown.attributeType = .stringAttributeType
+        unknown.isOptional = true
+        entity.properties.append(unknown)
+        model.versionIdentifiers = ["4"]
         let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
         let url = root.appendingPathComponent("metadata.sqlite")
         let persistent = try coordinator.addPersistentStore(ofType: NSSQLiteStoreType, configurationName: nil, at: url)
         let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
         context.persistentStoreCoordinator = coordinator
         try context.performAndWait {
-            let task = NSManagedObject(entity: entity, insertInto: context)
+            let task = NSEntityDescription.insertNewObject(forEntityName: "DownloadTask", into: context)
             for (key, value) in ["sourceKind":"http", "link":"https://fixture.invalid/keep", "folder":root.path, "name":"keep.bin", "status":"paused"] { task.setValue(value, forKey: key) }
             task.setValue(1, forKey: "id")
             task.setValue(0, forKey: "downloadedBytes")
