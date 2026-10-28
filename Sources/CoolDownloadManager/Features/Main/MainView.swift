@@ -17,7 +17,7 @@ struct MainView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $viewState.columnVisibility) {
             SidebarView(store: store, downloadList: downloadList, coordinator: coordinator)
                 .navigationSplitViewColumnWidth(
                     min: 210,
@@ -27,7 +27,13 @@ struct MainView: View {
         } detail: {
             NavigationStack(path: $coordinator.mainPath) {
                 rootContent
-                    .navigationTitle("下载")
+                    .navigationTitle(listTitle)
+                    .toolbar { workspaceToolbar }
+                    .searchable(
+                        text: $downloadList.searchText,
+                        placement: .toolbar,
+                        prompt: "搜索名称或地址"
+                    )
                     .navigationDestination(for: MainDestination.self) { destination in
                         destinationView(destination)
                     }
@@ -35,14 +41,7 @@ struct MainView: View {
             .frame(minWidth: 760, minHeight: 520)
         }
         .navigationSplitViewStyle(.balanced)
-        .toolbar {
-            workspaceToolbar
-        }
-        .searchable(
-            text: $downloadList.searchText,
-            placement: .toolbar,
-            prompt: "搜索名称或地址"
-        )
+        .toolbar(removing: showsToolbarTitle ? nil : .title)
         .sheet(item: $coordinator.mainSheet) { sheet in
             sheetView(sheet)
         }
@@ -122,6 +121,21 @@ struct MainView: View {
         .environment(\.dynamicTypeSize, dynamicTypeSize)
     }
 
+    private var showsToolbarTitle: Bool {
+        coordinator.mainPath.isEmpty && viewState.columnVisibility == .detailOnly
+    }
+
+    private var listTitle: String {
+        switch downloadList.filter {
+        case .queue(let id):
+            return store.queues.first { $0.id == id }?.name ?? "队列"
+        case .category(let id):
+            return store.categories.first { $0.id == id }?.name ?? "分类"
+        default:
+            return downloadList.filter.title
+        }
+    }
+
     private var rootContent: some View {
         Group {
             if !store.isReady {
@@ -159,11 +173,18 @@ struct MainView: View {
     private func destinationView(_ destination: MainDestination) -> some View {
         switch destination {
         case .downloadDetail(let id):
-            if let record = store.downloadList.record(id: id) {
-                DownloadDetailSheet(record: record, store: store.downloadList, coordinator: coordinator)
-            } else {
-                ContentUnavailableFallback(title: "任务不存在", message: "该下载记录已被删除或无法读取。")
-                    .navigationTitle("下载详情")
+            Group {
+                if let record = store.downloadList.record(id: id) {
+                    DownloadDetailSheet(record: record, store: store.downloadList, coordinator: coordinator)
+                } else {
+                    ContentUnavailableFallback(title: "任务不存在", message: "该下载记录已被删除或无法读取。")
+                }
+            }
+            .navigationBarBackButtonHidden(true)
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    NativeBackButton("返回下载列表", action: coordinator.closeDetail)
+                }
             }
         case .queues:
             QueueView(store: store)
@@ -264,27 +285,33 @@ struct MainView: View {
 
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
-        // Keep list actions in the leading toolbar region. Using automatic
-        // and primaryAction makes AppKit place them provisionally, then move
-        // them after the window's toolbar finishes measuring.
-        ToolbarItemGroup(placement: .navigation) {
+        // Navigation belongs to the leading edge. List tools live on the
+        // root page so they disappear while a secondary page is open.
+        ToolbarSpacer(.flexible, placement: .primaryAction)
+
+        ToolbarItemGroup(placement: .primaryAction) {
             Menu {
-                ForEach(DownloadSort.allCases, id: \.self) { sort in
-                    Button {
-                        downloadList.sort = sort
-                    } label: {
-                        Label(sort.title, systemImage: downloadList.sort == sort ? "checkmark" : "arrow.up.arrow.down")
+                Picker("排序", selection: $downloadList.sort) {
+                    ForEach(DownloadSort.allCases, id: \.self) { sort in
+                        Text(sort.title).tag(sort)
                     }
                 }
+                .pickerStyle(.inline)
             } label: {
                 Label("排序", systemImage: "arrow.up.arrow.down")
+                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
             }
             .help("选择列表排序")
 
             Menu {
+                Button("批量下载", systemImage: "square.stack.3d.up") {
+                    coordinator.presentBatchDownload()
+                }
+                Divider()
                 Button("全选当前列表", systemImage: "checkmark.circle") {
                     downloadList.selectAllVisible()
                 }
+                .disabled(downloadList.visibleDownloads.isEmpty)
                 Button("清除选择", systemImage: "xmark.circle") {
                     downloadList.clearSelection()
                 }
@@ -300,29 +327,22 @@ struct MainView: View {
                     coordinator.presentSettings()
                 }
             } label: {
-                Label("管理", systemImage: "ellipsis.circle")
+                Label("更多", systemImage: "ellipsis")
                     .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
             }
-            .help("管理下载和应用设置")
+            .help("更多下载操作")
         }
 
-        ToolbarItemGroup(placement: .navigation) {
-            Button {
-                coordinator.presentBatchDownload()
-            } label: {
-                Label("批量下载", systemImage: "square.stack.3d.up")
-                    .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
-            }
-            .help("批量新建下载")
+        ToolbarSpacer(.fixed, placement: .primaryAction)
 
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 coordinator.presentAddDownload()
             } label: {
                 Label("新建下载", systemImage: "plus")
                     .modifier(IconLabelStyleModifier(showLabels: store.settings.showIconLabels))
             }
-            .buttonStyle(.borderedProminent)
-            .help("新建下载")
+            .help("新建下载（⌘N）")
         }
     }
 
@@ -605,6 +625,7 @@ final class MainViewState: ObservableObject {
     @Published var isShowingFolderPicker = false
     @Published var isShowingRemoveConfirmation = false
     @Published var sidebarWidth: CGFloat = 240
+    @Published var columnVisibility: NavigationSplitViewVisibility = .all
 }
 
 private struct IconLabelStyleModifier: ViewModifier {

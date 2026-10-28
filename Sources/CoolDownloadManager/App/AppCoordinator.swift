@@ -190,7 +190,7 @@ final class AppCoordinator: NSObject, ObservableObject {
             .forEach { $0.close() }
         mainWindow = window
         window.identifier = NSUserInterfaceItemIdentifier(mainWindowIdentifier)
-        window.title = "酷的下载管理器"
+        window.title = "下载"
         window.minSize = NSSize(width: 1_200, height: 640)
         applyWindowSettings()
         applyTheme(store.settings.theme, to: window)

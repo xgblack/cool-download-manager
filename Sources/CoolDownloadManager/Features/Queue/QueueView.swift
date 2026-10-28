@@ -60,12 +60,7 @@ struct QueueView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Button {
-                    requestDismiss()
-                } label: {
-                    Label("返回", systemImage: "chevron.left")
-                }
-                .help("返回下载列表")
+                NativeBackButton("返回下载列表", action: requestDismiss)
             }
         }
         .confirmationDialog(

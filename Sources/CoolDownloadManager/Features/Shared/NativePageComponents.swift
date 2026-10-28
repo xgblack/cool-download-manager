@@ -9,6 +9,28 @@ enum NativePageLayout {
     static let actionBarHeight: CGFloat = 60
 }
 
+/// One navigation affordance for pushed workspace pages, including editors
+/// that need to confirm unsaved changes before leaving.
+struct NativeBackButton: View {
+    let title: String
+    let action: () -> Void
+
+    init(_ title: String, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: "chevron.left")
+        }
+        .labelStyle(.iconOnly)
+        .help(title)
+        .accessibilityLabel(title)
+        .keyboardShortcut("[", modifiers: .command)
+    }
+}
+
 struct NativePageHeader<Trailing: View>: View {
     let title: String
     let subtitle: String?
