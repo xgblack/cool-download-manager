@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// The proxy modes exposed by the historical desktop settings. `system`
 /// deliberately leaves URLSession's configuration untouched so macOS can
@@ -794,6 +795,11 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
         let networkConfiguration = networkConfiguration
         let sessionConfiguration = configuration
         Self.applyProxy(networkConfiguration, to: sessionConfiguration)
+        // The application permits user-selected HTTP sources through ATS.
+        // Keep modern TLS for HTTPS, including when ATS's extra checks are off.
+        if sessionConfiguration.tlsMinimumSupportedProtocolVersion.rawValue < tls_protocol_version_t.TLSv12.rawValue {
+            sessionConfiguration.tlsMinimumSupportedProtocolVersion = .TLSv12
+        }
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
         sessionConfiguration.waitsForConnectivity = false
         sessionConfiguration.httpMaximumConnectionsPerHost = max(

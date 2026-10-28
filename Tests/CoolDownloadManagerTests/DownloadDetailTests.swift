@@ -5,18 +5,76 @@ import CoolDownloadCore
 
 @Suite("下载详情")
 struct DownloadDetailTests {
-    @Test("失败任务没有 Range 工作块时显示服务器错误")
-    func reportsFailedEmptyParts() {
-        let record = DownloadRecord(
+    @Test("未知大小的非活动任务不显示循环进度", arguments: [
+        DownloadStatus.added, .paused, .retrying, .waitingForSourceRefresh, .failed, .cancelled
+    ])
+    func stoppedProgress(status: DownloadStatus) {
+        var record = DownloadRecord(
             id: 7,
             source: DownloadSource(kind: .http, link: "https://example.test/file.bin"),
-            folder: "/tmp",
-            name: "file.bin",
-            status: .failed,
-            error: "服务器返回 HTTP 403"
+            folder: "/tmp", name: "file.bin", status: status,
+            error: "Legacy server error"
         )
+        var presentation = DownloadProgressPresentation(record: record)
+        #expect(!presentation.isIndeterminate)
+        #expect(presentation.fraction == nil)
+        record.totalBytes = 100
+        record.downloadedBytes = 40
+        presentation = DownloadProgressPresentation(record: record)
+        #expect(!presentation.isIndeterminate)
+        #expect(presentation.fraction == 0.4)
+        if status == .failed {
+            #expect(DownloadFailureView.isVisible(for: status))
+            record.parts = [DownloadPart(id: 0, from: 0, to: 99, downloaded: 40)]
+            #expect(DownloadFailureView.isVisible(for: record.status))
+            #expect(DownloadFailureText.summary(record.error) == "Legacy server error")
+        }
+    }
 
-        #expect(emptyRangeWorkMessage(for: record) == "失败：服务器返回 HTTP 403")
+    @Test("活动任务未知大小时显示动画，零字节完成显示完成")
+    func activeAndEmptyProgress() {
+        var record = DownloadRecord(
+            id: 7, source: DownloadSource(kind: .http, link: "https://example.test/empty.bin"),
+            folder: "/tmp", name: "empty.bin", status: .preparing
+        )
+        #expect(DownloadProgressPresentation(record: record).isIndeterminate)
+        record.status = .downloading
+        #expect(DownloadProgressPresentation(record: record).isIndeterminate)
+        record.totalBytes = 0
+        record.status = .completed
+        #expect(!DownloadProgressPresentation(record: record).isIndeterminate)
+        #expect(DownloadProgressPresentation(record: record).fraction == 1)
+    }
+
+    @Test("失败或等待状态清理实时速度并拒绝迟到连接事件", arguments: [
+        DownloadStatus.failed, .paused, .cancelled, .retrying, .waitingForSourceRefresh
+    ])
+    @MainActor
+    func stoppedMetrics(status: DownloadStatus) {
+        let store = DownloadListStore(service: nil)
+        let start = Date(timeIntervalSince1970: 1_000)
+        var record = DownloadRecord(
+            id: 7, source: DownloadSource(kind: .http, link: "https://example.test/file.bin"),
+            folder: "/tmp", name: "file.bin", status: .downloading,
+            downloadedBytes: 1, totalBytes: 100
+        )
+        store.apply([record], announceCompletion: false, at: start)
+        record.downloadedBytes = 51
+        record.revision += 1
+        store.apply([record], announceCompletion: false, at: start.addingTimeInterval(1))
+        #expect(store.speed(for: record.id) == 50)
+        record.status = status
+        record.revision += 1
+        store.apply(.updated(record))
+        store.apply(.activeConnectionCountChanged(id: record.id, count: 2))
+        #expect(store.speed(for: record.id) == nil)
+        #expect(store.speed(for: record.id, average: true) == nil)
+        #expect(store.speeds[record.id] == nil)
+        #expect(store.activeConnectionCount(for: record.id) == 0)
+        record.downloadedBytes += 1
+        record.revision += 1
+        store.apply([record], announceCompletion: false, at: start.addingTimeInterval(2))
+        #expect(store.speeds[record.id] == nil)
     }
 
     @Test("Range 工作块概览包含间距后仍保持在容器内")

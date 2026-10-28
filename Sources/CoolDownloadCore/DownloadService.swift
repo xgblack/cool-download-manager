@@ -494,7 +494,9 @@ public actor DownloadService {
                     )
                 }
             }
-            if continueAfterPatch {
+            if continueAfterPatch || current.status == .failed {
+                // A validated replacement clears the failure without starting
+                // an ordinary failed task until the user chooses to continue.
                 current.status = .paused
             }
             current.updatedAt = Date()
@@ -1011,7 +1013,7 @@ public actor DownloadService {
                 var waiting = current
                 waiting.status = .waitingForSourceRefresh
                 waiting.sourceRefreshReason = reason
-                waiting.error = DownloadCoreError.sourceRefreshRequired(reason).localizedDescription
+                waiting.error = DownloadFailureText.message(for: error)
                 waiting.updatedAt = Date()
                 waiting.revision += 1
                 records[id] = waiting
@@ -1025,7 +1027,7 @@ public actor DownloadService {
                 var failed = current
                 failed.status = .failed
                 failed.completedAt = nil
-                failed.error = error.localizedDescription
+                failed.error = DownloadFailureText.message(for: error)
                 failed.updatedAt = Date()
                 failed.revision += 1
                 records[id] = failed

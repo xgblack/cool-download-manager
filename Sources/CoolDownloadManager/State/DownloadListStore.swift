@@ -379,6 +379,7 @@ final class DownloadListStore: ObservableObject {
                 averageSpeedSessions[record.id] = (record.downloadedBytes, now)
             }
         } else {
+            speeds[record.id] = nil
             averageSpeedSessions[record.id] = nil
             activeConnectionCounts[record.id] = nil
         }
@@ -442,6 +443,7 @@ final class DownloadListStore: ObservableObject {
                     averageSpeedSessions[record.id] = (record.downloadedBytes, now)
                 }
             } else {
+                speeds[record.id] = nil
                 averageSpeedSessions[record.id] = nil
             }
         }
@@ -497,7 +499,7 @@ final class DownloadListStore: ObservableObject {
     }
 
     func speed(for id: DownloadID, average: Bool = false, at date: Date = Date()) -> Double? {
-        guard let record = recordsByID[id], record.downloadedBytes > 0 else {
+        guard let record = recordsByID[id], record.status == .downloading, record.downloadedBytes > 0 else {
             return nil
         }
         if average {

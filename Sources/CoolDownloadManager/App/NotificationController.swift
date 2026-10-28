@@ -24,7 +24,7 @@ final class NotificationController {
     func notifyFailure(record: DownloadRecord, soundEnabled: Bool, soundPath: String? = nil) {
         notify(
             title: "下载失败",
-            body: record.error.map { "\(record.name)：\($0)" } ?? record.name,
+            body: DownloadFailureText.summary(record.error).map { "\(record.name)：\($0)" } ?? record.name,
             identifier: "com.cooldownloadmanager.failed.\(record.id).\(record.revision)",
             soundEnabled: soundEnabled,
             soundPath: soundPath

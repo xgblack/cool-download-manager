@@ -1,11 +1,6 @@
 import SwiftUI
 import CoolDownloadCore
 
-func emptyRangeWorkMessage(for record: DownloadRecord) -> String {
-    guard record.status == .failed else { return "暂无 Range 工作块" }
-    return record.error.map { "失败：\($0)" } ?? "下载失败"
-}
-
 func displayedConnectionLimit(
     for record: DownloadRecord,
     globalLimit: Int,
@@ -88,10 +83,11 @@ struct DownloadProgressView: View {
         )
     }
 
-    private var progress: Double? {
-        guard let total = currentRecord.totalBytes, total > 0 else { return nil }
-        return min(1, max(0, Double(currentRecord.downloadedBytes) / Double(total)))
+    private var presentation: DownloadProgressPresentation {
+        DownloadProgressPresentation(record: currentRecord)
     }
+
+    private var progress: Double? { presentation.fraction }
 
     private var remainingText: String? {
         guard let total = currentRecord.totalBytes,
@@ -120,6 +116,11 @@ struct DownloadProgressView: View {
             header
             Divider()
             NativePageContent(maxWidth: 900, spacing: 24) {
+                if DownloadFailureView.isVisible(for: currentRecord.status) {
+                    NativePageSurface {
+                        DownloadFailureView(record: currentRecord)
+                    }
+                }
                 NativePageSurface {
                     overview
                 }
@@ -197,9 +198,19 @@ struct DownloadProgressView: View {
                     tint: DownloadVisualStyle.indicatorTint(for: currentRecord.status),
                     height: 8
                 )
+            } else if presentation.isIndeterminate {
+                if !reduceMotion {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .accessibilityLabel(presentation.statusMessage)
+                }
+                Text(presentation.statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
-                ProgressView()
-                    .progressViewStyle(.linear)
+                Text(presentation.statusMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 0) {
@@ -266,9 +277,9 @@ struct DownloadProgressView: View {
             }
 
             if currentRecord.parts.isEmpty {
-                Text(emptyRangeWorkMessage(for: currentRecord))
+                Text("暂无 Range 工作块")
                     .font(.callout)
-                    .foregroundStyle(currentRecord.status == .failed ? .red : .secondary)
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 12)
             } else {
@@ -303,9 +314,14 @@ struct DownloadProgressView: View {
         .accessibilityLabel("各 Range 工作块总体进度")
     }
 
+    @ViewBuilder
     private var partTable: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { context in
-            partTableContent(at: context.date)
+        if currentRecord.status == .downloading {
+            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                partTableContent(at: context.date)
+            }
+        } else {
+            partTableContent(at: currentRecord.updatedAt)
         }
     }
 
@@ -399,6 +415,12 @@ struct DownloadProgressView: View {
                 }
             }
 
+            if currentRecord.status == .failed, !requiresSourceRefresh {
+                Button("更新来源", systemImage: "link.badge.plus") {
+                    coordinator.openDetail(for: currentRecord.id)
+                }
+            }
+
             Button("查看详情", systemImage: "info.circle") {
                 coordinator.openDetail(for: currentRecord.id)
             }
@@ -478,7 +500,7 @@ struct DownloadProgressView: View {
         case .preparing: return "准备中"
         case .downloading: return "下载中"
         case .paused: return "已暂停"
-        case .retrying: return "重试中"
+        case .retrying: return "等待重试"
         case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
         case .failed: return "下载失败"
@@ -491,6 +513,7 @@ struct DownloadProgressView: View {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .waitingForSourceRefresh: return "link.badge.plus"
+        case .retrying: return "clock.arrow.circlepath"
         case .paused, .cancelled: return "pause.circle.fill"
         default: return "arrow.down.circle.fill"
         }
@@ -547,12 +570,21 @@ struct DownloadProgressView: View {
         if part.completed || partProgress(part) >= 1 { return "已完成" }
         if currentRecord.status == .paused { return "已暂停" }
         if currentRecord.status == .failed || currentRecord.status == .cancelled { return "已停止" }
+        if currentRecord.status == .retrying { return "等待重试" }
+        if currentRecord.status == .waitingForSourceRefresh { return "等待来源" }
         if part.downloaded > 0 { return "下载中" }
         return "等待中"
     }
 
     private func partIcon(_ part: DownloadPart) -> String {
         if part.completed || partProgress(part) >= 1 { return "checkmark.circle.fill" }
+        switch currentRecord.status {
+        case .failed: return "exclamationmark.triangle.fill"
+        case .paused, .cancelled: return "pause.circle.fill"
+        case .retrying: return "clock.arrow.circlepath"
+        case .waitingForSourceRefresh: return "link.badge.plus"
+        default: break
+        }
         if part.downloaded > 0 { return "arrow.down.circle.fill" }
         return "circle"
     }
@@ -562,7 +594,8 @@ struct DownloadProgressView: View {
             return isIndicator ? DownloadVisualStyle.indicatorTint(for: .completed) : DownloadVisualStyle.success
         }
         if currentRecord.status == .failed || currentRecord.status == .cancelled { return DownloadVisualStyle.failure }
-        if currentRecord.status == .paused {
+        if currentRecord.status == .paused || currentRecord.status == .retrying
+            || currentRecord.status == .waitingForSourceRefresh {
             return isIndicator ? DownloadVisualStyle.indicatorTint(for: .paused) : DownloadVisualStyle.warning
         }
         if part.downloaded > 0 { return .accentColor }

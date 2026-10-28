@@ -782,11 +782,20 @@ private struct DownloadTableRow: View {
                         .font(.body.weight(.medium))
                         .truncationMode(.middle)
                         .help(record.name)
-                    Text(record.source.link)
-                        .lineLimit(1)
-                        .font(DownloadVisualStyle.metadata)
-                        .foregroundStyle(.secondary)
-                        .truncationMode(.middle)
+                    if DownloadFailureView.isVisible(for: record.status),
+                       let summary = DownloadFailureText.summary(record.error) {
+                        Text(summary)
+                            .lineLimit(1)
+                            .font(DownloadVisualStyle.metadata)
+                            .foregroundStyle(DownloadVisualStyle.tint(for: record.status))
+                            .help(summary)
+                    } else {
+                        Text(record.source.link)
+                            .lineLimit(1)
+                            .font(DownloadVisualStyle.metadata)
+                            .foregroundStyle(.secondary)
+                            .truncationMode(.middle)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -874,7 +883,10 @@ private struct DownloadTableRow: View {
                 switch record.status {
                 case .preparing, .downloading, .retrying:
                     Button("暂停", systemImage: "pause.fill", action: onPause)
-                case .failed, .cancelled:
+                case .failed:
+                    Button("重试", systemImage: "arrow.clockwise", action: onRetry)
+                    Button("更新来源", systemImage: "link.badge.plus", action: onOpenDetail)
+                case .cancelled:
                     Button("重试", systemImage: "arrow.clockwise", action: onRetry)
                 case .completed:
                     Button("重新下载", systemImage: "arrow.clockwise", action: onRedownload)
@@ -919,7 +931,7 @@ private struct DownloadTableRow: View {
         case .preparing: return "准备中"
         case .downloading: return "下载中"
         case .paused: return "已暂停"
-        case .retrying: return "重试中"
+        case .retrying: return "等待重试"
         case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
         case .failed: return "失败"

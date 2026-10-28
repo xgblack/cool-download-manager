@@ -59,6 +59,11 @@ struct DownloadDetailSheet: View {
 
     private var infoPage: some View {
         VStack(alignment: .leading, spacing: 24) {
+            if DownloadFailureView.isVisible(for: record.status) {
+                NativePageSurface {
+                    DownloadFailureView(record: record)
+                }
+            }
             if let total = record.totalBytes, total > 0 {
                 NativePageSurface {
                     HStack(alignment: .firstTextBaseline) {
@@ -101,13 +106,11 @@ struct DownloadDetailSheet: View {
                     detailRow("修改时间", modified, showsDivider: false)
                 }
             }
-            if requiresSourceRefresh {
+            if canEditSource {
                 sourceRefreshEditor
-            }
-            if let error = record.error {
+            } else if let error = record.error, !DownloadFailureView.isVisible(for: record.status) {
                 SettingsSectionView(title: "错误详情", description: "") {
                     Text(error)
-                        .foregroundStyle(.red)
                         .textSelection(.enabled)
                 }
             }
@@ -118,7 +121,7 @@ struct DownloadDetailSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             NativeSettingsGroup(title: "更新下载来源") {
                 NativeSettingsRow(title: "新地址") {
-                    SecureField("HTTPS 地址", text: $viewState.sourceLink)
+                    SecureField("HTTP 或 HTTPS 地址", text: $viewState.sourceLink)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 360)
                         .accessibilityLabel("新的下载地址")
@@ -153,6 +156,14 @@ struct DownloadDetailSheet: View {
                     .disabled(viewState.sourceHeaders.count >= 64)
                 }
             }
+            if !requiresSourceRefresh {
+                Button(viewState.isPatchingSource ? "更新中…" : "更新来源", systemImage: "link.badge.plus") {
+                    updateSource()
+                }
+                .disabled(viewState.isPatchingSource || viewState.sourceLink
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
             if let message = viewState.sourceUpdateMessage {
                 Label(message, systemImage: "checkmark.circle.fill")
                     .font(.caption)
@@ -273,6 +284,7 @@ struct DownloadDetailSheet: View {
             headers[name] = header.value
         }
 
+        viewState.showsSourceEditor = true
         viewState.isPatchingSource = true
         viewState.errorMessage = nil
         viewState.sourceUpdateMessage = nil
@@ -287,10 +299,10 @@ struct DownloadDetailSheet: View {
                 viewState.isPatchingSource = false
                 viewState.sourceUpdateMessage = result.continued
                     ? "来源已更新，下载已继续。"
-                    : "来源已更新，任务保持暂停。"
+                    : "来源已更新，请点击继续。"
             } catch {
                 viewState.isPatchingSource = false
-                viewState.errorMessage = error.localizedDescription
+                viewState.errorMessage = DownloadFailureText.message(for: error)
             }
         }
     }
@@ -355,6 +367,7 @@ struct DownloadDetailSheet: View {
                 .disabled(viewState.isSaving)
             }
         }
+        .disabled(viewState.isPatchingSource)
     }
 
     private func detailRow(
@@ -458,6 +471,11 @@ struct DownloadDetailSheet: View {
         }
     }
 
+    private var canEditSource: Bool {
+        record.status == .failed || requiresSourceRefresh
+            || (viewState.showsSourceEditor && record.status == .paused)
+    }
+
     private var requiresSourceRefresh: Bool {
         record.status == .waitingForSourceRefresh || record.sourceRefreshReason != nil
     }
@@ -468,7 +486,7 @@ struct DownloadDetailSheet: View {
         case .preparing: return "准备中"
         case .downloading: return "下载中"
         case .paused: return "已暂停"
-        case .retrying: return "重试中"
+        case .retrying: return "等待重试"
         case .waitingForSourceRefresh: return "等待更新来源"
         case .completed: return "已完成"
         case .failed: return "失败"
@@ -540,6 +558,7 @@ private final class DownloadDetailViewState: ObservableObject {
     @Published var completionDialogMode: CompletionDialogMode
     @Published var didCopyLink = false
     @Published var isSaving = false
+    @Published var showsSourceEditor: Bool
     @Published var sourceLink = ""
     @Published var sourceHeaders = [SourceHeaderDraft()]
     @Published var isPatchingSource = false
@@ -548,6 +567,8 @@ private final class DownloadDetailViewState: ObservableObject {
     private var copyFeedbackRevision = 0
 
     init(record: DownloadRecord) {
+        showsSourceEditor = record.status == .failed || record.status == .waitingForSourceRefresh
+            || record.sourceRefreshReason != nil
         let settings = record.taskSettings ?? DownloadTaskSettings()
         threadCount = settings.threadCount.map(String.init) ?? ""
         speedLimit = settings.speedLimit.map(String.init) ?? ""
