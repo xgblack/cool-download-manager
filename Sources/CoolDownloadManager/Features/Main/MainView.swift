@@ -705,6 +705,8 @@ private struct SidebarView: View {
             .scrollContentBackground(.hidden)
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
+
+            SidebarUpdateButton(controller: coordinator.updates)
         }
     }
 

@@ -19,6 +19,7 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
         // a regular application menu remain available while the window is
         // closed and downloads continue in the background.
         NSApp.setActivationPolicy(.regular)
+        coordinator?.startUpdaterIfConfigured()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(settingsWindowDidBecomeKey(_:)),
@@ -77,7 +78,10 @@ struct CoolDownloadManagerApp: App {
     init() {
         let store = AppStore()
         _store = StateObject(wrappedValue: store)
-        _coordinator = StateObject(wrappedValue: AppCoordinator(store: store))
+        let coordinator = AppCoordinator(store: store)
+        _coordinator = StateObject(wrappedValue: coordinator)
+        appDelegate.coordinator = coordinator
+        appDelegate.terminationHandler = { [store] in await store.shutdown() }
     }
 
     var body: some Scene {
@@ -96,11 +100,6 @@ struct CoolDownloadManagerApp: App {
                     coordinator.configureSettingsWindowOpener {
                         openWindow(id: "settings")
                     }
-                    let currentStore = store
-                    appDelegate.terminationHandler = { [currentStore] in
-                        await currentStore.shutdown()
-                    }
-                    coordinator.startUpdaterIfConfigured()
                 }
         }
         .defaultSize(width: 1_280, height: 760)
@@ -115,11 +114,7 @@ struct CoolDownloadManagerApp: App {
                     openWindow(id: "about")
                 }
             }
-            CommandGroup(after: .appInfo) {
-                Button("检查更新") {
-                    coordinator.checkForUpdates()
-                }
-            }
+            AppUpdateCommands(controller: coordinator.updates, showMain: coordinator.showMainWindow)
             CommandGroup(replacing: .newItem) {
                 Button("新建下载") {
                     coordinator.presentAddDownload()
@@ -210,7 +205,7 @@ struct CoolDownloadManagerApp: App {
             }
         }
         Window("关于酷的下载管理器", id: "about") {
-            AboutView(checkForUpdates: coordinator.checkForUpdates)
+            AboutView(updates: coordinator.updates)
                 .appTheme(store.settings.theme)
                 .background {
                     WindowAccessor { window in

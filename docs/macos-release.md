@@ -48,16 +48,38 @@ Sparkle 的 Ed25519 私钥只存放在开发机钥匙串或 CI Secret，不进�
 
 ## 应用行为
 
-打包应用启动后，`SPUStandardUpdaterController` 读取 `Info.plist`：
+打包应用在应用级启动回调中初始化 `SPUUpdater`，不依赖主窗口出现。`AppUpdateController` 和侧栏使用同一份更新状态：
 
-- `SUEnableAutomaticChecks=true`，默认每 24 小时检查一次。
-- `SUAutomaticallyUpdate=true`，允许 Sparkle 在后台下载并在合适的退出/重启时机安装。
-- `SURequireSignedFeed=true` 与 `SUVerifyUpdateBeforeExtraction=true`，要求签名 appcast，并在解压前验证更新归档。
-- 菜单“检查更新”调用 Sparkle 的标准交互界面，负责版本比较、下载、验签、安装和重启；不再请求 GitHub REST API。
+- `SUEnableAutomaticChecks=true`，默认启动后静默检查，并每 24 小时检查一次；尊重 Sparkle 已保存的用户偏好，不在每次启动时覆盖。
+- `SUAutomaticallyUpdate=true`，默认允许后台下载、验签和准备安装。准备完成后侧栏底部显示“重启以更新”，用户点击后由 Sparkle 退出、安装并重新启动；普通工作期间不会强制重启。
+- `SURequireSignedFeed=true`、`SUSignedFeedFailureExpirationInterval=0` 与 `SUVerifyUpdateBeforeExtraction=true`，要求签名 appcast，并在解压前验证 ZIP。第三方镜像故障不能使清单验签在一段时间后自动降级。
+- 菜单、关于窗口和侧栏共享状态与操作；手动检查没有新版本时显示结果，后台检查失败只保留侧栏重试入口。安装授权等系统交互仍由 Sparkle 管理。
+- 显示“正在下载更新”和“正在准备更新”时不提供重启动作。“重启以更新”仅由 Sparkle 的安装就绪回调触发，不能根据 ZIP 下载完成推断。
+- 用户主动重启更新时，先在现有 UserDefaults 保存升级前活动下载的 ID；新构建启动后一次性恢复仍处于暂停状态的这些任务。普通退出及原本手动暂停的任务不受影响。恢复记录超过 24 小时、安装未成功或记录损坏时不自动启动任务。
 
-SwiftPM/Xcode 的开发运行没有发布 `Info.plist` 中的 `SUFeedURL`，因此不会启动 updater，也不会把开发构建误当成可更新版本。
+SwiftPM/Xcode 的开发运行没有发布 `Info.plist` 中的 `SUFeedURL` 和公钥，因此不会启动 updater，也不会把开发构建误当成可更新版本。
 
-自动检查只发生在应用运行期间；本方案不创建 LaunchAgent、登录项或常驻后台服务。用户退出应用后不会由独立进程唤醒检查，下一次启动时 Sparkle 会根据自己的检查间隔决定是否检查。
+自动检查只发生在应用运行期间，不创建 LaunchAgent、登录项或常驻后台服务。用户退出应用后不会由独立进程唤醒检查。
+
+### 内置 GitHub 更新线路
+
+应用内置 GitHub 官方原地址、`gh-proxy.com`、`ghfast.top` 和 `ghproxy.net`，用户无需配置代理。线路只作用于本项目的 GitHub Releases 更新资源，不修改普通下载任务或发布资产中的 URL。
+
+启动和测量过期后的检查先并发探测清单（最多两个请求同时进行，单份正文不超过 256 KiB）。各镜像返回的 appcast 必须使用应用公钥验证 Ed25519 签名，才能参与版本比较；优先较新的稳定构建，再比较清单响应耗时。错误、过旧或不可用的源保留在回退队列末尾，官方原地址始终保留。
+
+只有发现新版本后，才对该版本的固定 ZIP 地址探测最多前 256 KiB。必须返回匹配的 206/Content-Range，忽略 Range 的服务会立即停止读取；下载顺序按小样本吞吐单独排序。相同固定版本的下载测量缓存 6 小时，测量结果只保存在 UserDefaults，不发送遥测，也不构成镜像长期可用性承诺。
+
+实际更新仍由 Sparkle 再次验证原始清单和完整 ZIP。取清单失败或 ZIP 下载/验证失败时，在上一更新会话结束后依次切换线路；各阶段的失败只向下一候选线路推进，不循环；下载重试会重新读取当前有效清单。用户取消、没有更新及本地安装权限错误不会触发换源。后台原生下载只显示阶段状态；经用户交互路径下载时显示实际字节进度并允许取消。
+
+验证命令（完整 Xcode 环境）：
+
+```sh
+swift test --disable-sandbox --filter UpdateRoutingTests
+# 显式联网验证真实公开清单；常规回归不依赖外部服务
+COOLDM_LIVE_UPDATE_PROBE=1 swift test --disable-sandbox --filter UpdateRoutingTests/publishedSignedFeed
+```
+
+镜像选择和网络故障可以用注入传输的确定性测试验证；安装、退出和重启必须用旧/新两个发行包验收。本地单元测试和打包成功不代表已完成真实 GitHub Release 升级。
 
 历史上没有集成 Sparkle 的版本无法凭空获得 updater。首次升级必须让用户先通过手工 DMG 安装一个带 Sparkle 的版本，之后才能使用应用内的自动检查和自动安装。
 
@@ -83,7 +105,7 @@ appcast 的 enclosure 使用不可变的 tag 地址，例如：
 https://github.com/xgblack/cool-download-manager/releases/download/v1.0.5/CoolDownloadManager-macOS-arm64.zip
 ```
 
-DMG 不放入 appcast，因为它是人工拖拽安装介质；Sparkle 只消费 ZIP。稳定 appcast 每次只保留当前 Release 的一个 arm64 enclosure，旧版本的 ZIP/DMG 保留在各自不可变的 GitHub Release 中，但不合并进更新 feed。若未来改用其他托管，只需同步修改 `Info.plist`、发布脚本和 CI，不要让应用动态拼接下载 URL。
+DMG 不放入 appcast，因为它是人工拖拽安装介质；Sparkle 只消费 ZIP。稳定 appcast 每次只保留当前 Release 的一个 arm64 enclosure，旧版本的 ZIP/DMG 保留在各自不可变的 GitHub Release 中，但不合并进更新 feed。若未来改用其他托管，需要同步修改 `Info.plist`、发布脚本、CI 和更新路由的资源范围；代理前缀只改写清单已指定的请求地址，不根据版本号推测或拼接 ZIP 文件名。
 
 ## 本地构建和发布
 

@@ -40,6 +40,9 @@
 	<true/>
 	<key>SURequireSignedFeed</key>
 	<true/>
+	<!-- Public mirrors never relax feed authentication after a prolonged outage. -->
+	<key>SUSignedFeedFailureExpirationInterval</key>
+	<real>0</real>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>

@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import Sparkle
 import UniformTypeIdentifiers
 import CoolDownloadCore
 import CoolDownloadIntegration
@@ -65,12 +64,17 @@ final class AppCoordinator: NSObject, ObservableObject {
     private var focusSettingsWindowWhenRegistered = false
     private var browserRequests = BrowserDownloadRequestQueue()
     private var browserConfirmationSession: BrowserConfirmationSession?
-    private var updaterController: SPUStandardUpdaterController?
-    private var updaterStarted = false
+    let updates = AppUpdateController()
 
     init(store: AppStore) {
         self.store = store
         super.init()
+        updates.onNotice = { [weak self] message in self?.showNotice(message) }
+        updates.prepareForRelaunch = { [weak store] build in
+            guard let store else { throw UpdateRoutingError.invalidResponse }
+            try await store.prepareForUpdateRestart(targetBuild: build)
+        }
+        updates.discardRelaunchRecovery = { [weak store] in store?.discardUpdateRestartRecovery() }
         store.onBrowserDownloadRequest = { [weak self] request in
             self?.presentBrowserDownload(request)
         }
@@ -487,36 +491,13 @@ final class AppCoordinator: NSObject, ObservableObject {
         noticeMessage = message
     }
 
-    /// Starts Sparkle only for a packaged application that declares a feed.
-    /// SwiftPM/Xcode development launches do not have the release Info.plist,
-    /// so they must remain usable without an updater configuration.
     func startUpdaterIfConfigured() {
-        guard !updaterStarted else { return }
-        guard let feedString = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
-              let feedURL = URL(string: feedString),
-              let scheme = feedURL.scheme?.lowercased(),
-              scheme == "https" else {
-            return
-        }
-
-        let controller = SPUStandardUpdaterController(
-            startingUpdater: false,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-        updaterController = controller
-        updaterStarted = true
-        controller.startUpdater()
+        updates.startIfConfigured()
     }
 
     func checkForUpdates() {
         showMainWindow()
-        startUpdaterIfConfigured()
-        guard let updaterController else {
-            showNotice("当前开发构建未配置 Sparkle 更新源。")
-            return
-        }
-        updaterController.checkForUpdates(nil)
+        updates.checkForUpdates()
     }
 
     func copy(_ value: String) {

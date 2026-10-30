@@ -219,10 +219,39 @@ final class AppStore: ObservableObject {
                 errorMessage = error.localizedDescription
             }
             refreshSpeedLimiter()
+            if let defaults = settingsStore?.defaults.defaults {
+                do {
+                    let recovery = UpdateRestartRecovery(defaults: defaults)
+                    let build = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0
+                    let ids = try recovery.consume(currentBuild: build)
+                    let recoverySnapshot = await service.snapshot()
+                    let paused = Set(recoverySnapshot.downloads.filter { $0.status == .paused }.map(\.id))
+                    for id in ids where paused.contains(id) {
+                        do { try await service.start(id: id) }
+                        catch { errorMessage = "更新已完成，但部分下载任务未能恢复：\(error.localizedDescription)" }
+                    }
+                } catch {
+                    errorMessage = "更新恢复记录不可用，未自动启动下载任务。"
+                }
+            }
             isReady = true
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func prepareForUpdateRestart(targetBuild: String) async throws {
+        guard let service else { return }
+        guard let defaults = settingsStore?.defaults.defaults else {
+            throw SettingsStoreError.writeFailed(settingsURL, "无法保存更新后的下载恢复信息")
+        }
+        let snapshot = await service.snapshot()
+        try Task.checkCancellation()
+        try UpdateRestartRecovery(defaults: defaults).save(targetBuild: targetBuild, downloads: snapshot.downloads)
+    }
+
+    func discardUpdateRestartRecovery() {
+        settingsStore?.defaults.defaults.removeObject(forKey: UpdateRestartRecovery.key)
     }
 
     func shutdown() async {

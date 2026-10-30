@@ -3,7 +3,7 @@ import SwiftUI
 
 /// A quiet brand moment with useful version and support information.
 struct AboutView: View {
-    let checkForUpdates: () -> Void
+    @ObservedObject var updates: AppUpdateController
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
@@ -149,14 +149,15 @@ struct AboutView: View {
 
             Spacer()
 
-            Button(action: checkForUpdates) {
-                Label("检查更新", systemImage: "arrow.clockwise")
+            Button(action: { updates.performAction() }) {
+                Label(updates.menuTitle, systemImage: updates.state.systemImage)
                     .font(.system(size: 13, weight: .medium))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
+            .disabled(updates.state.isWorking)
         }
     }
 
