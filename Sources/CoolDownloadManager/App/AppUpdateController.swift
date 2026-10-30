@@ -77,6 +77,7 @@ struct UpdateRelease: Equatable, Sendable {
 
 @MainActor
 final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
+    @Published private(set) var settings = AppUpdateSettings.defaults
     @Published private(set) var state: UpdatePresentationState = .unavailable
     @Published private(set) var progress: Double?
     @Published private(set) var errorMessage: String?
@@ -88,13 +89,17 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     private let router: GitHubUpdateRouter
     private var updater: SPUUpdater?
     private var userDriver: SidebarUpdateDriver?
+    private var settingsObservations: [NSKeyValueObservation] = []
     private var engineStarted = false
     private var refreshTask: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
+    private var downloadRoutingTask: Task<Void, Never>?
     private var routeSelection = UpdateRouteSelection()
     private var attempt: UpdateRouteAttempt?
     private var lastRouteRefresh: Date?
     private var manualCheck = false
+    private var downloadRequested = false
+    private var backgroundDownloadAtCheckStart = false
     private var manualCheckPending = false
     private var retryPending = false
     private var deferredRefresh = false
@@ -108,15 +113,85 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     private var receivedBytes: UInt64 = 0
     private var expectedBytes: UInt64 = 0
     private var pathMonitor: NWPathMonitor?
+    private var networkWasSatisfied: Bool?
 
     private static let errorDomain = "CoolDownloadManager.Update"
     private static let refreshRequired = 1
     private static let staleFeedError = 2
+    private static let automaticWorkDisabled = 3
 
     init(bundle: Bundle = .main, router: GitHubUpdateRouter = GitHubUpdateRouter()) {
         self.bundle = bundle
         self.router = router
         super.init()
+        if isConfigured { configureUpdater() }
+    }
+
+    var isConfigured: Bool {
+        feedURL != nil && (bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)
+            .flatMap { Data(base64Encoded: $0) }?.count == 32
+    }
+
+    private func configureUpdater() {
+        let driver = SidebarUpdateDriver(hostBundle: bundle)
+        driver.controller = self
+        userDriver = driver
+        let updater = SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: self)
+        self.updater = updater
+        settingsObservations = [
+            updater.observe(\.automaticallyChecksForUpdates) { [weak self] _, _ in
+                Task { @MainActor in self?.readSettings() }
+            },
+            updater.observe(\.automaticallyDownloadsUpdates) { [weak self] _, _ in
+                Task { @MainActor in self?.readSettings() }
+            },
+            updater.observe(\.updateCheckInterval) { [weak self] _, _ in
+                Task { @MainActor in self?.readSettings() }
+            }
+        ]
+        readSettings()
+    }
+
+    private func readSettings() {
+        guard let updater else { return }
+        settings = AppUpdateSettings(
+            automaticallyChecksForUpdates: updater.automaticallyChecksForUpdates,
+            checkInterval: updater.updateCheckInterval.isFinite && updater.updateCheckInterval >= 3_600
+                ? updater.updateCheckInterval : AppUpdateSettings.defaults.checkInterval,
+            automaticallyDownloadsUpdates: updater.automaticallyDownloadsUpdates
+        )
+    }
+
+    func applySettings(_ settings: AppUpdateSettings) {
+        guard let updater else { return }
+        let previous = self.settings
+        let interval = settings.checkInterval.isFinite && settings.checkInterval >= 3_600
+            ? settings.checkInterval : AppUpdateSettings.defaults.checkInterval
+        if updater.updateCheckInterval != interval { updater.updateCheckInterval = interval }
+        if updater.automaticallyDownloadsUpdates != settings.automaticallyDownloadsUpdates {
+            updater.automaticallyDownloadsUpdates = settings.automaticallyDownloadsUpdates
+        }
+        if updater.automaticallyChecksForUpdates != settings.automaticallyChecksForUpdates {
+            updater.automaticallyChecksForUpdates = settings.automaticallyChecksForUpdates
+        }
+        readSettings()
+        // A setting change must also stop work that is waiting on route probes.
+        // Keep explicitly requested downloads and already prepared updates intact.
+        if refreshTask != nil && (!self.settings.automaticallyChecksForUpdates
+            || (previous.allowsAutomaticDownload && !self.settings.allowsAutomaticDownload)) {
+            let manual = manualCheck || manualCheckPending
+            refreshTask?.cancel()
+            refreshTask = nil
+            manualCheckPending = false
+            if manual || self.settings.automaticallyChecksForUpdates {
+                refreshAndStart(userInitiated: manual)
+            } else if state == .checking || state == .retrying {
+                state = .unavailable
+            }
+        }
+        if !self.settings.automaticallyChecksForUpdates && !manualCheck && !manualCheckPending {
+            deferredRefresh = false
+        }
     }
 
     private var feedURL: URL? {
@@ -143,17 +218,12 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func startIfConfigured() {
-        guard updater == nil, feedURL != nil,
-              let key = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
-              Data(base64Encoded: key)?.count == 32 else { return }
-        let driver = SidebarUpdateDriver(hostBundle: bundle)
-        driver.controller = self
-        userDriver = driver
-        let updater = SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: self)
-        self.updater = updater
+        guard !engineStarted, let updater else { return }
         routeSelection = router.cachedSelection()
-        refreshAndStart(userInitiated: false, starting: true)
-        observeNetwork()
+        // Sparkle uses its persisted last-check date and interval, including on
+        // launch. Refresh routes only when it actually asks to perform a check.
+        startEngine(updater)
+        if engineStarted { observeNetwork() }
     }
 
     func checkForUpdates() {
@@ -172,7 +242,8 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
             else if case .checking = state { manualCheck = true }
             return
         }
-        refreshAndStart(userInitiated: true, starting: false)
+        downloadRequested = false
+        refreshAndStart(userInitiated: true)
     }
 
     func performAction() {
@@ -192,28 +263,29 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         cancellation()
     }
 
-    private func refreshAndStart(userInitiated: Bool, starting: Bool) {
+    private func refreshAndStart(userInitiated: Bool) {
         guard refreshTask == nil, let feedURL, let updater,
               let keyText = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
               let key = Data(base64Encoded: keyText) else { return }
+        guard userInitiated || settings.automaticallyChecksForUpdates else { return }
         manualCheck = userInitiated
         errorMessage = nil
-        if starting && !updater.automaticallyChecksForUpdates && !userInitiated {
-            startEngine(updater)
-            return
-        }
         state = .checking
         refreshTask = Task { [weak self] in
             guard let self else { return }
             do {
-                self.routeSelection = try await self.router.refresh(feedURL: feedURL, publicKey: key, currentBuild: self.currentBuild)
+                self.routeSelection = try await self.router.refresh(
+                    feedURL: feedURL, publicKey: key, currentBuild: self.currentBuild,
+                    probeArchives: self.settings.allowsAutomaticDownload
+                )
                 self.lastRouteRefresh = Date()
             } catch is CancellationError {
-                self.refreshTask = nil
                 return
             } catch {
+                guard !Task.isCancelled else { return }
                 self.errorMessage = "更新线路检测失败，将尝试已知线路。"
             }
+            guard !Task.isCancelled else { return }
             self.refreshTask = nil
             if !self.engineStarted {
                 self.startEngine(updater)
@@ -242,6 +314,10 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
 
     private func beginCheck(userInitiated: Bool, retry: Bool) {
         guard let updater, !updater.sessionInProgress else { return }
+        guard userInitiated || settings.automaticallyChecksForUpdates else {
+            if state == .checking || state == .retrying { state = .unavailable }
+            return
+        }
         manualCheck = userInitiated
         if !retry { attempt = UpdateRouteAttempt(selection: routeSelection) }
         retryPending = retry
@@ -259,7 +335,36 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     private func beginDownload() {
         guard let reply = foundReply else { return }
         foundReply = nil
-        reply(.install)
+        downloadRequested = true
+        guard let feedURL,
+              let keyText = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
+              let key = Data(base64Encoded: keyText) else { reply(.install); return }
+        if let release = currentRelease { state = .downloading(version: release.version) }
+        // Manual-only users do not fetch ZIP samples until they choose Download.
+        downloadRoutingTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.routeSelection = try await self.router.refresh(
+                    feedURL: feedURL, publicKey: key, currentBuild: self.currentBuild
+                )
+                self.attempt = UpdateRouteAttempt(selection: self.routeSelection)
+                self.lastRouteRefresh = Date()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.errorMessage = "更新线路检测失败，将尝试已知线路。"
+            }
+            guard !Task.isCancelled else { return }
+            self.downloadRoutingTask = nil
+            self.cancellation = nil
+            reply(.install)
+        }
+        cancellation = { [weak self] in
+            self?.downloadRoutingTask?.cancel()
+            self?.downloadRoutingTask = nil
+            reply(.dismiss)
+        }
     }
 
     private func restartToUpdate() {
@@ -293,15 +398,20 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     private func observeNetwork() {
+        guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard satisfied, self.refreshTask == nil, let updater = self.updater,
-                      updater.automaticallyChecksForUpdates, !updater.sessionInProgress,
-                      let lastRefresh = self.lastRouteRefresh, Date().timeIntervalSince(lastRefresh) > 60 else { return }
-                self.refreshAndStart(userInitiated: false, starting: false)
+                let wasSatisfied = self.networkWasSatisfied
+                self.networkWasSatisfied = satisfied
+                guard wasSatisfied == false, satisfied, self.refreshTask == nil,
+                      let updater = self.updater, self.settings.automaticallyChecksForUpdates,
+                      !updater.sessionInProgress, self.state == .unavailable || self.state == .failed,
+                      self.state == .failed || self.settings.isCheckDue(lastCheck: updater.lastUpdateCheckDate),
+                      self.lastRouteRefresh.map({ Date().timeIntervalSince($0) > 60 }) ?? true else { return }
+                self.refreshAndStart(userInitiated: false)
             }
         }
         monitor.start(queue: DispatchQueue(label: "com.cooldownloadmanager.update-network"))
@@ -314,12 +424,20 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        if updateCheck == .updatesInBackground {
+            if !retryPending { manualCheck = false }
+            guard settings.automaticallyChecksForUpdates else {
+                throw NSError(domain: Self.errorDomain, code: Self.automaticWorkDisabled)
+            }
+            backgroundDownloadAtCheckStart = settings.allowsAutomaticDownload
+        }
         if refreshTask != nil || (lastRouteRefresh.map { Date().timeIntervalSince($0) > 6 * 3_600 } ?? true) {
             deferredRefresh = true
             throw NSError(domain: Self.errorDomain, code: Self.refreshRequired)
         }
         let isRetry = retryPending
         if !isRetry {
+            downloadRequested = false
             attempt = UpdateRouteAttempt(selection: routeSelection)
             userCancelled = false
             currentRelease = nil
@@ -341,6 +459,15 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         guard !staleFeed, (Int(updateItem.versionString) ?? 0) >= routeSelection.latestBuild else {
             staleFeed = true
             throw NSError(domain: Self.errorDomain, code: Self.staleFeedError)
+        }
+        if updateCheck == .updatesInBackground {
+            guard settings.automaticallyChecksForUpdates else {
+                throw NSError(domain: Self.errorDomain, code: Self.automaticWorkDisabled)
+            }
+            if backgroundDownloadAtCheckStart && !settings.allowsAutomaticDownload {
+                updateAvailable(UpdateRelease(updateItem))
+                throw NSError(domain: Self.errorDomain, code: Self.automaticWorkDisabled)
+            }
         }
     }
 
@@ -374,12 +501,19 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
+        downloadRoutingTask?.cancel()
+        downloadRoutingTask = nil
         cancellation = nil
         foundReply = nil
         if error != nil { abandonRelaunch() }
         if deferredRefresh {
             deferredRefresh = false
-            refreshAndStart(userInitiated: manualCheck, starting: false)
+            refreshAndStart(userInitiated: manualCheck || manualCheckPending)
+            return
+        }
+        if let error = error as NSError?, error.domain == Self.errorDomain,
+           [Self.automaticWorkDisabled, Self.refreshRequired].contains(error.code) {
+            if state == .checking || state == .retrying { state = .unavailable }
             return
         }
         if userCancelled || Self.isCancellation(error) {
@@ -396,7 +530,7 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
             return
         }
         let failure = Self.retryableFailure(error, phase: phase, staleFeed: staleFeed)
-        if let failure, attempt?.advance(after: failure) == true {
+        if let failure, (manualCheck || settings.automaticallyChecksForUpdates), attempt?.advance(after: failure) == true {
             state = .retrying
             let manual = manualCheck
             // The completion callback is the point at which Sparkle has released
@@ -454,11 +588,11 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
 
     // These callbacks come only from our user driver. Background automatic
     // downloads use Sparkle's installation-ready delegate above instead.
-    fileprivate func userDriverFound(_ item: SUAppcastItem, state: SPUUserUpdateState, reply: @escaping (SPUUserUpdateChoice) -> Void) {
+    func userDriverFound(_ item: SUAppcastItem, stage: SPUUserUpdateStage, reply: @escaping (SPUUserUpdateChoice) -> Void) {
         currentRelease = UpdateRelease(item)
-        if state.stage == .installing {
+        if stage == .installing {
             readyToInstall(UpdateRelease(item), handler: { reply(.install) })
-        } else if updater?.automaticallyDownloadsUpdates == true {
+        } else if downloadRequested || settings.allowsAutomaticDownload {
             reply(.install)
         } else {
             foundReply = reply
@@ -494,6 +628,8 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     fileprivate func userDriverDismissed() {
+        downloadRoutingTask?.cancel()
+        downloadRoutingTask = nil
         cancellation = nil
         foundReply = nil
     }
@@ -521,7 +657,7 @@ private final class SidebarUpdateDriver: NSObject, SPUUserDriver {
         if appcastItem.isInformationOnlyUpdate || appcastItem.isMajorUpgrade {
             standard.showUpdateFound(with: appcastItem, state: state, reply: reply)
         } else {
-            controller?.userDriverFound(appcastItem, state: state, reply: reply)
+            controller?.userDriverFound(appcastItem, stage: state.stage, reply: reply)
         }
     }
     func showUpdateReleaseNotes(with downloadData: SPUDownloadData) {}

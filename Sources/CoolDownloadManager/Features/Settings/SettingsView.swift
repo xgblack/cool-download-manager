@@ -14,6 +14,7 @@ enum SettingsWindowLayout {
 struct SettingsView: View {
     @ObservedObject var store: AppStore
     @ObservedObject var coordinator: AppCoordinator
+    @ObservedObject private var updates: AppUpdateController
     @StateObject private var viewState: SettingsViewState
     @StateObject private var windowGuard = SettingsWindowGuard()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -21,9 +22,11 @@ struct SettingsView: View {
     init(store: AppStore, coordinator: AppCoordinator) {
         self.store = store
         self.coordinator = coordinator
+        self.updates = coordinator.updates
         _viewState = StateObject(wrappedValue: SettingsViewState(
             model: store.settings,
-            perHostItems: store.perHostSettings
+            perHostItems: store.perHostSettings,
+            updateSettings: coordinator.updates.settings
         ))
     }
 
@@ -46,6 +49,7 @@ struct SettingsView: View {
                 }
 
                 detailContent
+                    .disabled(viewState.isSaving)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -68,7 +72,8 @@ struct SettingsView: View {
                 }, discard: {
                     viewState.markAllSaved(
                         model: store.settings,
-                        perHostItems: store.perHostSettings
+                        perHostItems: store.perHostSettings,
+                        updateSettings: updates.settings
                     )
                 })
             }
@@ -90,6 +95,9 @@ struct SettingsView: View {
         } message: {
             Text(viewState.errorMessage ?? "")
         }
+        .onChange(of: updates.settings) { _, updated in
+            viewState.mergeUpdateSettings(updated)
+        }
         .onChange(of: store.settings) { _, updated in
             guard !viewState.isSaving else { return }
             viewState.mergeDefaultFolder(updated.defaultDownloadFolder)
@@ -109,7 +117,8 @@ struct SettingsView: View {
             if !viewState.isDirty {
                 viewState.markAllSaved(
                     model: store.settings,
-                    perHostItems: store.perHostSettings
+                    perHostItems: store.perHostSettings,
+                    updateSettings: updates.settings
                 )
             }
             apply(coordinator.settingsDestination)
@@ -163,7 +172,7 @@ struct SettingsView: View {
     private var settingsPage: some View {
         switch viewState.section {
         case .general:
-            GeneralSettingsPage(store: store, state: viewState)
+            GeneralSettingsPage(store: store, state: viewState, updatesAvailable: updates.isConfigured)
         case .downloads:
             DownloadSettingsPage(state: viewState, onChooseFolder: {
                 viewState.isFolderPickerPresented = true
@@ -212,9 +221,7 @@ struct SettingsView: View {
     }
 
     private func resetToDefaults() {
-        viewState.model = AppSettingsModel.defaults()
-        viewState.quantityInputErrors.removeAll()
-        viewState.quantityInputRevision += 1
+        viewState.resetToDefaults()
     }
 
     private func save() {
@@ -226,10 +233,13 @@ struct SettingsView: View {
         }
         viewState.isSaving = true
         viewState.errorMessage = nil
+        let updateSettings = viewState.updateSettings
         Task { @MainActor in
             do {
                 try await store.saveSettings(viewState.model)
+                updates.applySettings(updateSettings)
                 viewState.markModelSaved(store.settings)
+                viewState.markUpdateSettingsSaved(updates.settings)
             } catch {
                 viewState.errorMessage = error.localizedDescription
             }
@@ -358,6 +368,7 @@ private struct SettingsWindowHeader: View {
 @MainActor
 final class SettingsViewState: ObservableObject {
     @Published var model: AppSettingsModel
+    @Published var updateSettings: AppUpdateSettings
     @Published var section: SettingsSection = .general
     @Published var path: [SettingsRoute] = []
     @Published var isSidebarVisible = true
@@ -368,15 +379,42 @@ final class SettingsViewState: ObservableObject {
     @Published var quantityInputRevision = 0
     let perHostState: PerHostSettingsViewState
     private var savedModel: AppSettingsModel
+    private var savedUpdateSettings: AppUpdateSettings
 
-    init(model: AppSettingsModel, perHostItems: [PerHostSettingsItem]) {
+    init(model: AppSettingsModel, perHostItems: [PerHostSettingsItem], updateSettings: AppUpdateSettings = .defaults) {
         self.model = model
         self.savedModel = model
+        self.updateSettings = updateSettings
+        self.savedUpdateSettings = updateSettings
         self.perHostState = PerHostSettingsViewState(items: perHostItems)
     }
 
     var isDirty: Bool {
-        model != savedModel || perHostState.isDirty || !quantityInputErrors.isEmpty
+        model != savedModel || updateSettings != savedUpdateSettings || perHostState.isDirty || !quantityInputErrors.isEmpty
+    }
+
+    func resetToDefaults() {
+        model = AppSettingsModel.defaults()
+        updateSettings = .defaults
+        quantityInputErrors.removeAll()
+        quantityInputRevision += 1
+    }
+
+    func mergeUpdateSettings(_ updated: AppUpdateSettings) {
+        func merge<Value: Equatable>(_ key: WritableKeyPath<AppUpdateSettings, Value>) {
+            if updateSettings[keyPath: key] == savedUpdateSettings[keyPath: key] {
+                updateSettings[keyPath: key] = updated[keyPath: key]
+            }
+            savedUpdateSettings[keyPath: key] = updated[keyPath: key]
+        }
+        merge(\.automaticallyChecksForUpdates)
+        merge(\.checkInterval)
+        merge(\.automaticallyDownloadsUpdates)
+    }
+
+    func markUpdateSettingsSaved(_ settings: AppUpdateSettings) {
+        updateSettings = settings
+        savedUpdateSettings = settings
     }
 
     func binding<Value>(_ keyPath: WritableKeyPath<AppSettingsModel, Value>) -> Binding<Value> {
@@ -447,9 +485,10 @@ final class SettingsViewState: ObservableObject {
         perHostState.replaceItems(items)
     }
 
-    func markAllSaved(model: AppSettingsModel, perHostItems: [PerHostSettingsItem]) {
+    func markAllSaved(model: AppSettingsModel, perHostItems: [PerHostSettingsItem], updateSettings: AppUpdateSettings) {
         markModelSaved(model)
         markPerHostSaved(perHostItems)
+        markUpdateSettingsSaved(updateSettings)
     }
 }
 

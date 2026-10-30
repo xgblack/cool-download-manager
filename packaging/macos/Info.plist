@@ -32,6 +32,9 @@
 	<string>7ZXx8uW6s1+mWVhas1H/bD4mc6PtZNU+WavvwRSbGpQ=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<!-- Keep the remembered download preference independent of automatic checks. -->
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
 	<key>SUAutomaticallyUpdate</key>
 	<true/>
 	<key>SUScheduledCheckInterval</key>

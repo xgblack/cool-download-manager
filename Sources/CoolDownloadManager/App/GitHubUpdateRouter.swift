@@ -198,7 +198,7 @@ final class GitHubUpdateRouter {
         )
     }
 
-    func refresh(feedURL: URL, publicKey: Data, currentBuild: Int) async throws -> UpdateRouteSelection {
+    func refresh(feedURL: URL, publicKey: Data, currentBuild: Int, probeArchives: Bool = true) async throws -> UpdateRouteSelection {
         let cached = cachedSelection()
         let transport = self.transport
         let feeds: [UpdateFeedProbe] = await Self.probeInPairs(cached.feedRoutes) { route in
@@ -221,7 +221,7 @@ final class GitHubUpdateRouter {
             // Only a real newer version needs archive probes. Reuse recent samples
             // for the same immutable archive rather than measuring on every launch.
             let recent = Date().timeIntervalSince1970 - defaults.double(forKey: "updateArchiveProbeDate") < 6 * 3_600
-            if newest.build > currentBuild,
+            if probeArchives, newest.build > currentBuild,
                !(recent && defaults.integer(forKey: "updateArchiveProbeBuild") == newest.build) {
                 let probes: [UpdateArchiveProbe] = await Self.probeInPairs(cached.downloadRoutes) { route in
                     do {

@@ -12,6 +12,7 @@ private enum SettingsLayout {
 struct GeneralSettingsPage: View {
     @ObservedObject var store: AppStore
     @ObservedObject var state: SettingsViewState
+    var updatesAvailable = true
 
     var body: some View {
         SettingsPage {
@@ -41,6 +42,8 @@ struct GeneralSettingsPage: View {
                     }
                 }
             }
+
+            UpdateSettingsGroup(settings: $state.updateSettings, isAvailable: updatesAvailable)
 
             NativeSettingsGroup(title: "窗口") {
                 NativeSettingsToggleRow(
@@ -98,6 +101,60 @@ struct GeneralSettingsPage: View {
                 }
             }
         }
+    }
+}
+
+struct UpdateSettingsGroup: View {
+    @Binding var settings: AppUpdateSettings
+    var isAvailable = true
+
+    var body: some View {
+        NativeSettingsGroup(title: "软件更新") {
+            NativeSettingsToggleRow("自动检查更新", isOn: $settings.automaticallyChecksForUpdates)
+                .disabled(!isAvailable)
+                .foregroundStyle(isAvailable ? .primary : .secondary)
+            NativeSettingsRow(title: "检查更新间隔") {
+                Picker("检查更新间隔", selection: $settings.checkInterval) {
+                    ForEach(intervalOptions, id: \.self) { interval in
+                        Text(AppUpdateSettings.intervalTitle(interval)).tag(interval)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+            }
+            .disabled(!isAvailable || !settings.automaticallyChecksForUpdates)
+            .foregroundStyle(isAvailable && settings.automaticallyChecksForUpdates ? .primary : .secondary)
+            NativeSettingsToggleRow(
+                "后台自动下载更新",
+                isOn: $settings.automaticallyDownloadsUpdates,
+                showsDivider: false
+            )
+            .disabled(!isAvailable || !settings.automaticallyChecksForUpdates)
+            .foregroundStyle(isAvailable && settings.automaticallyChecksForUpdates ? .primary : .secondary)
+            Text(explanation)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 18)
+                .padding(.top, 8)
+        }
+    }
+
+    private var intervalOptions: [TimeInterval] {
+        let options = AppUpdateSettings.intervalOptions
+        return options.contains(settings.checkInterval) ? options : (options + [settings.checkInterval]).sorted()
+    }
+
+    private var explanation: String {
+        if !isAvailable { return "当前开发构建未配置更新源，更新设置在发行版中可用。" }
+        if !settings.automaticallyChecksForUpdates {
+            return "已关闭自动检查，仍可从应用菜单或“关于”手动检查并下载。修改保存后生效。"
+        }
+        if !settings.automaticallyDownloadsUpdates {
+            return "应用运行期间定期检查，发现新版本后在侧栏提醒，点击后下载。修改保存后生效。"
+        }
+        return "应用运行期间定期检查并下载更新，准备完成后提醒重启。修改保存后生效。"
     }
 }
 

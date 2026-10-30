@@ -147,6 +147,21 @@ struct UpdateRoutingTests {
         #expect(await noUpdateRecorder.counts().archive == 0)
     }
 
+    @Test("仅检查更新时不探测安装包，之后显式下载仍会测量线路")
+    func feedOnlyRefreshDefersArchiveProbes() async throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let recorder = ProbeRecorder(feeds: ["github.com": try signedFeed(build: 1020, key: key)])
+        let router = GitHubUpdateRouter(defaults: try defaults(), transport: { request, limit in
+            try await recorder.respond(request, limit: limit)
+        })
+        let checked = try await router.refresh(feedURL: feedURL, publicKey: key.publicKey.rawRepresentation,
+                                               currentBuild: 1019, probeArchives: false)
+        #expect(checked.latestBuild == 1020)
+        #expect(await recorder.counts().archive == 0)
+        _ = try await router.refresh(feedURL: feedURL, publicKey: key.publicKey.rawRepresentation, currentBuild: 1019)
+        #expect(await recorder.counts().archive == 4)
+    }
+
     @Test("探测全失败仍保留全部候选线路供实际检查重试")
     func allProbeFailuresPreserveFallbacks() async throws {
         let router = GitHubUpdateRouter(defaults: try defaults(), transport: { _, _ in throw URLError(.timedOut) })
