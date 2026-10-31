@@ -315,11 +315,23 @@ struct DownloadDetailSheet: View {
                 }
             }
             if record.status == .completed {
-                Button("打开文件", systemImage: "arrow.up.right.square") {
-                    coordinator.openFile(record)
-                }
-                Button("打开所在目录", systemImage: "folder") {
-                    coordinator.revealFile(record)
+                if FileQuickActionKind.detect(record) != nil {
+                    Menu("更多操作", systemImage: "ellipsis.circle") {
+                        Button("打开文件", systemImage: "arrow.up.right.square") {
+                            coordinator.openFile(record)
+                        }
+                        Button("打开所在目录", systemImage: "folder") {
+                            coordinator.revealFile(record)
+                        }
+                        OpenWithMenu(record: record, coordinator: coordinator)
+                    }
+                } else {
+                    Button("打开文件", systemImage: "arrow.up.right.square") {
+                        coordinator.openFile(record)
+                    }
+                    Button("打开所在目录", systemImage: "folder") {
+                        coordinator.revealFile(record)
+                    }
                 }
             }
             Spacer()
@@ -358,6 +370,12 @@ struct DownloadDetailSheet: View {
                         store.startSelected()
                     }
                 }
+            }
+            if viewState.tab == .info {
+                FileQuickActionButton(record: record, coordinator: coordinator)
+                    .buttonStyle(.borderedProminent)
+            } else {
+                FileQuickActionButton(record: record, coordinator: coordinator)
             }
             if viewState.tab == .settings {
                 Button(viewState.isSaving ? "保存中…" : "保存下载设置") {
