@@ -65,10 +65,15 @@ final class AppCoordinator: NSObject, ObservableObject {
     private var browserRequests = BrowserDownloadRequestQueue()
     private var browserConfirmationSession: BrowserConfirmationSession?
     let updates = AppUpdateController()
+    let fileActions = FileQuickActionController()
 
     init(store: AppStore) {
         self.store = store
         super.init()
+        fileActions.onPresent = { [weak self] session in
+            guard let self else { return }
+            utilityPanels.showFileAction(session, coordinator: self)
+        }
         updates.onNotice = { [weak self] message in self?.showNotice(message) }
         updates.prepareForRelaunch = { [weak store] build in
             guard let store else { throw UpdateRoutingError.invalidResponse }
@@ -512,6 +517,44 @@ final class AppCoordinator: NSObject, ObservableObject {
         }
     }
 
+    func startFileQuickAction(_ record: DownloadRecord) {
+        guard let current = store.downloadList.record(id: record.id),
+              current.status == .completed else {
+            showNotice("下载记录已变更，请重新选择已完成的任务。")
+            return
+        }
+        guard fileActions.start(current) != nil else {
+            showNotice("文件已被移动、删除，或不支持快速安装。")
+            return
+        }
+    }
+
+    func openQuickArchive(_ record: DownloadRecord, onOpened: (() -> Void)? = nil, onFailure: ((String) -> Void)? = nil) {
+        guard let current = store.downloadList.record(id: record.id), current.status == .completed else {
+            let message = "下载记录已变更，请重新选择已完成的任务。"
+            if let onFailure { onFailure(message) } else { showNotice(message) }
+            return
+        }
+        if NSWorkspace.shared.urlForApplication(toOpen: current.destinationURL) == nil {
+            DownloadFileOpener.chooseApplication(for: current, message: "未找到此格式的默认应用，请选择用于解压的应用。") { [weak self] error in
+                if let error {
+                    if let onFailure { onFailure(error) } else { self?.showNotice(error) }
+                } else { onOpened?() }
+            }
+            return
+        }
+        DownloadFileOpener.open(current) { [weak self] message in
+            guard let message else { onOpened?(); return }
+            // Cancellation leaves the completion window and source untouched;
+            // choosing an app does not change the system file association.
+            DownloadFileOpener.chooseApplication(for: current, message: message) { [weak self] selectionError in
+                guard let selectionError else { onOpened?(); return }
+                let text = "\(message)\n\(selectionError)"
+                if let onFailure { onFailure(text) } else { self?.showNotice(text) }
+            }
+        }
+    }
+
     func revealFile(_ record: DownloadRecord) {
         NSWorkspace.shared.activateFileViewerSelecting([record.destinationURL])
     }
@@ -631,6 +674,7 @@ struct BrowserDownloadRequestQueue: Equatable {
 private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private var progressPanels: [DownloadID: NSPanel] = [:]
     private var completionPanels: [DownloadID: NSPanel] = [:]
+    private var fileActionPanels: [UUID: NSPanel] = [:]
     private var completionCloses: [DownloadID: () -> Void] = [:]
     private var browserConfirmationPanel: NSPanel?
     private var browserConfirmationState: BrowserDownloadConfirmationState?
@@ -718,6 +762,26 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
                 y: panel.frame.origin.y - offset
             )
         )
+    }
+
+    func showFileAction(_ session: FileQuickActionSession, coordinator: AppCoordinator) {
+        if let existing = fileActionPanels[session.id] {
+            present(existing, focus: true)
+            return
+        }
+        let close = { [weak self] in self?.hideFileAction(session.id) }
+        let content = FileQuickActionView(session: session, coordinator: coordinator, onClose: { close() })
+        let window = panel(existing: nil, title: "文件安装", size: NSSize(width: 640, height: 420),
+            floatsAboveNormalWindows: false, content: content)
+        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.file-action.\(session.id)")
+        fileActionPanels[session.id] = window
+        present(window, focus: true)
+    }
+
+    private func hideFileAction(_ id: UUID) {
+        guard let window = fileActionPanels.removeValue(forKey: id) else { return }
+        window.orderOut(nil)
+        window.contentViewController = nil
     }
 
     func showBrowserConfirmation(
@@ -872,6 +936,10 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let id = fileActionPanels.first(where: { $0.value === sender })?.key {
+            hideFileAction(id)
+            return false
+        }
         if sender.identifier?.rawValue == "com.cooldownloadmanager.browser-confirmation" {
             guard sender === browserConfirmationPanel else {
                 // This is a retired panel. It must not invoke the callback

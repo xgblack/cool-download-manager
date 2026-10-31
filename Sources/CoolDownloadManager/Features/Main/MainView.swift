@@ -892,6 +892,7 @@ private struct DownloadTableRow: View {
         .onHover { isHovered = $0 }
         .onTapGesture(count: 2, perform: onOpen)
         .contextMenu {
+            FileQuickActionButton(record: record, coordinator: coordinator)
             Button("打开文件", systemImage: "arrow.up.right.square") { onOpen() }
                 .disabled(record.status != .completed)
             OpenWithMenu(record: record, coordinator: coordinator)

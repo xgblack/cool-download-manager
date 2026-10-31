@@ -70,22 +70,40 @@ struct CompletionView: View {
             }
             .keyboardShortcut(.cancelAction)
 
-            Button("显示位置", systemImage: "folder") {
-                coordinator.revealFile(currentRecord)
-                onClose()
-            }
-            .disabled(currentRecord.status != .completed)
-
-            OpenWithMenu(record: currentRecord, coordinator: coordinator, onFailure: { openError = $0 }, onOpened: onClose)
-
-            Button("打开文件", systemImage: "arrow.up.right.square") {
-                DownloadFileOpener.open(currentRecord) { message in
-                    if let message { openError = message }
-                    else { onClose() }
+            Menu("更多操作", systemImage: "ellipsis.circle") {
+                if FileQuickActionKind.detect(currentRecord) == .font {
+                    Button("使用字体册打开", systemImage: "textformat") {
+                        let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.FontBook")
+                        DownloadFileOpener.openURL(currentRecord.destinationURL, application: application) { message in
+                            if let message { openError = message } else { onClose() }
+                        }
+                    }
                 }
+                Button("打开文件", systemImage: "arrow.up.right.square") {
+                    DownloadFileOpener.open(currentRecord) { message in
+                        if let message { openError = message } else { onClose() }
+                    }
+                }
+                Button("显示位置", systemImage: "folder") {
+                    coordinator.revealFile(currentRecord)
+                    onClose()
+                }
+                OpenWithMenu(record: currentRecord, coordinator: coordinator, onFailure: { openError = $0 }, onOpened: onClose)
             }
-            .buttonStyle(.borderedProminent)
             .disabled(currentRecord.status != .completed)
+
+            if FileQuickActionKind.detect(currentRecord) != nil {
+                FileQuickActionButton(record: currentRecord, coordinator: coordinator, onOpened: onClose, onFailure: { openError = $0 })
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Button("打开文件", systemImage: "arrow.up.right.square") {
+                    DownloadFileOpener.open(currentRecord) { message in
+                        if let message { openError = message } else { onClose() }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(currentRecord.status != .completed)
+            }
         }
     }
 

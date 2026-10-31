@@ -56,7 +56,7 @@ enum DownloadFileOpener {
     static func open(_ record: DownloadRecord, application: URL? = nil, completion: @escaping @MainActor (String?) -> Void) {
         if let error = validationError(for: record) { completion(error); return }
         guard let application else {
-            completion(NSWorkspace.shared.open(record.destinationURL) ? nil : "系统未能打开文件，请使用“打开方式”选择应用。")
+            openURL(record.destinationURL, completion: completion)
             return
         }
         guard (try? application.resourceValues(forKeys: [.isApplicationKey]).isApplication) == true else {
@@ -69,10 +69,27 @@ enum DownloadFileOpener {
         }
     }
 
-    static func chooseApplication(for record: DownloadRecord, completion: @escaping @MainActor (String?) -> Void) {
+    static func openURL(_ url: URL, application: URL? = nil, completion: @escaping @MainActor (String?) -> Void) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            completion("文件已被移动或删除，无法打开。")
+            return
+        }
+        let report: @Sendable (NSRunningApplication?, Error?) -> Void = { _, error in
+            let message = error.map { "系统未能打开文件：\($0.localizedDescription)" }
+            Task { @MainActor in completion(message) }
+        }
+        if let application {
+            NSWorkspace.shared.open([url], withApplicationAt: application, configuration: .init(), completionHandler: report)
+        } else {
+            NSWorkspace.shared.open(url, configuration: .init(), completionHandler: report)
+        }
+    }
+
+    static func chooseApplication(for record: DownloadRecord, message: String? = nil, completion: @escaping @MainActor (String?) -> Void) {
         if let error = validationError(for: record) { completion(error); return }
         let panel = NSOpenPanel()
-        panel.title = "选择打开文件的应用"
+        panel.title = FileQuickActionKind.detect(record) == .archive ? "选择解压应用" : "选择打开文件的应用"
+        if let message { panel.message = message }
         panel.allowedContentTypes = [.application]
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -97,7 +114,7 @@ struct OpenWithMenu: View {
     }
 
     var body: some View {
-        Menu("打开方式", systemImage: "app.badge") {
+        Menu(FileQuickActionKind.detect(record) == .archive ? "解压方式" : "打开方式", systemImage: "app.badge") {
             if applications.isEmpty { Text("未找到关联应用") }
             ForEach(applications) { application in
                 Button(application.name + (application.isDefault ? "（默认）" : "")) {

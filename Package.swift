@@ -53,6 +53,7 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6")
     ],
     targets: [
+        .target(name: "CoolFileActions", path: "Sources/CoolFileActions"),
         .target(
             name: "CoolDownloadCore",
             path: "Sources/CoolDownloadCore"
@@ -67,6 +68,7 @@ let package = Package(
             dependencies: [
                 "CoolDownloadCore",
                 "CoolDownloadIntegration",
+                "CoolFileActions",
                 .product(name: "Sparkle", package: "sparkle")
             ],
             path: "Sources/CoolDownloadManager"
@@ -78,7 +80,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "CoolDownloadManagerCLI",
-            dependencies: ["CoolDownloadCore", "CoolDownloadIntegration"],
+            dependencies: ["CoolDownloadCore", "CoolDownloadIntegration", "CoolFileActions"],
             path: "Sources/CoolDownloadManagerCLI"
         ),
         .executableTarget(
@@ -102,7 +104,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CoolDownloadManagerTests",
-            dependencies: ["CoolDownloadManager", "CoolDownloadCore", "CoolDownloadIntegration"],
+            dependencies: ["CoolDownloadManager", "CoolDownloadCore", "CoolDownloadIntegration", "CoolFileActions"],
             path: "Tests/CoolDownloadManagerTests",
             swiftSettings: testSwiftSettings,
             linkerSettings: managerTestLinkerSettings

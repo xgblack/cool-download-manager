@@ -81,7 +81,10 @@ struct CoolDownloadManagerApp: App {
         let coordinator = AppCoordinator(store: store)
         _coordinator = StateObject(wrappedValue: coordinator)
         appDelegate.coordinator = coordinator
-        appDelegate.terminationHandler = { [store] in await store.shutdown() }
+        appDelegate.terminationHandler = { [store, coordinator] in
+            await coordinator.fileActions.prepareForTermination()
+            await store.shutdown()
+        }
     }
 
     var body: some Scene {
