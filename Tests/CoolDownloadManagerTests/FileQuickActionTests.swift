@@ -355,6 +355,17 @@ struct FileQuickActionTests {
         #expect(reply.error.contains("系统管理员授权"))
     }
 
+    @Test("Cancellation still observes the child exit so mounted images can be safely detached")
+    func cancelledProcessKeepsExitStatus() async throws {
+        let task = Task {
+            try await FileActionProcess.run("/bin/sh", ["-c", "printf 'started\\n'; sleep 0.25; printf 'finished'"])
+        }
+        task.cancel()
+        let result = try await task.value
+        #expect(result.status == 0)
+        #expect(String(decoding: result.output, as: UTF8.self) == "started\nfinished")
+    }
+
     @Test("Process runner drains stderr while collecting stdout")
     func processPipes() async throws {
         let result = try await FileActionProcess.run("/bin/sh", ["-c", "i=0; while [ $i -lt 5000 ]; do printf 'a long enough diagnostic line from the fixture\n' >&2; i=$((i+1)); done; printf 'complete'"])

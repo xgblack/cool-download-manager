@@ -194,6 +194,9 @@ final class DownloadListStore: ObservableObject {
     private var recordsByID: [DownloadID: DownloadRecord] = [:]
     private var recordIndexes: [DownloadID: Int] = [:]
     private var knownStatuses: [DownloadID: DownloadStatus] = [:]
+    // A refreshed snapshot can reach completed before the matching event.
+    // Keep notification history separate from the visible record status.
+    private var announcedCompletions: [DownloadID: Date] = [:]
     private var previousProgress: [DownloadID: (bytes: Int64, date: Date)] = [:]
     private var averageSpeedSessions: [DownloadID: (bytes: Int64, date: Date)] = [:]
     private var partSpeedSampler = DownloadPartSpeedSampler()
@@ -312,6 +315,10 @@ final class DownloadListStore: ObservableObject {
         case .created(let record), .updated(let record):
             if let current = recordsByID[record.id],
                shouldKeepCurrent(current, over: record) {
+                if record.status == .completed, current.status == .completed,
+                   record.completedAt == current.completedAt {
+                    announceCompletion(current, previousStatus: .completed)
+                }
                 return
             }
             let now = Date()
@@ -325,6 +332,7 @@ final class DownloadListStore: ObservableObject {
             recordsByID[id] = nil
             recordIndexes.removeValue(forKey: id)
             knownStatuses[id] = nil
+            announcedCompletions[id] = nil
             previousProgress[id] = nil
             averageSpeedSessions[id] = nil
             speeds[id] = nil
@@ -385,10 +393,7 @@ final class DownloadListStore: ObservableObject {
         }
 
         invalidateDerivedCaches()
-        if record.status == .completed, previousStatus != .completed {
-            completedID = record.id
-            onDownloadCompleted?(record)
-        }
+        announceCompletion(record, previousStatus: previousStatus)
         if (record.status == .preparing || record.status == .downloading),
            previousStatus != .preparing, previousStatus != .downloading,
            suppressedProgressIDs.remove(record.id) == nil {
@@ -461,11 +466,17 @@ final class DownloadListStore: ObservableObject {
         if !removedIDs.isEmpty {
             onRemovedIDs?(removedIDs)
         }
-        if announceCompletion, let completed = acceptedRecords.first(where: { record in
-            record.status == .completed && previousStatuses[record.id] != .completed
-        }) {
-            completedID = completed.id
-            onDownloadCompleted?(completed)
+        announcedCompletions = announcedCompletions.filter { availableIDs.contains($0.key) }
+        if !announceCompletion, eventTask == nil, previousIDs.isEmpty {
+            // Existing completed tasks loaded at startup are the baseline.
+            for record in acceptedRecords where record.status == .completed {
+                announcedCompletions[record.id] = record.completedAt ?? .distantPast
+            }
+        }
+        if announceCompletion {
+            for record in acceptedRecords {
+                self.announceCompletion(record, previousStatus: previousStatuses[record.id])
+            }
         }
         if announceCompletion, let started = acceptedRecords.first(where: { record in
             (record.status == .preparing || record.status == .downloading)
@@ -485,6 +496,15 @@ final class DownloadListStore: ObservableObject {
         selectedIDs = selectedIDs.intersection(availableIDs)
         suppressedProgressIDs.formIntersection(availableIDs)
         invalidateDerivedCaches()
+    }
+
+    private func announceCompletion(_ record: DownloadRecord, previousStatus: DownloadStatus?) {
+        guard record.status == .completed else { return }
+        let finish = record.completedAt ?? .distantPast
+        guard previousStatus != .completed || announcedCompletions[record.id] != finish else { return }
+        announcedCompletions[record.id] = finish
+        completedID = record.id
+        onDownloadCompleted?(record)
     }
 
     private func rebuildRecordIndexes() {

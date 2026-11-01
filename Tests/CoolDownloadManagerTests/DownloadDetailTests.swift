@@ -5,6 +5,42 @@ import CoolDownloadCore
 
 @Suite("下载详情")
 struct DownloadDetailTests {
+    @Test("快速下载的完成快照先于事件到达时仍通知一次", arguments: [false, true])
+    @MainActor
+    func completionAfterSnapshot(wasPreviouslyCompleted: Bool) {
+        let store = DownloadListStore(service: nil)
+        let firstFinish = Date(timeIntervalSince1970: 1_000)
+        var record = DownloadRecord(
+            id: 98, source: .init(kind: .http, link: "https://fixture.invalid/font.ttf"),
+            folder: "/tmp", name: "font.ttf",
+            status: wasPreviouslyCompleted ? .completed : .downloading
+        )
+        record.revision = 2
+        record.completedAt = wasPreviouslyCompleted ? firstFinish : nil
+        store.apply([record], announceCompletion: false)
+        var completions: [DownloadID] = []
+        store.onDownloadCompleted = { completions.append($0.id) }
+        store.apply(.updated(record))
+        #expect(completions.isEmpty)
+
+        record.status = .completed
+        record.completedAt = firstFinish.addingTimeInterval(60)
+        record.revision = 5
+        store.apply([record], announceCompletion: false)
+        var metadataSnapshot = record
+        metadataSnapshot.revision += 1
+        metadataSnapshot.fileChecksum = "metadata arrived before the completion event"
+        store.apply([metadataSnapshot], announceCompletion: false)
+        #expect(completions.isEmpty)
+        store.apply(.updated(record))
+        #expect(completions == [98])
+        store.apply(.updated(record))
+        record.revision += 1
+        record.fileChecksum = "metadata update"
+        store.apply(.updated(record))
+        #expect(completions == [98])
+    }
+
     @Test("未知大小的非活动任务不显示循环进度", arguments: [
         DownloadStatus.added, .paused, .retrying, .waitingForSourceRefresh, .failed, .cancelled
     ])

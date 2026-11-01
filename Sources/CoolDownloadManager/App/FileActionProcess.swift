@@ -28,6 +28,13 @@ enum FileActionProcess {
         try process.run()
         async let stdout = read(output.fileHandleForReading)
         async let stderr = read(errors.fileHandleForReading)
+        // A detached waiter is not cancelled with the caller. hdiutil may
+        // finish attaching after cancellation; its real status is needed to
+        // identify and detach that owned mount before returning.
+        let exitStatus = Task.detached {
+            for await status in exits { return status }
+            return Int32(-1)
+        }
         var inputFailure: Error?
         if let input {
             do {
@@ -38,8 +45,7 @@ enum FileActionProcess {
                 try? inputPipe.fileHandleForWriting.close()
             }
         }
-        var status: Int32 = -1
-        for await value in exits { status = value }
+        let status = await exitStatus.value
         process.terminationHandler = nil
         let captured = try await FileActionProcessResult(status: status, output: stdout, error: String(decoding: stderr, as: UTF8.self))
         if let inputFailure { throw inputFailure }
@@ -88,6 +94,7 @@ enum DiskImageInstaller {
                   let images = info["images"] as? [[String: Any]] else {
                 throw FileActionFailure("无法确认现有镜像挂载，请使用“打开镜像”。")
             }
+            try Task.checkCancellation()
             let existingDevices = Set(images.flatMap { ($0["system-entities"] as? [[String: Any]]) ?? [] }.compactMap { $0["dev-entry"] as? String })
             // Every invocation owns a fresh mount (-mountroot), including when
             // Finder already has the image open. Never detach Finder's mount.
