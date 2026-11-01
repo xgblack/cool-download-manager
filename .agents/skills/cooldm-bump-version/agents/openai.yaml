@@ -1,0 +1,4 @@
+interface:
+  display_name: "升级项目版本"
+  short_description: "按三段版本规则同步产品版本与构建号，核对 macOS 发布工作流约束"
+  default_prompt: "使用 $cooldm-bump-version 升级本项目版本号，默认第三段加一，并验证发布所需的版本约束。"
