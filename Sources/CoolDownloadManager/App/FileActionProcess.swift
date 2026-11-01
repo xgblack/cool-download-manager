@@ -68,12 +68,40 @@ enum FileActionProcess {
 }
 
 struct DiskImageMount: Sendable {
-    let work: URL
+    /// Only mounts created by this operation have a cleanup directory.
+    /// An existing Finder or earlier-session mount is borrowed and left open.
+    let work: URL?
     let device: String
     let volumes: [URL]
 }
 
 enum DiskImageInstaller {
+    static func existingMount(for image: URL, in data: Data) throws -> DiskImageMount? {
+        guard let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let images = info["images"] as? [[String: Any]] else {
+            throw FileActionFailure("无法确认现有镜像挂载，请使用“打开镜像”。")
+        }
+        let source = FileActionPath.canonical(image).path
+        for entry in images {
+            guard let path = entry["image-path"] as? String, path.hasPrefix("/"),
+                  FileActionPath.canonical(URL(fileURLWithPath: path)).path == source else { continue }
+            let encoded = try PropertyListSerialization.data(fromPropertyList: entry, format: .binary, options: 0)
+            let parsed = try volumes(from: encoded)
+            let available = parsed.volumes.filter {
+                guard let values = try? $0.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+                return values.isDirectory == true && values.isSymbolicLink != true
+            }
+            if !available.isEmpty { return .init(work: nil, device: parsed.device, volumes: available) }
+        }
+        return nil
+    }
+
+    private static func inventory() async throws -> Data {
+        let result = try await FileActionProcess.run("/usr/bin/hdiutil", ["info", "-plist"])
+        guard result.status == 0 else { throw FileActionFailure("无法确认现有镜像挂载，请使用“打开镜像”。") }
+        return result.output
+    }
+
     static func volumes(from data: Data) throws -> (device: String, volumes: [URL]) {
         guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let entities = plist["system-entities"] as? [[String: Any]],
@@ -85,29 +113,41 @@ enum DiskImageInstaller {
     }
 
     static func mount(_ image: URL) async throws -> DiskImageMount {
+        let initialInventory = try await inventory()
+        try Task.checkCancellation()
+        if let existing = try existingMount(for: image, in: initialInventory) { return existing }
         let work = FileManager.default.temporaryDirectory.appendingPathComponent("cooldm-image-\(UUID().uuidString)", isDirectory: true).resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         do {
-            let inventory = try await FileActionProcess.run("/usr/bin/hdiutil", ["info", "-plist"])
-            guard inventory.status == 0,
-                  let info = try PropertyListSerialization.propertyList(from: inventory.output, format: nil) as? [String: Any],
+            guard let info = try PropertyListSerialization.propertyList(from: initialInventory, format: nil) as? [String: Any],
                   let images = info["images"] as? [[String: Any]] else {
                 throw FileActionFailure("无法确认现有镜像挂载，请使用“打开镜像”。")
             }
             try Task.checkCancellation()
             let existingDevices = Set(images.flatMap { ($0["system-entities"] as? [[String: Any]]) ?? [] }.compactMap { $0["dev-entry"] as? String })
-            // Every invocation owns a fresh mount (-mountroot), including when
-            // Finder already has the image open. Never detach Finder's mount.
+            // Create an owned mount only when the source is not already mounted.
             let result = try await FileActionProcess.run("/usr/bin/hdiutil", [
                 "attach", "-plist", "-readonly", "-nobrowse", "-noautoopen",
                 "-mountroot", work.path, image.path
             ])
             guard result.status == 0 else {
-                throw FileActionFailure("无法直接挂载此镜像。加密镜像或需要许可确认的镜像请使用“打开镜像”。\n\(result.error.trimmingCharacters(in: .whitespacesAndNewlines))")
+                // Finder may have mounted the image while attach was running.
+                if let existing = try existingMount(for: image, in: await inventory()) {
+                    if let warning = FileInstallation.recycleWork(work) { throw FileActionFailure(warning) }
+                    return existing
+                }
+                let diagnostic = result.error.split(separator: "\n")
+                    .filter { !$0.hasPrefix("hdiutil: WARNING:") }
+                    .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                throw FileActionFailure("无法挂载此镜像，请在访达中打开镜像后重试快速安装。\n\(diagnostic)")
             }
             let parsed = try volumes(from: result.output)
             guard !existingDevices.contains(parsed.device) else {
-                throw FileActionFailure("此镜像已由其他应用挂载，请使用“打开镜像”。现有挂载会保留。")
+                if let existing = try existingMount(for: image, in: await inventory()) {
+                    if let warning = FileInstallation.recycleWork(work) { throw FileActionFailure(warning) }
+                    return existing
+                }
+                throw FileActionFailure("此镜像已挂载，但挂载卷暂时不可用。请在访达中检查后重试，现有挂载会保留。")
             }
             guard !parsed.volumes.isEmpty,
                   parsed.volumes.allSatisfy({ FileActionPath.canonical($0).path.hasPrefix(FileActionPath.canonical(work).path + "/") }) else {
@@ -157,10 +197,11 @@ enum DiskImageInstaller {
     }
 
     static func unmount(_ mount: DiskImageMount) async -> String? {
+        guard let work = mount.work else { return nil }
         do {
             let result = try await FileActionProcess.run("/usr/bin/hdiutil", ["detach", mount.device])
-            guard result.status == 0 else { return "镜像未能推出，请在访达中推出：\(mount.volumes.first?.path ?? mount.work.path)" }
-            return FileInstallation.recycleWork(mount.work)
+            guard result.status == 0 else { return "镜像未能推出，请在访达中推出：\(mount.volumes.first?.path ?? work.path)" }
+            return FileInstallation.recycleWork(work)
         } catch { return "镜像未能推出：\(error.localizedDescription)" }
     }
 }

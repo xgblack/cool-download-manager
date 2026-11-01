@@ -306,6 +306,26 @@ struct FileQuickActionTests {
         #expect(try FileItemIdentity.read(destination) == oldIdentity)
     }
 
+    @Test("Failed installation can be retried as a new task and reaches the result state")
+    func retriesFailedInstallation() async throws {
+        let fixture = try QuickActionFixture()
+        defer { fixture.recycle() }
+        let failedTarget = fixture.root.appendingPathComponent("MissingParent")
+        let actions = FileQuickActionController(applicationsDirectory: failedTarget)
+        let failed = try #require(actions.start(fixture.record()))
+        await failed.task?.value
+        #expect(failed.primaryAction == .retry)
+        #expect(failed.error != nil)
+        try FileManager.default.createDirectory(at: failedTarget, withIntermediateDirectories: true)
+        let retry = try #require(actions.start(fixture.record()))
+        #expect(retry !== failed)
+        #expect(retry.primaryAction == .progress)
+        await retry.task?.value
+        #expect(retry.error == nil)
+        #expect(retry.primaryAction == .result)
+        #expect(actions.session(for: fixture.record()) === retry)
+    }
+
     @Test("DMG discovery is shallow and does not follow links or inspect app internals")
     func diskImageDiscovery() async throws {
         let fixture = try QuickActionFixture()
@@ -333,6 +353,52 @@ struct FileQuickActionTests {
         #expect(parsed.device == "/dev/disk999")
         #expect(parsed.volumes.map(\.path) == ["/tmp/mount/Volume"])
         #expect(throws: FileActionFailure.self) { try DiskImageInstaller.volumes(from: Data()) }
+    }
+
+    @Test("Existing image mounts are matched by source path and borrowed without cleanup ownership")
+    func borrowsMatchingMount() async throws {
+        let fixture = try QuickActionFixture()
+        defer { fixture.recycle() }
+        let image = fixture.root.appendingPathComponent("Example.dmg")
+        try Data().write(to: image)
+        let volume = fixture.root.appendingPathComponent("Mounted/Example")
+        try FileManager.default.createDirectory(at: volume, withIntermediateDirectories: true)
+        let info = try PropertyListSerialization.data(fromPropertyList: ["images": [
+            ["image-path": image.path, "system-entities": [
+                ["dev-entry": "/dev/disk999"],
+                ["dev-entry": "/dev/disk999s1", "mount-point": volume.path]
+            ]]
+        ]], format: .xml, options: 0)
+        let mount = try #require(try DiskImageInstaller.existingMount(for: image, in: info))
+        #expect(mount.device == "/dev/disk999")
+        #expect(mount.volumes.map(\.path) == [volume.path])
+        #expect(mount.work == nil)
+        #expect(await DiskImageInstaller.unmount(mount) == nil)
+        #expect(FileManager.default.fileExists(atPath: volume.path))
+        let other = fixture.root.appendingPathComponent("Other/Example.dmg")
+        #expect(try DiskImageInstaller.existingMount(for: other, in: info) == nil)
+        #expect(throws: FileActionFailure.self) { try DiskImageInstaller.existingMount(for: image, in: Data()) }
+    }
+
+    @Test("Primary install action distinguishes progress, failure, cancellation and success")
+    func primaryInstallationAction() throws {
+        let fixture = try QuickActionFixture()
+        defer { fixture.recycle() }
+        let session = FileQuickActionSession(record: fixture.record(), kind: .application)
+        #expect(session.primaryAction == .progress)
+        session.isRunning = false
+        session.error = "mount failed"
+        #expect(session.primaryAction == .retry)
+        session.error = nil
+        session.wasCancelled = true
+        #expect(session.primaryAction == .install)
+        session.wasCancelled = false
+        session.result = .init(destination: fixture.source)
+        #expect(session.primaryAction == .result)
+        session.error = "cleanup warning"
+        #expect(session.primaryAction == .result)
+        session.result = .init(destination: fixture.root.appendingPathComponent("Removed.app"))
+        #expect(session.primaryAction == .install)
     }
 
     @Test("Actual AppleScript cancellation codes are treated as cancellation, not installation failure", arguments: [-128, -60006])

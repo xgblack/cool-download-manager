@@ -40,8 +40,29 @@ private struct FileQuickSessionButton: View {
     @ObservedObject var coordinator: AppCoordinator
 
     var body: some View {
-        Button(session.isRunning ? "查看安装进度" : "查看安装结果", systemImage: session.isRunning ? "ellipsis.circle" : "info.circle") {
-            coordinator.fileActions.present(session)
+        Button(title, systemImage: symbol) {
+            switch session.primaryAction {
+            case .progress, .result: coordinator.fileActions.present(session)
+            case .install, .retry: coordinator.startFileQuickAction(session.record)
+            }
+        }
+    }
+
+    private var title: String {
+        switch session.primaryAction {
+        case .progress: "查看安装进度"
+        case .result: "查看安装结果"
+        case .retry: "重试安装"
+        case .install: session.kind.title
+        }
+    }
+
+    private var symbol: String {
+        switch session.primaryAction {
+        case .progress: "ellipsis.circle"
+        case .result: "checkmark.circle"
+        case .retry: "arrow.clockwise"
+        case .install: session.kind.symbol
         }
     }
 }

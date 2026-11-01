@@ -55,6 +55,10 @@ enum FileActionAnswer: Equatable {
 
 @MainActor
 final class FileQuickActionSession: ObservableObject, Identifiable {
+    enum PrimaryAction {
+        case install, progress, retry, result
+    }
+
     let id = UUID()
     let record: DownloadRecord
     let kind: FileQuickActionKind
@@ -70,6 +74,13 @@ final class FileQuickActionSession: ObservableObject, Identifiable {
     var task: Task<Void, Never>?
     var onPrompt: ((FileQuickActionSession) -> Void)?
     private var answerContinuation: CheckedContinuation<FileActionAnswer, Never>?
+
+    var primaryAction: PrimaryAction {
+        if isRunning { return .progress }
+        if let result, FileManager.default.fileExists(atPath: result.destination.path) { return .result }
+        if error != nil, result == nil { return .retry }
+        return .install
+    }
 
     init(record: DownloadRecord, kind: FileQuickActionKind) {
         self.record = record
@@ -187,7 +198,7 @@ final class FileQuickActionController: ObservableObject {
             case .application, .diskImage:
                 var source = session.record.destinationURL
                 if session.kind == .diskImage {
-                    session.message = "正在只读挂载磁盘映像…"
+                    session.message = "正在准备磁盘映像…"
                     mount = try await DiskImageInstaller.mount(source)
                     try Task.checkCancellation()
                     session.message = "正在查找可安装的应用…"
