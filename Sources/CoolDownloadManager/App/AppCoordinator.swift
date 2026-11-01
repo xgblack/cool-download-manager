@@ -124,6 +124,9 @@ final class AppCoordinator: NSObject, ObservableObject {
                 showMain: { [weak self] in self?.showMainWindow() },
                 newDownload: { [weak self] in self?.presentAddDownload(fromClipboard: true) },
                 toggleSpeedLimiter: { [weak self] in self?.store.toggleSpeedLimiter() },
+                startQueue: { [weak self] id in self?.store.startQueue(id) },
+                stopQueue: { [weak self] id in self?.store.stopQueue(id) },
+                stopAll: { [weak self] in self?.store.downloadList.stopAll() },
                 settings: { [weak self] in self?.presentSettings() },
                 quit: { NSApp.terminate(nil) }
             ),
@@ -131,6 +134,19 @@ final class AppCoordinator: NSObject, ObservableObject {
                 guard let self else { return .init(enabled: false, summary: "全局限速已关闭") }
                 let cap = ByteQuantityText.format(bytes: store.settings.speedLimit, unit: store.settings.speedUnit, isSpeed: true)
                 return .init(enabled: store.settings.speedLimiterEnabled, summary: "\(store.speedLimiterStatus) · \(cap)")
+            },
+            queueStates: { [weak self] in
+                guard let self else { return [] }
+                let downloads = store.downloadList.downloads
+                return store.queues.map { queue in
+                    let records = downloads.filter { $0.queueID == queue.id }
+                    return .init(id: queue.id, name: queue.name,
+                        canStart: records.contains { $0.sourceRefreshReason == nil && [.added, .paused, .failed, .cancelled].contains($0.status) },
+                        canStop: records.contains { [.preparing, .downloading, .retrying].contains($0.status) })
+                }
+            },
+            canStopAll: { [weak self] in
+                self?.store.downloadList.downloads.contains { [.preparing, .downloading, .retrying].contains($0.status) } ?? false
             }
         )
     }
@@ -322,6 +338,20 @@ final class AppCoordinator: NSObject, ObservableObject {
         mainSheet = .addDownload
     }
 
+    func presentQRCodeShare(for record: DownloadRecord) {
+        utilityPanels.showQRCodeShare(record: record)
+    }
+
+    func presentQRCodeImport() {
+        utilityPanels.showQRCodeImport { [weak self] sources in
+            let items = sources.map { source in
+                IntegrationDownloadCredential(link: source.link, headers: source.headers,
+                    downloadPage: source.downloadPage, suggestedName: source.suggestedName, type: source.kind)
+            }
+            self?.presentBrowserDownload(AddDownloadsRequest(items: items))
+        }
+    }
+
     private func presentBrowserDownload(_ request: AddDownloadsRequest) {
         guard !request.items.isEmpty else { return }
         guard let next = browserRequests.enqueue(request) else { return }
@@ -345,6 +375,8 @@ final class AppCoordinator: NSObject, ObservableObject {
             ),
             queues: store.queues,
             categories: store.categories,
+            service: store.service,
+            blockAddWhenLoading: store.settings.blockAddWhenLoading,
             onChooseFolder: { [weak self] in
                 self?.utilityPanels.chooseBrowserFolder()
             },
@@ -680,6 +712,8 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private var browserConfirmationState: BrowserDownloadConfirmationState?
     private var browserConfirmationClose: (() -> Void)?
     private var browserFolderPanel: NSOpenPanel?
+    private var qrSharePanel: NSPanel?
+    private var qrImportPanel: NSPanel?
 
     func showProgress(record: DownloadRecord, store: DownloadListStore, coordinator: AppCoordinator, focus: Bool) {
         let id = record.id
@@ -784,11 +818,48 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         window.contentViewController = nil
     }
 
+    func showQRCodeShare(record: DownloadRecord) {
+        hideQRCodeShare()
+        let content = QRCodeShareView(record: record, onClose: { [weak self] in self?.hideQRCodeShare() })
+        let window = panel(existing: nil, title: "分享二维码", size: NSSize(width: 640, height: 660),
+            floatsAboveNormalWindows: false, content: content)
+        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.qr-share")
+        qrSharePanel = window
+        present(window, focus: true)
+    }
+
+    func showQRCodeImport(onImport: @escaping ([DownloadSource]) -> Void) {
+        if let window = qrImportPanel { present(window, focus: true); return }
+        let content = QRCodeImportView(onImport: { [weak self] sources in
+            self?.hideQRCodeImport()
+            onImport(sources)
+        }, onClose: { [weak self] in self?.hideQRCodeImport() })
+        let window = panel(existing: nil, title: "扫描下载二维码", size: NSSize(width: 700, height: 620),
+            floatsAboveNormalWindows: false, content: content)
+        window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.qr-import")
+        qrImportPanel = window
+        present(window, focus: true)
+    }
+
+    private func hideQRCodeShare() {
+        qrSharePanel?.orderOut(nil)
+        qrSharePanel?.contentViewController = nil
+        qrSharePanel = nil
+    }
+
+    private func hideQRCodeImport() {
+        qrImportPanel?.orderOut(nil)
+        qrImportPanel?.contentViewController = nil
+        qrImportPanel = nil
+    }
+
     func showBrowserConfirmation(
         request: AddDownloadsRequest,
         defaultFolder: URL,
         queues: [IntegrationQueue],
         categories: [DownloadCategory],
+        service: DownloadService?,
+        blockAddWhenLoading: Bool,
         onChooseFolder: @escaping () -> Void,
         onCancel: @escaping () -> Void,
         onAdd: @escaping (BrowserDownloadConfirmationState, DownloadID?, DownloadID?, Bool) -> Void
@@ -809,6 +880,8 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
             state: state,
             queues: queues,
             categories: categories,
+            service: service,
+            blockAddWhenLoading: blockAddWhenLoading,
             onChooseFolder: onChooseFolder,
             onCancel: onCancel,
             onAdd: { queueID, categoryID, startImmediately in
@@ -925,6 +998,7 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     private func dismissBrowserConfirmationPanel() {
         let folderPanel = browserFolderPanel
         browserFolderPanel = nil
+        browserConfirmationState?.submission.cancelPreviews()
         browserConfirmationState = nil
         browserConfirmationClose = nil
         folderPanel?.cancel(nil)
@@ -936,6 +1010,8 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === qrSharePanel { hideQRCodeShare(); return false }
+        if sender === qrImportPanel { hideQRCodeImport(); return false }
         if let id = fileActionPanels.first(where: { $0.value === sender })?.key {
             hideFileAction(id)
             return false

@@ -14,6 +14,9 @@ struct AddDownloadSheet: View {
     let title: String
     let queues: [IntegrationQueue]
     let categories: [DownloadCategory]
+    let service: DownloadService?
+    let blockAddWhenLoading: Bool
+    var integrationItems: [IntegrationDownloadCredential] = []
     let onChooseFolder: () -> Void
     let onCancel: () -> Void
     let onAdd: (_ queueID: DownloadID?, _ categoryID: DownloadID?, _ startImmediately: Bool) -> Void
@@ -29,6 +32,55 @@ struct AddDownloadSheet: View {
         if submission.tasksAdded { return "重试保存目录" }
         if !submission.addedIDs.isEmpty { return "继续添加" }
         return startImmediately ? "下载" : "添加"
+    }
+
+    @ViewBuilder
+    private var previewSection: some View {
+        if !submission.previewSources.isEmpty || submission.previewValidationError != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("文件信息").font(DownloadVisualStyle.sectionTitle).foregroundStyle(.secondary)
+                    Spacer()
+                    if submission.isLoadingPreview {
+                        ProgressView().controlSize(.small)
+                        Text("正在加载…").font(.caption).foregroundStyle(.secondary)
+                    } else if !submission.previewErrors.isEmpty {
+                        Button("重试", action: refreshPreview).buttonStyle(.borderless)
+                    }
+                }
+                if let error = submission.previewValidationError {
+                    Label(error, systemImage: "exclamationmark.circle").foregroundStyle(.orange)
+                }
+                ForEach(Array(submission.previewSources.indices), id: \.self) { index in
+                    if let preview = submission.previews[index] {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(preview.fileName ?? "名称待下载时确认").lineLimit(1).truncationMode(.middle)
+                            if preview.source.kind == .hls {
+                                Text("HLS · \(preview.hlsSegmentCount.map { "\($0) 个分片" } ?? "分片待确认") · \(preview.hlsDuration.map { String(format: "%.0f 秒", $0) } ?? "时长未知") · 大小待下载时确认")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("\(preview.totalBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "大小未知") · 断点续传：\(ResumeSupportPresentation.text(preview.supportsResume))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else if let error = submission.previewErrors[index] {
+                        Label(submission.previewSources.count == 1 ? error : "第 \(index + 1) 项：\(error)", systemImage: "exclamationmark.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func refreshPreview() {
+        guard !submission.isSubmitting, submission.addedIDs.isEmpty else { return }
+        do {
+            let sources = try DownloadSourceDraft.sources(link: urlText, name: nameText, originals: integrationItems)
+            guard let service else { submission.invalidatePreviews(nil); return }
+            submission.loadPreviews(sources: sources) { source in try await service.preview(source: source) }
+        } catch {
+            submission.invalidatePreviews("请检查下载地址及请求头，仅支持有效的 HTTP 或 HTTPS 来源。")
+        }
     }
 
     var body: some View {
@@ -58,13 +110,15 @@ struct AddDownloadSheet: View {
                         .accessibilityLabel("下载地址")
                 }
 
+                previewSection
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("下载选项")
                         .font(DownloadVisualStyle.sectionTitle)
                         .foregroundStyle(.secondary)
                     VStack(spacing: 0) {
                         NativeSettingsRow(title: "文件名", minimumHeight: DownloadVisualStyle.formRowHeight) {
-                            TextField("自动从地址解析", text: $nameText)
+                            TextField(submission.previews[0]?.fileName ?? "自动从地址解析", text: $nameText)
                                 .textFieldStyle(.plain)
                                 .font(.callout)
                                 .padding(.horizontal, 10)
@@ -152,16 +206,27 @@ struct AddDownloadSheet: View {
                     .disabled(submission.isSubmitting)
                     .keyboardShortcut(.cancelAction)
                 Button(submitTitle) {
+                    submission.cancelPreviews()
                     onAdd(queueID, categoryID, startImmediately)
                 }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(submission.isSubmitting || urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(submission.isSubmitting || (!submission.tasksAdded && (urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || submission.previewValidationError != nil || (blockAddWhenLoading && submission.isLoadingPreview))))
             }
             .controlSize(.large)
         }
         .modifier(DownloadPanelSurface())
         .interactiveDismissDisabled(submission.isSubmitting)
+        .onAppear { refreshPreview() }
+        .onChange(of: urlText) { _, updated in
+            if integrationItems.count == 1, let hint = integrationItems[0].suggestedName,
+               nameText == hint, !DownloadSourceDraft.sameOrigin(updated.trimmingCharacters(in: .whitespacesAndNewlines), integrationItems[0].link) {
+                nameText = ""
+            }
+            refreshPreview()
+        }
+        .onChange(of: nameText) { _, _ in refreshPreview() }
+        .onDisappear { submission.cancelPreviews() }
         .onChange(of: folderURL) { _, folder in
             if !submission.canRemember(folder: folder, defaultFolder: defaultFolder) {
                 submission.rememberFolder = false

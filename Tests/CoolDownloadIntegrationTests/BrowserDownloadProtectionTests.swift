@@ -10,9 +10,12 @@ struct BrowserDownloadProtectionTests {
         let (root, service) = try await makeService()
         defer { try? FileManager.default.trashItem(at: root, resultingItemURL: nil) }
         let handler = CoreDownloadIntegrationHandler(service: service)
-        let router = IntegrationRouter(handler: handler, allowAnonymous: true)
+        let router = IntegrationRouter(handler: handler, apiKey: "test-secret")
         let request = silentRequest("https://fixture.invalid/file.bin")
-        let httpRequest = HTTPRequest(method: "POST", path: "/add", body: try JSONEncoder().encode(request))
+        let httpRequest = HTTPRequest(
+            method: "POST", path: "/add", headers: ["X-Api-Key": "test-secret"],
+            body: try JSONEncoder().encode(request)
+        )
 
         async let httpResponse = router.handle(httpRequest)
         // The application's native socket decodes this payload and calls the

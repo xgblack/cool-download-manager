@@ -45,15 +45,26 @@ public actor IntegrationRouter {
     private let handler: any DownloadIntegrationHandler
     private let apiKey: String?
     private let allowAnonymous: Bool
+    private let requireAuthentication: Bool
     nonisolated let canStartHTTP: Bool
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
-    public init(handler: any DownloadIntegrationHandler, apiKey: String? = nil, allowAnonymous: Bool = false) {
+    public init(
+        handler: any DownloadIntegrationHandler,
+        apiKey: String? = nil,
+        allowAnonymous: Bool = false,
+        requireAuthentication: Bool? = nil
+    ) {
         self.handler = handler
         self.apiKey = apiKey
         self.allowAnonymous = allowAnonymous
-        self.canStartHTTP = apiKey.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? allowAnonymous
+        // Preserve the existing keyed initializer and explicit keyless anonymous
+        // initializer. App settings pass the ordinary-route policy separately.
+        let requiresKey = requireAuthentication ?? (apiKey != nil || !allowAnonymous)
+        self.requireAuthentication = requiresKey
+        let hasKey = apiKey.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        self.canStartHTTP = hasKey || (!requiresKey && allowAnonymous)
         self.decoder = JSONDecoder()
         self.encoder = JSONEncoder()
     }
@@ -68,12 +79,15 @@ public actor IntegrationRouter {
         if let origin = request.header("Origin"), !permittedHosts.contains(String(origin.lowercased().dropFirst(7))) || !origin.lowercased().hasPrefix("http://") {
             return .text(403, "Forbidden origin")
         }
-        // Supplying an empty key is never equivalent to opting into anonymous mode.
-        if let apiKey {
-            guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  request.header("X-Api-Key") == apiKey else { return .text(401, "Unauthorized") }
-        } else if !allowAnonymous {
+        let authenticated = hasValidKey(request)
+        guard authenticated || (!requireAuthentication && allowAnonymous) else {
             return .text(401, "Unauthorized")
+        }
+        // Quiet execution and source replacement always require a key, even
+        // when the user permits ordinary browser confirmation without one.
+        if (request.method.uppercased() == "POST" && request.path == "/start-headless-download")
+            || (request.method.uppercased() == "PATCH" && sourcePatchDownloadID(from: request.path) != nil) {
+            guard authenticated else { return .text(401, "Unauthorized") }
         }
 
         do {
@@ -88,8 +102,11 @@ public actor IntegrationRouter {
                     body: try encoder.encode(queues)
                 )
             case ("POST", "/add"):
-                let request = try decodeAddRequest(request.body)
-                try await handler.addFromBrowser(request)
+                let addition = try decodeAddRequest(request.body)
+                if addition.options.silentAdd || addition.options.silentStart {
+                    guard authenticated else { return .text(401, "Unauthorized") }
+                }
+                try await handler.addFromBrowser(addition)
                 return .text(200, "OK")
             case ("POST", "/start-headless-download"):
                 let headless = try decoder.decode(HeadlessDownloadRequest.self, from: request.body)
@@ -129,6 +146,12 @@ public actor IntegrationRouter {
         } catch {
             return .text(500, "Request failed")
         }
+    }
+
+    private func hasValidKey(_ request: HTTPRequest) -> Bool {
+        guard let apiKey,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return request.header("X-Api-Key") == apiKey
     }
 
     private func decodeAddRequest(_ data: Data) throws -> AddDownloadsRequest {

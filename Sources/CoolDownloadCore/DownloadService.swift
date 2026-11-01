@@ -37,6 +37,7 @@ public actor DownloadService {
     private var queueConcurrencyLimits: [DownloadID: Int] = [:]
     private var queuePolicies: [DownloadID: DownloadQueuePolicy] = [:]
     private var activeQueueIDs: Set<DownloadID> = []
+    private var queueStartGenerations: [DownloadID: UUID] = [:]
     private var perHostSettings: [PerHostSettingsItem] = []
     private var hostPerformance: [HostPerformanceKey: HostPerformanceRecord] = [:]
     private var subscribers: [UUID: AsyncStream<DownloadEvent>.Continuation] = [:]
@@ -49,6 +50,9 @@ public actor DownloadService {
     private var finalizingIDs: Set<DownloadID> = []
     private var removingIDs: Set<DownloadID> = []
     private var pendingDestinations: [DownloadID: Set<URL>] = [:]
+    // Preview names remain automatic only during this service session. Older
+    // custom names without a source hint must retain their existing meaning.
+    private var previewAutomaticNames: [DownloadID: String] = [:]
 
     private static let progressPersistenceInterval: Duration = .seconds(2)
     // Avoid turning fast local or multi-gigabit transfers into an fsync loop.
@@ -284,6 +288,8 @@ public actor DownloadService {
         tasks.removeAll()
         activeIDs.removeAll()
         activeQueueIDs.removeAll()
+        queueStartGenerations.removeAll()
+        previewAutomaticNames.removeAll()
         activeConnectionCounts.removeAll(keepingCapacity: true)
         subscribers.values.forEach { $0.finish() }
         subscribers.removeAll()
@@ -335,7 +341,45 @@ public actor DownloadService {
         return missing
     }
 
-    public func add(_ request: AddDownloadRequest) async throws -> DownloadID {
+    /// Resolves metadata with the same credentials and network policy as a
+    /// download, without reserving an ID or creating a record or part file.
+    public func preview(source: DownloadSource) async throws -> DownloadPreview {
+        try Task.checkCancellation()
+        guard !shuttingDown else { throw DownloadCoreError.cancelled }
+        let source = try DownloadSourceSecurity.validatedForPersistence(source)
+        let networkSource = try await effectiveSource(source)
+        try Task.checkCancellation()
+        let preview: DownloadPreview
+        switch source.kind {
+        case .http:
+            let metadata = try await downloader.probe(
+                source: networkSource,
+                fileDescriptorBudget: fileDescriptorBudget
+            )
+            preview = DownloadPreview(
+                source: source,
+                fileName: metadata.fileName ?? DownloadFileNameResolver.fromURL(source.link),
+                totalBytes: metadata.totalBytes,
+                supportsResume: metadata.supportsRanges
+            )
+        case .hls:
+            let resolved = try await hlsDownloader.resolvePlaylist(
+                source: networkSource,
+                fileDescriptorBudget: fileDescriptorBudget
+            )
+            preview = DownloadPreview(
+                source: source,
+                fileName: DownloadFileNameResolver.fromURL(source.link),
+                hlsSegmentCount: resolved.playlist.segments.count,
+                hlsDuration: resolved.playlist.segments.reduce(0) { $0 + $1.duration }
+            )
+        }
+        try Task.checkCancellation()
+        guard !shuttingDown else { throw DownloadCoreError.cancelled }
+        return preview
+    }
+
+    public func add(_ request: AddDownloadRequest, preview: DownloadPreview? = nil) async throws -> DownloadID {
         guard !shuttingDown else { throw DownloadCoreError.cancelled }
         let id = try await store.reserveNextID()
         guard !shuttingDown else { throw DownloadCoreError.cancelled }
@@ -350,12 +394,14 @@ public actor DownloadService {
 
         let requestedName = request.name?.nilIfBlank
         let suggestedName = source.suggestedName?.nilIfBlank
+        let previewName = preview?.source == source ? preview?.fileName?.nilIfBlank : nil
         // Persist the chosen name as the source hint as well. This lets later
         // HTTP metadata updates distinguish a user/browser-provided name from
         // an automatic URL fallback without adding a new record field.
         source.suggestedName = requestedName ?? suggestedName
         let candidateName = requestedName
             ?? suggestedName
+            ?? previewName
             ?? DownloadFileNameResolver.fromURL(request.source.link)
             ?? "download-\(id)"
         let name = availableFileName(
@@ -383,6 +429,9 @@ public actor DownloadService {
         defer { pendingDestinations[id] = nil }
         try await store.save(record)
         records[id] = record
+        if requestedName == nil, suggestedName == nil, previewName != nil {
+            previewAutomaticNames[id] = name
+        }
         emit(.created(record))
 
         if request.start {
@@ -608,7 +657,10 @@ public actor DownloadService {
             ids = available.sorted()
         }
         activeQueueIDs.insert(queueID)
+        let generation = UUID()
+        queueStartGenerations[queueID] = generation
         for id in ids {
+            guard queueStartGenerations[queueID] == generation else { return }
             try await start(id: id)
         }
         reconcileQueue(queueID)
@@ -619,39 +671,75 @@ public actor DownloadService {
     /// cannot immediately restart work while the pause operation is running.
     public func stopQueue(id queueID: DownloadID) async throws {
         activeQueueIDs.remove(queueID)
+        queueStartGenerations[queueID] = nil
         let ids = records.values
             .filter { $0.queueID == queueID && ($0.status == .preparing || $0.status == .downloading || $0.status == .retrying) }
             .map(\.id)
         if !ids.isEmpty {
-            try await pause(ids: ids)
+            try await pauseRecords(ids: ids, failOnCompleted: false)
         }
     }
 
+    /// Withdraw all waiting work before cancellation can yield to completion
+    /// handlers. A stopped queue cannot emit its configured completion action.
+    public func stopAll() async throws {
+        activeQueueIDs.removeAll()
+        queueStartGenerations.removeAll()
+        let ids = records.values.filter {
+            $0.status == .preparing || $0.status == .downloading || $0.status == .retrying
+        }.map(\.id)
+        try await pauseRecords(ids: ids, failOnCompleted: false)
+    }
+
     public func pause(ids: [DownloadID]) async throws {
-        for id in ids {
-            if finalizingIDs.contains(id), let task = tasks[id] { await task.value }
-            guard var record = records[id] else {
+        try await pauseRecords(ids: ids, failOnCompleted: true)
+    }
+
+    private func pauseRecords(ids: [DownloadID], failOnCompleted: Bool) async throws {
+        let targets = Set(ids)
+        for id in targets {
+            guard let record = records[id] else {
                 throw DownloadCoreError.notFound(id)
             }
-            guard record.status != .completed else {
+            if failOnCompleted, record.status == .completed {
                 throw DownloadCoreError.invalidState(id, record.status)
             }
-            queuedIDs.removeAll { $0 == id }
+        }
+        queuedIDs.removeAll { targets.contains($0) }
+        let finishing = targets.intersection(finalizingIDs)
+        let finishingTasks = finishing.compactMap { tasks[$0] }
+        var pausedIDs: [DownloadID] = []
+        var cancelledTasks: [Task<Void, Never>] = []
+        // Do not await between these mutations: every selected task must be
+        // ineligible for scheduling before any cancelled job can release a slot.
+        for id in targets.sorted() where !finishing.contains(id) {
+            guard var record = records[id], record.status != .completed else { continue }
             record.status = .paused
             record.updatedAt = Date()
             record.revision += 1
             records[id] = record
-            let task = tasks[id]
-            task?.cancel()
+            pausedIDs.append(id)
+            if let task = tasks[id] {
+                task.cancel()
+                cancelledTasks.append(task)
+            }
+        }
+        var firstFailure: (any Error)?
+        for id in pausedIDs {
+            guard let record = records[id], record.status == .paused else { continue }
             do {
                 try await store.save(record)
             } catch {
                 reportPersistenceFailure("paused state", id: id, error: error)
-                if let task { await task.value }
-                throw error
+                if firstFailure == nil { firstFailure = error }
             }
             if let latest = records[id] { emit(.updated(latest)) }
-            if let task { await task.value }
+        }
+        for task in cancelledTasks { await task.value }
+        for task in finishingTasks { await task.value }
+        if let firstFailure { throw firstFailure }
+        if failOnCompleted, let completed = finishing.sorted().first(where: { records[$0]?.status == .completed }) {
+            throw DownloadCoreError.invalidState(completed, .completed)
         }
     }
 
@@ -800,6 +888,7 @@ public actor DownloadService {
             }
             try await store.remove(id: id)
             records[id] = nil
+            previewAutomaticNames[id] = nil
             emit(.removed(id: id))
             if let queueID {
                 reconcileQueue(queueID)
@@ -919,6 +1008,7 @@ public actor DownloadService {
         guard !items.isEmpty else {
             guard policy.stopQueueOnEmpty else { return }
             activeQueueIDs.remove(queueID)
+            queueStartGenerations[queueID] = nil
             emitQueueEvent(.becameEmpty(queueID: queueID, completionAction: policy.completionAction))
             return
         }
@@ -934,6 +1024,7 @@ public actor DownloadService {
         }
         guard !hasRemainingWork else { return }
         activeQueueIDs.remove(queueID)
+        queueStartGenerations[queueID] = nil
         emitQueueEvent(.becameEmpty(queueID: queueID, completionAction: policy.completionAction))
     }
 
@@ -1103,6 +1194,9 @@ public actor DownloadService {
         try Task.checkCancellation()
 
         let finalLength = try await writer.length()
+        // A pause may arrive while the writer actor is answering the length
+        // read. Check again before entering the uncancellable finalization.
+        try Task.checkCancellation()
         if finalLength < totalBytes {
             throw DownloadCoreError.responseMismatch(
                 "received \(finalLength) bytes, expected \(totalBytes)"
@@ -1153,6 +1247,7 @@ public actor DownloadService {
         completed.updatedAt = Date()
         completed.revision += 1
         records[id] = completed
+        previewAutomaticNames[id] = nil
         try await store.save(completed)
         if schedulerConfiguration.useServerLastModifiedTime,
            let rawLastModified = completed.lastModified,
@@ -2203,6 +2298,7 @@ public actor DownloadService {
         return record.name == fallbackName
             || record.name == queryName
             || record.name == "download-\(record.id)"
+            || record.name == previewAutomaticNames[record.id]
     }
 
     private func resolvedCompletionName(

@@ -54,6 +54,7 @@ struct GeneralSettingsPage: View {
                     "显示工具栏图标标签",
                     isOn: state.binding(\.showIconLabels)
                 )
+                NativeSettingsToggleRow("显示保存位置列", isOn: state.binding(\.showDownloadLocation))
                 NativeSettingsToggleRow(
                     "使用相对日期时间",
                     isOn: state.binding(\.useRelativeDateTime),
@@ -186,6 +187,12 @@ struct DownloadSettingsPage: View {
                 )
             }
 
+            NativeSettingsGroup(title: "添加下载") {
+                NativeSettingsToggleRow("加载文件信息时暂缓添加", isOn: state.binding(\.blockAddWhenLoading), showsDivider: false)
+                Text("等待名称、大小和断点信息；探测失败后仍可继续添加。关闭此项可在加载期间直接提交。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             NativeSettingsGroup(title: "调度") {
                 NativeSettingsNumberRow(
                     "单任务最大连接数",
@@ -288,14 +295,14 @@ struct NetworkSettingsPage: View {
                             isOn: state.binding(\.apiAnonymousAccessConfirmed),
                             showsDivider: false
                         )
-                        Text("未确认时 HTTP 保持暂停；浏览器 Native Messaging 仍可使用。匿名模式允许本机程序读取队列和新增任务。")
+                        Text("未确认时 HTTP 保持暂停；浏览器 Native Messaging 仍可使用。匿名模式允许读取队列和打开下载确认；静默添加、直接启动和更新来源仍需认证密钥。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     if let error = state.model.httpIntegrationConfigurationError {
                         Text(error).font(.caption).foregroundStyle(.orange)
                     }
-                    if state.model.apiAuthEnabled {
+                    Group {
                         NativeSettingsRow(title: "认证密钥", showsDivider: false) {
                             HStack(spacing: 8) {
                                 SecureField("认证密钥", text: state.binding(\.apiAuthKey))

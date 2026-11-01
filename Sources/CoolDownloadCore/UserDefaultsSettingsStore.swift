@@ -122,6 +122,15 @@ public actor SettingsStore {
         return settings
     }
 
+    /// The list switch writes only its own preference, preserving settings drafts.
+    public func saveShowDownloadLocation(_ visible: Bool) throws -> AppSettingsModel {
+        var settings = try load()
+        settings.showDownloadLocation = visible
+        typed.set(visible, for: Keys.showDownloadLocation)
+        cached = settings
+        return settings
+    }
+
     private func read(fallback d: AppSettingsModel) throws -> AppSettingsModel {
         let storedLimit = defaults.defaults.object(forKey: Keys.speedLimit.name) as? Int64
         let storedEnabled = defaults.defaults.object(forKey: Keys.speedLimiterEnabled.name) as? Bool
@@ -170,7 +179,9 @@ public actor SettingsStore {
             apiAnonymousAccessConfirmed: typed.value(Keys.apiAnonymousAccessConfirmed, default: false),
             speedLimiterEnabled: storedEnabled ?? ((storedLimit ?? 0) > 0),
             limitWhileUsingOtherApps: typed.value(Keys.limitWhileUsingOtherApps, default: false),
-            minimumPartSize: typed.value(Keys.minimumPartSize, default: d.minimumPartSize)
+            minimumPartSize: typed.value(Keys.minimumPartSize, default: d.minimumPartSize),
+            showDownloadLocation: typed.value(Keys.showDownloadLocation, default: false),
+            blockAddWhenLoading: typed.value(Keys.blockAddWhenLoading, default: true)
         )
     }
 
@@ -180,6 +191,8 @@ public actor SettingsStore {
         else { defaults.defaults.removeObject(forKey: Keys.uiScale.name) }
         typed.set(settings.mergeTopBarWithTitleBar, for: Keys.mergeTopBarWithTitleBar)
         typed.set(settings.showIconLabels, for: Keys.showIconLabels)
+        typed.set(settings.showDownloadLocation, for: Keys.showDownloadLocation)
+        typed.set(settings.blockAddWhenLoading, for: Keys.blockAddWhenLoading)
         typed.set(settings.useRelativeDateTime, for: Keys.useRelativeDateTime)
         typed.set(settings.threadCount, for: Keys.threadCount)
         typed.set(settings.maxConcurrentDownloads, for: Keys.maxConcurrentDownloads)
@@ -288,6 +301,8 @@ public actor SettingsStore {
         static let theme = UserDefaultsKey<String>("theme")
         static let uiScale = UserDefaultsKey<Double>("uiScale")
         static let mergeTopBarWithTitleBar = UserDefaultsKey<Bool>("mergeTopBarWithTitleBar")
+        static let showDownloadLocation = UserDefaultsKey<Bool>("showDownloadLocation")
+        static let blockAddWhenLoading = UserDefaultsKey<Bool>("blockAddWhenLoading")
         static let showIconLabels = UserDefaultsKey<Bool>("showIconLabels")
         static let useRelativeDateTime = UserDefaultsKey<Bool>("useRelativeDateTime")
         static let threadCount = UserDefaultsKey<Int>("threadCount")

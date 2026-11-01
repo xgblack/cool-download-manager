@@ -58,6 +58,8 @@
 	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>扫描二维码以导入下载链接。您也可以选择图片或从剪贴板导入。</string>
 	<key>NSMainNibFile</key>
 	<string></string>
 </dict>

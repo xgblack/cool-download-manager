@@ -300,6 +300,7 @@ final class AppStore: ObservableObject {
         submission: DownloadSubmissionState
     ) async -> Bool {
         guard !submission.isSubmitting else { return false }
+        submission.cancelPreviews()
         submission.isSubmitting = true
         submission.errorMessage = nil
         defer { submission.isSubmitting = false }
@@ -331,7 +332,13 @@ final class AppStore: ObservableObject {
             if let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedName.isEmpty {
                 candidateName = trimmedName
             } else {
-                candidateName = URL(string: firstLink)?.lastPathComponent ?? ""
+                let firstSource = try? DownloadSourceDraft.source(
+                    link: firstLink.trimmingCharacters(in: .whitespacesAndNewlines), name: nil,
+                    original: integrationItems?.first
+                )
+                candidateName = firstSource?.suggestedName
+                    ?? firstSource.flatMap { submission.matchingPreview(for: $0)?.fileName }
+                    ?? URL(string: firstLink)?.lastPathComponent ?? ""
             }
             if let category = try? await categoryStore.matchingCategory(
                 fileName: candidateName,
@@ -358,20 +365,11 @@ final class AppStore: ObservableObject {
             submission.resolvedFolder = resolvedFolder
             submission.resolvedCategoryID = resolvedCategoryID
             for (index, item) in links.enumerated().dropFirst(submission.addedIDs.count) {
-                var source: DownloadSource
-                if let integrationItems, integrationItems.indices.contains(index) {
-                    source = integrationItems[index].asCoreSource()
-                    source.link = item
-                    if links.count == 1, let explicitName {
-                        source.suggestedName = explicitName
-                    }
-                } else {
-                    source = DownloadSource(
-                        kind: item.lowercased().contains(".m3u8") ? .hls : .http,
-                        link: item,
-                        suggestedName: links.count == 1 ? explicitName : nil
-                    )
-                }
+                let source = try DownloadSourceDraft.source(
+                    link: item,
+                    name: links.count == 1 ? explicitName : nil,
+                    original: integrationItems.flatMap { $0.indices.contains(index) ? $0[index] : nil }
+                )
                 let id = try await service.add(AddDownloadRequest(
                     source: source,
                     folder: resolvedFolder.path,
@@ -379,7 +377,7 @@ final class AppStore: ObservableObject {
                     queueID: queueID,
                     categoryID: resolvedCategoryID,
                     start: startImmediately
-                ))
+                ), preview: submission.matchingPreview(for: source))
                 submission.addedIDs.append(id)
             }
             if let queueID, let queueStore {
@@ -418,6 +416,15 @@ final class AppStore: ObservableObject {
         let normalized = URL(fileURLWithPath: saved.defaultDownloadFolder, isDirectory: true)
         await service?.updateConfiguration(defaultFolder: normalized)
         await categoryStore?.updateDefaultFolder(normalized)
+    }
+
+    func saveShowDownloadLocation(_ visible: Bool) async throws {
+        guard let settingsStore else {
+            throw settingsStoreInitializationError
+                ?? SettingsStoreError.writeFailed(settingsURL, "设置存储尚未初始化")
+        }
+        let saved = try await settingsStore.saveShowDownloadLocation(visible)
+        settings.showDownloadLocation = saved.showDownloadLocation
     }
 
     func saveSettings(_ updated: AppSettingsModel) async throws {
@@ -956,8 +963,9 @@ final class AppStore: ObservableObject {
             do {
                 let router = IntegrationRouter(
                     handler: coreHandler,
-                    apiKey: settings.apiAuthEnabled ? settings.apiAuthKey : nil,
-                    allowAnonymous: !settings.apiAuthEnabled && settings.apiAnonymousAccessConfirmed
+                    apiKey: settings.apiAuthKey,
+                    allowAnonymous: !settings.apiAuthEnabled && settings.apiAnonymousAccessConfirmed,
+                    requireAuthentication: settings.apiAuthEnabled
                 )
                 let loopback = try LoopbackHTTPServer(port: UInt16(settings.apiPort), router: router) { [weak self] message in
                     Task { @MainActor [weak self] in

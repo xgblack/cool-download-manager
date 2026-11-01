@@ -6,6 +6,8 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
     public var uiScale: Double?
     public var mergeTopBarWithTitleBar: Bool
     public var showIconLabels: Bool
+    public var showDownloadLocation: Bool
+    public var blockAddWhenLoading: Bool
     public var useRelativeDateTime: Bool
     public var threadCount: Int
     public var maxConcurrentDownloads: Int
@@ -145,12 +147,16 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
         apiAnonymousAccessConfirmed: Bool = false,
         speedLimiterEnabled: Bool? = nil,
         limitWhileUsingOtherApps: Bool = false,
-        minimumPartSize: Int64 = DownloadSchedulerConfiguration.defaultMinimumPartSize
+        minimumPartSize: Int64 = DownloadSchedulerConfiguration.defaultMinimumPartSize,
+        showDownloadLocation: Bool = false,
+        blockAddWhenLoading: Bool = true
     ) {
         self.theme = theme
         self.uiScale = uiScale
         self.mergeTopBarWithTitleBar = mergeTopBarWithTitleBar
         self.showIconLabels = showIconLabels
+        self.showDownloadLocation = showDownloadLocation
+        self.blockAddWhenLoading = blockAddWhenLoading
         self.useRelativeDateTime = useRelativeDateTime
         self.threadCount = threadCount
         self.maxConcurrentDownloads = maxConcurrentDownloads
@@ -217,7 +223,7 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case apiAnonymousAccessConfirmed
+        case apiAnonymousAccessConfirmed, showDownloadLocation, blockAddWhenLoading
         case speedLimiterEnabled, limitWhileUsingOtherApps, minimumPartSize
         case theme, uiScale, mergeTopBarWithTitleBar, showIconLabels, useRelativeDateTime
         case threadCount, maxConcurrentDownloads, maxDownloadRetryCount, dynamicPartCreation
@@ -281,7 +287,9 @@ public struct AppSettingsModel: Codable, Equatable, Sendable {
             apiAnonymousAccessConfirmed: try c.decodeIfPresent(Bool.self, forKey: .apiAnonymousAccessConfirmed) ?? false,
             speedLimiterEnabled: limitEnabled ?? ((storedLimit ?? 0) > 0),
             limitWhileUsingOtherApps: try c.decodeIfPresent(Bool.self, forKey: .limitWhileUsingOtherApps) ?? false,
-            minimumPartSize: try c.decodeIfPresent(Int64.self, forKey: .minimumPartSize) ?? d.minimumPartSize
+            minimumPartSize: try c.decodeIfPresent(Int64.self, forKey: .minimumPartSize) ?? d.minimumPartSize,
+            showDownloadLocation: try c.decodeIfPresent(Bool.self, forKey: .showDownloadLocation) ?? false,
+            blockAddWhenLoading: try c.decodeIfPresent(Bool.self, forKey: .blockAddWhenLoading) ?? true
         )
     }
 }
@@ -433,6 +441,8 @@ public actor LegacyJSONSettingsStore {
         if let scale = settings.uiScale { set("uiScale", .number(String(scale))) } else { rawObject.removeValue(forKey: "uiScale") }
         set("mergeTopBarWithTitleBar", .bool(settings.mergeTopBarWithTitleBar))
         set("showIconLabels", .bool(settings.showIconLabels))
+        set("showDownloadLocation", .bool(settings.showDownloadLocation))
+        set("blockAddWhenLoading", .bool(settings.blockAddWhenLoading))
         set("useRelativeDateTime", .bool(settings.useRelativeDateTime))
         set("threadCount", .number(String(settings.threadCount)))
         set("maxConcurrentDownloads", .number(String(settings.maxConcurrentDownloads)))

@@ -1,12 +1,18 @@
 openapi: 3.0.0
 info:
   title: Download Service API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Local HTTP API for managing download tasks and queues. X-Api-Key authentication
     is enabled by default on every route, including ping. Empty configured keys
-    prevent HTTP startup. Legacy anonymous configurations pause HTTP until the user
-    enables authentication or explicitly accepts anonymous local access in Settings.
+    prevent authenticated HTTP startup. Legacy anonymous configurations pause HTTP
+    until the user enables authentication or explicitly accepts anonymous local access
+    in Settings. Confirmed anonymous mode permits only ping, queue reads and /add
+    requests that open user confirmation. /start-headless-download, source updates
+    and /add with silentAdd or silentStart always require a nonempty matching key,
+    even in anonymous mode. These unauthorized commands return 401 without calling
+    the download handler. Anonymous clients performing silent commands must now send
+    X-Api-Key; a key can be managed in Settings while ordinary authentication is off.
     Native Messaging uses the private same-user socket and does not require this key.
     Only HTTP/1.1 origin-form requests are accepted, with one Host header matching
     localhost, 127.0.0.1 or [::1] and the configured port. Browser Origin, when present,
@@ -25,29 +31,58 @@ servers:
     description: Default server running on port 15151
 
 paths:
+  /ping:
+    post:
+      summary: Check the local service
+      description: Requires a key by default; available without one in confirmed anonymous mode.
+      responses:
+        "200":
+          description: The local service is reachable.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: pong
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /add:
     post:
-      summary: Add a new download source
+      summary: Add download sources through browser integration
+      description: |
+        By default, opens the application confirmation window. A legacy source array
+        is equivalent to an object with both options false. In confirmed anonymous
+        mode, interactive requests may omit the key; setting either silentAdd or
+        silentStart to true always requires X-Api-Key. silentStart requests should
+        also set silentAdd to bypass the confirmation window and start immediately.
       requestBody:
-        description: Data for adding a download source
+        required: true
+        description: Download sources with optional silent execution flags.
         content:
           application/json:
             schema:
-              type: array
-              items:
-                type: object
-                properties:
-                  link:
-                    type: string
-                    description: The link to the download source
-                  headers:
-                    type: object
-                    additionalProperties:
-                      type: string
-                    description: Optional headers for the request
-                  downloadPage:
-                    type: string
-                    description: Optional download page URL
+              oneOf:
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/DownloadSource"
+                - type: object
+                  required: [items]
+                  properties:
+                    items:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/DownloadSource"
+                    options:
+                      type: object
+                      properties:
+                        silentAdd:
+                          type: boolean
+                          default: false
+                          description: Create tasks without opening confirmation.
+                        silentStart:
+                          type: boolean
+                          default: false
+                          description: Start tasks created by silentAdd.
       responses:
         "200":
           description: Successfully added the download
@@ -56,10 +91,13 @@ paths:
               schema:
                 type: string
                 description: OK on success
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /queues:
     get:
       summary: Get list of download queues
+      description: Requires a key by default; available without one in confirmed anonymous mode.
       responses:
         "200":
           description: List of download queues
@@ -76,30 +114,23 @@ paths:
                     name:
                       type: string
                       description: The name of the queue
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /start-headless-download:
     post:
       summary: Add a new download task
+      description: Always requires X-Api-Key, including in confirmed anonymous mode and when startDownload is false.
       requestBody:
+        required: true
         description: Data for adding a download task
         content:
           application/json:
             schema:
               type: object
+              required: [downloadSource]
               properties:
                 downloadSource:
-                  type: object
-                  properties:
-                    link:
-                      type: string
-                      description: The link to the download source
-                    headers:
-                      type: object
-                      additionalProperties:
-                        type: string
-                      description: Optional headers for the request
-                    downloadPage:
-                      type: string
-                      description: Optional download page URL
+                  $ref: "#/components/schemas/DownloadSource"
                 folder:
                   type: string
                   description: Optional folder to save the download (Unix style path)
@@ -109,6 +140,17 @@ paths:
                 queueId:
                   type: integer
                   description: Optional queue ID to associate the task with
+                categoryId:
+                  type: integer
+                  description: Optional category ID to associate the task with
+                startDownload:
+                  type: boolean
+                  default: false
+                  description: Start the new task immediately.
+                startQueue:
+                  type: boolean
+                  default: false
+                  description: Start the associated queue.
       responses:
         "200":
           description: Successfully added the download task
@@ -117,11 +159,16 @@ paths:
               schema:
                 type: string
                 description: OK on success
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /downloads/{id}/source:
     patch:
       summary: Replace an existing task's request source
-      description: Probes the replacement source and preserves downloaded bytes only when resource identity can be proven.
+      description: |
+        Always requires X-Api-Key, including in confirmed anonymous mode. Probes the
+        replacement source and preserves downloaded bytes only when resource identity
+        can be proven.
       security:
         - ApiKeyAuth: []
       parameters:
@@ -208,6 +255,39 @@ paths:
                 example: Request failed
 
 components:
+  responses:
+    Unauthorized:
+      description: X-Api-Key is missing, empty or incorrect. Protected commands require a key in anonymous mode too.
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: Unauthorized
+  schemas:
+    DownloadSource:
+      type: object
+      required: [link]
+      properties:
+        type:
+          type: string
+          enum: [http, hls]
+          default: http
+        link:
+          type: string
+          format: uri
+          description: HTTP or HTTPS download source URL.
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional task request headers, including authentication when needed.
+        downloadPage:
+          type: string
+          format: uri
+          description: Optional HTTP or HTTPS download page URL.
+        suggestedName:
+          type: string
+          description: Optional filename supplied by the caller.
   securitySchemes:
     ApiKeyAuth:
       type: apiKey

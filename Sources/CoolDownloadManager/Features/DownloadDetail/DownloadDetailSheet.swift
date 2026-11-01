@@ -309,6 +309,7 @@ struct DownloadDetailSheet: View {
 
     private var actionBar: some View {
         NativePageActionBar {
+            Button("分享二维码", systemImage: "qrcode") { coordinator.presentQRCodeShare(for: record) }
             if canShowProgress {
                 Button("显示下载进度", systemImage: "chart.bar.xaxis") {
                     coordinator.showProgressPanel(for: record, focus: true)

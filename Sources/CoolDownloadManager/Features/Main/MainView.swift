@@ -210,6 +210,8 @@ struct MainView: View {
                     title: "新建下载",
                     queues: store.queues,
                     categories: store.categories,
+                    service: store.service,
+                    blockAddWhenLoading: store.settings.blockAddWhenLoading,
                     onChooseFolder: { viewState.isShowingFolderPicker = true },
                     onCancel: {
                         resetAddForm()
@@ -304,6 +306,18 @@ struct MainView: View {
             .help("选择列表排序")
 
             Menu {
+                Button("扫描或导入二维码", systemImage: "qrcode.viewfinder") {
+                    coordinator.presentQRCodeImport()
+                }
+                Toggle("显示保存位置列", isOn: Binding(
+                    get: { store.settings.showDownloadLocation },
+                    set: { visible in
+                        Task {
+                            do { try await store.saveShowDownloadLocation(visible) }
+                            catch { store.errorMessage = error.localizedDescription }
+                        }
+                    }
+                ))
                 Button("批量下载", systemImage: "square.stack.3d.up") {
                     coordinator.presentBatchDownload()
                 }
@@ -351,48 +365,52 @@ struct MainView: View {
             if store.downloadList.visibleDownloads.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        tableHeader
-                        ForEach(store.downloadList.visibleDownloads) { record in
-                            DownloadTableRow(
-                                record: record,
-                                isSelected: store.downloadList.selectedIDs.contains(record.id),
-                                onSelect: { store.downloadList.toggleSelection(record.id) },
-                                onOpen: { open(record) },
-                                onOpenDetail: { coordinator.openDetail(for: record.id) },
-                                onShowProgress: {
-                                    coordinator.showProgressPanel(for: record, focus: true)
-                                },
-                                onStart: { selectAndStart(record) },
-                                onPause: { selectAndPause(record) },
-                                onRetry: { selectAndRetry(record) },
-                                onRedownload: {
-                                    store.downloadList.selectedIDs = [record.id]
-                                    store.downloadList.redownloadSelected()
-                                },
-                                onDelete: { selectAndDelete(record) },
-                                onCopyLink: { coordinator.copy(record.source.link) },
-                                onChecksum: { coordinator.presentChecksum(for: [record.id]) },
-                                coordinator: coordinator,
-                                categories: store.categories,
-                                speed: store.downloadList.speed(
-                                    for: record.id,
-                                    average: store.settings.useAverageSpeed
-                                ),
-                                relativeDate: store.settings.useRelativeDateTime,
-                                sizeUnit: store.settings.sizeUnit,
-                                speedUnit: store.settings.speedUnit,
-                                onMoveToCategory: { categoryID in
-                                    store.downloadList.selectedIDs = [record.id]
-                                    store.assignSelectedToCategory(categoryID, ids: [record.id])
-                                }
-                            )
-                            Rectangle()
-                                .fill(Color(nsColor: .separatorColor).opacity(0.4))
-                                .frame(height: DownloadVisualStyle.hairline)
-                                .padding(.leading, MainTableLayout.leadingInset)
+                GeometryReader { geometry in
+                    ScrollView(store.settings.showDownloadLocation ? [.horizontal, .vertical] : [.vertical]) {
+                        LazyVStack(spacing: 0) {
+                            tableHeader
+                            ForEach(store.downloadList.visibleDownloads) { record in
+                                DownloadTableRow(
+                                    record: record,
+                                    isSelected: store.downloadList.selectedIDs.contains(record.id),
+                                    onSelect: { store.downloadList.toggleSelection(record.id) },
+                                    onOpen: { open(record) },
+                                    onOpenDetail: { coordinator.openDetail(for: record.id) },
+                                    onShowProgress: {
+                                        coordinator.showProgressPanel(for: record, focus: true)
+                                    },
+                                    onStart: { selectAndStart(record) },
+                                    onPause: { selectAndPause(record) },
+                                    onRetry: { selectAndRetry(record) },
+                                    onRedownload: {
+                                        store.downloadList.selectedIDs = [record.id]
+                                        store.downloadList.redownloadSelected()
+                                    },
+                                    onDelete: { selectAndDelete(record) },
+                                    onCopyLink: { coordinator.copy(record.source.link) },
+                                    onChecksum: { coordinator.presentChecksum(for: [record.id]) },
+                                    coordinator: coordinator,
+                                    categories: store.categories,
+                                    speed: store.downloadList.speed(
+                                        for: record.id,
+                                        average: store.settings.useAverageSpeed
+                                    ),
+                                    showLocation: store.settings.showDownloadLocation,
+                                    relativeDate: store.settings.useRelativeDateTime,
+                                    sizeUnit: store.settings.sizeUnit,
+                                    speedUnit: store.settings.speedUnit,
+                                    onMoveToCategory: { categoryID in
+                                        store.downloadList.selectedIDs = [record.id]
+                                        store.assignSelectedToCategory(categoryID, ids: [record.id])
+                                    }
+                                )
+                                Rectangle()
+                                    .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                                    .frame(height: DownloadVisualStyle.hairline)
+                                    .padding(.leading, MainTableLayout.leadingInset)
+                            }
                         }
+                        .frame(width: max(geometry.size.width, store.settings.showDownloadLocation ? MainTableLayout.minimumLocationTableWidth : geometry.size.width))
                     }
                 }
                 .scrollContentBackground(.hidden)
@@ -415,6 +433,9 @@ struct MainView: View {
             Text("名称")
                 .padding(.leading, 41)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if store.settings.showDownloadLocation {
+                Text("保存位置").frame(width: MainTableLayout.locationWidth, alignment: .leading)
+            }
             Text("状态 / 进度")
                 .frame(width: MainTableLayout.statusWidth, alignment: .leading)
             Text("大小")
@@ -643,6 +664,8 @@ private struct IconLabelStyleModifier: ViewModifier {
 
 private enum MainTableLayout {
     static let selectionWidth: CGFloat = 24
+    static let locationWidth: CGFloat = 220
+    static let minimumLocationTableWidth: CGFloat = 1_120
     static let statusWidth: CGFloat = 190
     static let sizeWidth: CGFloat = 150
     static let dateWidth: CGFloat = 174
@@ -773,6 +796,7 @@ private struct DownloadTableRow: View {
     @ObservedObject var coordinator: AppCoordinator
     let categories: [DownloadCategory]
     let speed: Double?
+    let showLocation: Bool
     let relativeDate: Bool
     let sizeUnit: String
     let speedUnit: String
@@ -822,6 +846,16 @@ private struct DownloadTableRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if showLocation {
+                Text(record.folder)
+                    .font(DownloadVisualStyle.metadata)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: MainTableLayout.locationWidth, alignment: .leading)
+                    .help(record.folder)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -897,6 +931,7 @@ private struct DownloadTableRow: View {
                 .disabled(record.status != .completed)
             OpenWithMenu(record: record, coordinator: coordinator)
             Button("查看详情", systemImage: "info.circle") { onOpenDetail() }
+            Button("分享二维码", systemImage: "qrcode") { coordinator.presentQRCodeShare(for: record) }
             if canShowProgress {
                 Button("显示下载进度", systemImage: "chart.bar.xaxis", action: onShowProgress)
             }

@@ -36,6 +36,8 @@ struct BrowserDownloadConfirmationView: View {
     @ObservedObject var state: BrowserDownloadConfirmationState
     let queues: [IntegrationQueue]
     let categories: [DownloadCategory]
+    let service: DownloadService?
+    let blockAddWhenLoading: Bool
     let onChooseFolder: () -> Void
     let onCancel: () -> Void
     let onAdd: (_ queueID: DownloadID?, _ categoryID: DownloadID?, _ startImmediately: Bool) -> Void
@@ -53,6 +55,9 @@ struct BrowserDownloadConfirmationView: View {
             title: "确认下载",
             queues: queues,
             categories: categories,
+            service: service,
+            blockAddWhenLoading: blockAddWhenLoading,
+            integrationItems: state.request.items,
             onChooseFolder: onChooseFolder,
             onCancel: onCancel,
             onAdd: onAdd

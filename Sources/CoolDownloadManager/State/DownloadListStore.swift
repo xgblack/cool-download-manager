@@ -42,6 +42,7 @@ enum DownloadSort: String, CaseIterable, Sendable {
     case completedNewest
     case name
     case status
+    case location
 
     var title: String {
         switch self {
@@ -50,6 +51,7 @@ enum DownloadSort: String, CaseIterable, Sendable {
         case .completedNewest: return "完成日期"
         case .name: return "名称"
         case .status: return "状态"
+        case .location: return "保存位置"
         }
     }
 }
@@ -248,6 +250,13 @@ final class DownloadListStore: ObservableObject {
             result = filtered.sorted {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
+        case .location:
+            result = filtered.sorted { lhs, rhs in
+                let folderOrder = lhs.folder.localizedStandardCompare(rhs.folder)
+                if folderOrder != .orderedSame { return folderOrder == .orderedAscending }
+                let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+                return nameOrder == .orderedSame ? lhs.id < rhs.id : nameOrder == .orderedAscending
+            }
         case .status:
             result = filtered.sorted {
                 statusRank($0.status) < statusRank($1.status)
@@ -395,7 +404,7 @@ final class DownloadListStore: ObservableObject {
         invalidateDerivedCaches()
         announceCompletion(record, previousStatus: previousStatus)
         if (record.status == .preparing || record.status == .downloading),
-           previousStatus != .preparing, previousStatus != .downloading,
+           previousStatus != .preparing, previousStatus != .downloading, previousStatus != .retrying,
            suppressedProgressIDs.remove(record.id) == nil {
             progressID = record.id
             onDownloadStarted?(record)
@@ -482,6 +491,7 @@ final class DownloadListStore: ObservableObject {
             (record.status == .preparing || record.status == .downloading)
                 && previousStatuses[record.id] != .preparing
                 && previousStatuses[record.id] != .downloading
+                && previousStatuses[record.id] != .retrying
         }) {
             if suppressedProgressIDs.remove(started.id) == nil {
                 progressID = started.id
@@ -848,10 +858,9 @@ final class DownloadListStore: ObservableObject {
         let ids = downloads
             .filter { $0.status == .preparing || $0.status == .downloading || $0.status == .retrying }
             .map(\.id)
-        guard !ids.isEmpty else { return }
         suppressProgressPresentation(for: ids)
-        perform(ids: ids) { service, ids in
-            try await service.pause(ids: ids)
+        perform(ids: ids, allowEmpty: true) { service, _ in
+            try await service.stopAll()
         }
     }
 

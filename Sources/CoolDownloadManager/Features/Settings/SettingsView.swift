@@ -102,6 +102,7 @@ struct SettingsView: View {
             guard !viewState.isSaving else { return }
             viewState.mergeDefaultFolder(updated.defaultDownloadFolder)
             viewState.mergeSpeedLimiterSettings(updated)
+            viewState.mergeListSettings(updated)
             guard !viewState.isDirty else { return }
             viewState.markModelSaved(updated)
         }
@@ -227,6 +228,7 @@ struct SettingsView: View {
     private func save() {
         viewState.mergeDefaultFolder(store.settings.defaultDownloadFolder)
         viewState.mergeSpeedLimiterSettings(store.settings)
+        viewState.mergeListSettings(store.settings)
         guard viewState.quantityInputErrors.isEmpty else {
             viewState.errorMessage = "请先修正限速或最小工作块的输入。"
             return
@@ -463,6 +465,13 @@ final class SettingsViewState: ObservableObject {
             model.defaultDownloadFolder = folder
         }
         savedModel.defaultDownloadFolder = folder
+    }
+
+    func mergeListSettings(_ updated: AppSettingsModel) {
+        if model.showDownloadLocation == savedModel.showDownloadLocation {
+            model.showDownloadLocation = updated.showDownloadLocation
+        }
+        savedModel.showDownloadLocation = updated.showDownloadLocation
     }
 
     func mergeSpeedLimiterSettings(_ updated: AppSettingsModel) {
