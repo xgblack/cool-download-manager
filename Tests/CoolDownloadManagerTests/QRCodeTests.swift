@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
 import ImageIO
 import Testing
@@ -28,6 +29,28 @@ struct QRCodeTests {
         let payload = try DownloadSourceShareCodec.encode([source])
         let recognized = try #require(QRCodeReader.read(QRCodeRenderer.render(payload).pngData).first)
         #expect(try DownloadSourceShareCodec.decode(recognized) == [source])
+    }
+
+    @Test("相机像素缓冲能返回二维码内容和有效的识别框边界")
+    func cameraPixelBufferObservations() throws {
+        let text = "https://example.test/相机识别.zip"
+        let image = try QRCodeRenderer.render(text).cgImage
+        var pixelBuffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(kCFAllocatorDefault, image.width, image.height,
+            kCVPixelFormatType_32BGRA, nil, &pixelBuffer) == kCVReturnSuccess)
+        let buffer = try #require(pixelBuffer)
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        let context = try #require(CGContext(data: CVPixelBufferGetBaseAddress(buffer),
+            width: image.width, height: image.height, bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let observation = try #require(QRCodeReader.observations(buffer).first)
+        #expect(observation.text == text)
+        #expect(observation.bounds.width > 0 && observation.bounds.height > 0)
+        #expect(observation.bounds.minX >= 0 && observation.bounds.maxX <= 1)
+        #expect(observation.bounds.minY >= 0 && observation.bounds.maxY <= 1)
     }
 
     @Test("同一张图片中的多个二维码均可识别")

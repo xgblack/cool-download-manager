@@ -339,7 +339,12 @@ final class AppCoordinator: NSObject, ObservableObject {
     }
 
     func presentQRCodeShare(for record: DownloadRecord) {
-        utilityPanels.showQRCodeShare(record: record)
+        presentQRCodeShare(for: [record])
+    }
+
+    func presentQRCodeShare(for records: [DownloadRecord]) {
+        guard !records.isEmpty else { return }
+        utilityPanels.showQRCodeShare(records: records)
     }
 
     func presentQRCodeImport() {
@@ -818,10 +823,10 @@ private final class UtilityPanelController: NSObject, NSWindowDelegate {
         window.contentViewController = nil
     }
 
-    func showQRCodeShare(record: DownloadRecord) {
+    func showQRCodeShare(records: [DownloadRecord]) {
         hideQRCodeShare()
-        let content = QRCodeShareView(record: record, onClose: { [weak self] in self?.hideQRCodeShare() })
-        let window = panel(existing: nil, title: "分享二维码", size: NSSize(width: 640, height: 660),
+        let content = QRCodeShareView(records: records, onClose: { [weak self] in self?.hideQRCodeShare() })
+        let window = panel(existing: nil, title: "分享二维码", size: NSSize(width: 640, height: 740),
             floatsAboveNormalWindows: false, content: content)
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.qr-share")
         qrSharePanel = window

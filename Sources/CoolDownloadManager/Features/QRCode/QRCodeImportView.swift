@@ -9,9 +9,10 @@ struct QRCodeImportCandidate: Identifiable, Equatable {
     let sources: [DownloadSource]
 
     var title: String {
-        sources.count == 1
-            ? (sources[0].suggestedName ?? URL(string: sources[0].link)?.host ?? "下载来源")
-            : "\(sources.count) 个下载来源"
+        guard sources.count == 1 else { return "\(sources.count) 个下载来源" }
+        if let name = sources[0].suggestedName, !name.isEmpty { return name }
+        guard let url = URL(string: sources[0].link) else { return "下载来源" }
+        return url.lastPathComponent.isEmpty ? (url.host ?? "下载来源") : url.lastPathComponent
     }
 
     var containsCredentials: Bool {
@@ -26,9 +27,16 @@ struct QRCodeImportCandidate: Identifiable, Equatable {
 struct QRCodeImportView: View {
     let onImport: ([DownloadSource]) -> Void
     let onClose: () -> Void
-    @StateObject private var state = QRCodeImportState()
+    @StateObject private var state: QRCodeImportState
     @StateObject private var camera = QRCodeCameraController()
     @State private var isDropTargeted = false
+
+    init(onImport: @escaping ([DownloadSource]) -> Void, onClose: @escaping () -> Void,
+         state: QRCodeImportState = QRCodeImportState()) {
+        self.onImport = onImport
+        self.onClose = onClose
+        _state = StateObject(wrappedValue: state)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,13 +60,13 @@ struct QRCodeImportView: View {
                         }
                         .keyboardShortcut("v", modifiers: .command)
                         Button("使用摄像头", systemImage: "camera") {
-                            state.clear()
-                            camera.start { texts in state.accept(texts) }
+                            if state.hasIncompleteTransfer { state.cancelReading() } else { state.clear() }
+                            camera.start { texts in state.receive(texts) }
                         }
                         .disabled(camera.state == .requesting || camera.state == .running)
                     }
                     if camera.state == .running {
-                        QRCodeCameraPreview(session: camera.session)
+                        QRCodeCameraPreview(session: camera.session, observations: camera.observations)
                             .frame(height: 230)
                             .clipShape(RoundedRectangle(cornerRadius: DownloadVisualStyle.cornerRadius))
                             .accessibilityLabel("摄像头二维码扫描预览")
@@ -79,13 +87,41 @@ struct QRCodeImportView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    if state.collection.total > 0 {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label(state.collection.isComplete ? "已收齐二维码" : "正在收集二维码", systemImage: state.collection.isComplete ? "checkmark.circle.fill" : "qrcode")
+                                    .foregroundStyle(state.collection.isComplete ? DownloadVisualStyle.success : Color.primary)
+                                Spacer()
+                                Text("已收集 \(state.collection.received) / \(state.collection.total) 帧")
+                                    .font(DownloadVisualStyle.numeric)
+                                Button("重置") { camera.stop(); state.clear() }
+                            }
+                            ProgressView(value: Double(state.collection.received), total: Double(state.collection.total))
+                                .accessibilityLabel("二维码收集进度")
+                            if state.hasIncompleteTransfer {
+                                Text("请继续扫描当前组，或添加剩余二维码图片。缺少第 \(state.missingFrameSummary) 帧。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    if let message = state.successMessage {
+                        Label(message, systemImage: "checkmark.circle.fill")
+                            .font(.callout).foregroundStyle(DownloadVisualStyle.success)
+                    }
+                    if let message = state.errorMessage {
+                        Label(message, systemImage: "exclamationmark.circle")
+                            .font(.callout)
+                            .foregroundStyle(DownloadVisualStyle.failure)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if state.isReading {
                         HStack {
                             ProgressView().controlSize(.small)
                             Text("正在识别图片…").font(.callout)
                         }
                         .frame(maxWidth: .infinity, minHeight: 100)
-                    } else if state.candidates.isEmpty {
+                    } else if state.candidates.isEmpty && !state.hasIncompleteTransfer {
                         VStack(spacing: 10) {
                             Image(systemName: "qrcode.viewfinder")
                                 .font(.system(size: 42))
@@ -102,9 +138,13 @@ struct QRCodeImportView: View {
                         .padding(16)
                         .background(isDropTargeted ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.025))
                         .clipShape(RoundedRectangle(cornerRadius: DownloadVisualStyle.cornerRadius))
-                    } else {
-                        Text("选择要导入的下载来源")
-                            .font(DownloadVisualStyle.sectionTitle)
+                    } else if !state.candidates.isEmpty {
+                        HStack {
+                            Text("选择要导入的下载来源").font(DownloadVisualStyle.sectionTitle)
+                            Spacer()
+                            Button("全选") { state.selectedIDs = Set(state.candidates.map(\.id)) }
+                            Button("清除选择") { state.selectedIDs = [] }
+                        }
                         ForEach(state.candidates) { candidate in
                             candidateRow(candidate)
                             Divider()
@@ -112,12 +152,6 @@ struct QRCodeImportView: View {
                         Text("使用后进入下载确认窗口；在确认前不会创建或开始下载。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-                    if let message = state.errorMessage {
-                        Label(message, systemImage: "exclamationmark.circle")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .padding(20)
@@ -142,18 +176,18 @@ struct QRCodeImportView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(state.selectedSources.isEmpty || state.isReading)
+                .disabled(state.selectedSources.isEmpty || state.isReading || state.hasIncompleteTransfer)
             }
         }
         .modifier(DownloadPanelSurface())
         .frame(minWidth: 640, idealWidth: 680, minHeight: 490, idealHeight: 620)
         .onDisappear {
             camera.stop()
-            state.cancelReading()
+            state.clear()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             camera.stop()
-            state.cancelReading()
+            state.clear()
         }
     }
 
@@ -169,7 +203,7 @@ struct QRCodeImportView: View {
             .labelsHidden()
             .toggleStyle(.checkbox)
             VStack(alignment: .leading, spacing: 5) {
-                Text(candidate.title).font(.body.weight(.medium))
+                Text(candidate.title).font(.body.weight(.medium)).lineLimit(2).truncationMode(.middle)
                 ForEach(Array(candidate.sources.enumerated()), id: \.offset) { _, source in
                     Text(source.link)
                         .font(.caption)
@@ -193,16 +227,16 @@ struct QRCodeImportView: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            state.importImage(at: url)
+            guard response == .OK else { return }
+            state.importImages(at: panel.urls)
         }
     }
 
     private func close() {
         camera.stop()
-        state.cancelReading()
+        state.clear()
         onClose()
     }
 }
@@ -212,10 +246,18 @@ final class QRCodeImportState: ObservableObject {
     @Published private(set) var candidates: [QRCodeImportCandidate] = []
     @Published var selectedIDs: Set<UUID> = []
     @Published private(set) var errorMessage: String?
+    @Published private(set) var successMessage: String?
     @Published private(set) var isReading = false
+    @Published private(set) var collection = DownloadQRCodeCollector()
     private var readTask: Task<Void, Never>?
     private var generation = UUID()
 
+    var hasIncompleteTransfer: Bool { collection.total > 0 && !collection.isComplete }
+    var missingFrameSummary: String {
+        let received = collection.receivedIndices
+        let missing = (0..<collection.total).filter { !received.contains($0) }.map { String($0 + 1) }
+        return missing.prefix(8).joined(separator: "、") + (missing.count > 8 ? "等" : "")
+    }
     var selectedSources: [DownloadSource] {
         var result: [DownloadSource] = []
         for candidate in candidates where selectedIDs.contains(candidate.id) {
@@ -226,92 +268,78 @@ final class QRCodeImportState: ObservableObject {
 
     func clear() {
         cancelReading()
+        collection.reset()
         candidates = []
         selectedIDs = []
         errorMessage = nil
+        successMessage = nil
     }
 
+    /// A new independent input, retained for clipboard text and callers that
+    /// intentionally replace the previous selection.
     func accept(_ texts: [String]) {
         clear()
+        _ = receive(texts)
+    }
+
+    /// Incremental camera/image delivery. Progress survives additional inputs.
+    /// The camera stops only after valid source content is complete.
+    @discardableResult
+    func receive(_ texts: [String]) -> Bool {
         var rejected = 0
+        var failure: String?
+        var accepted = false
         for text in texts {
             do {
-                let sources = try DownloadSourceShareCodec.decode(text)
-                guard !sources.isEmpty else { rejected += 1; continue }
-                guard !candidates.contains(where: { $0.sources == sources }) else { continue }
-                candidates.append(QRCodeImportCandidate(id: UUID(), sources: sources))
+                guard let payload = try collection.receive(text) else { continue }
+                let sources = try DownloadSourceShareCodec.decode(payload)
+                for source in sources where !candidates.contains(where: { $0.sources == [source] }) {
+                    candidates.append(QRCodeImportCandidate(id: UUID(), sources: [source]))
+                }
+                accepted = true
+                successMessage = collection.isComplete
+                    ? "已收齐 \(collection.total) 帧，识别到 \(sources.count) 个下载来源。"
+                    : "已识别下载来源，请选择要使用的内容。"
             } catch {
                 rejected += 1
+                failure = (error as? DownloadQRCodeError)?.errorDescription
+                // An assembled but invalid payload must not lock the scanner
+                // onto an unusable finished transfer.
+                if collection.isComplete && candidates.isEmpty { collection.reset() }
             }
         }
-        if let first = candidates.first { selectedIDs = [first.id] }
-        if candidates.isEmpty {
-            errorMessage = "没有可导入的下载来源。支持 HTTP、HTTPS 链接和下载来源 JSON。"
-        } else if rejected > 0 {
-            errorMessage = "另有 \(rejected) 个二维码无法作为下载来源，已保留可识别的内容。"
-        }
+        if selectedIDs.isEmpty, let first = candidates.first { selectedIDs = [first.id] }
+        if rejected > 0 {
+            errorMessage = failure ?? (candidates.isEmpty
+                ? "没有可导入的下载来源。支持 HTTP、HTTPS 链接和下载来源 JSON。"
+                : "另有 \(rejected) 个二维码无法作为下载来源，已保留可识别的内容。")
+        } else if !texts.isEmpty { errorMessage = nil }
+        return accepted && !hasIncompleteTransfer
     }
 
-    func importImage(at url: URL) {
-        readImage {
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            let data = try handle.read(upToCount: QRCodeReader.maximumImageBytes + 1) ?? Data()
-            return try QRCodeReader.read(data)
-        }
-    }
-
-    func importImage(data: Data) {
-        readImage { try QRCodeReader.read(data) }
-    }
+    func importImage(at url: URL) { importImages(at: [url]) }
+    func importImages(at urls: [URL]) { readInputs(urls.map(ImageInput.url)) }
+    func importImage(data: Data) { readInputs([.data(data)]) }
 
     func importPasteboard() {
         let pasteboard = NSPasteboard.general
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-           let url = urls.first {
-            importImage(at: url)
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            importImages(at: urls)
         } else if let data = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) {
             importImage(data: data)
         } else if let text = pasteboard.string(forType: .string), !text.isEmpty {
-            accept([text])
+            if hasIncompleteTransfer { _ = receive([text]) } else { accept([text]) }
         } else {
-            clear()
             errorMessage = "剪贴板中没有图片或下载来源文本。"
         }
     }
 
     func importDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) || $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }) else {
-            return false
+        let images = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) || $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
         }
-        clear()
-        isReading = true
-        let token = generation
-        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { [weak self] data, _ in
-                Task { @MainActor in
-                    guard let self, self.generation == token else { return }
-                    guard let data, let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL else {
-                        self.isReading = false
-                        self.errorMessage = "无法读取拖入的图片，请使用“选择图片”。"
-                        return
-                    }
-                    self.importImage(at: url)
-                }
-            }
-        } else {
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] data, _ in
-                Task { @MainActor in
-                    guard let self, self.generation == token else { return }
-                    guard let data else {
-                        self.isReading = false
-                        self.errorMessage = "无法读取拖入的图片，请使用“选择图片”。"
-                        return
-                    }
-                    self.importImage(data: data)
-                }
-            }
-        }
+        guard !images.isEmpty else { return false }
+        readInputs(images.map(ImageInput.provider))
         return true
     }
 
@@ -322,29 +350,131 @@ final class QRCodeImportState: ObservableObject {
         isReading = false
     }
 
-    private func readImage(_ operation: @escaping @Sendable () throws -> [String]) {
-        clear()
+    private enum ImageInput {
+        case url(URL)
+        case data(Data)
+        case provider(NSItemProvider)
+    }
+
+    private func readInputs(_ inputs: [ImageInput]) {
+        guard !inputs.isEmpty else { return }
+        guard inputs.count <= DownloadQRCodeTransfer.maximumFrames else {
+            errorMessage = "一次最多导入 \(DownloadQRCodeTransfer.maximumFrames) 张二维码图片，请分批添加。"
+            return
+        }
+        if hasIncompleteTransfer { cancelReading() } else { clear() }
         let token = generation
         isReading = true
         errorMessage = nil
         readTask = Task { [weak self] in
-            do {
-                let worker = Task.detached(priority: .userInitiated) {
+            var imageFailures = 0
+            var imageFailureMessage: String?
+            for input in inputs {
+                guard let self, !Task.isCancelled, self.generation == token else { return }
+                do {
+                    let operation = try await self.operation(for: input)
                     try Task.checkCancellation()
-                    return try operation()
+                    let worker = Task.detached(priority: .userInitiated) {
+                        try Task.checkCancellation()
+                        return try operation()
+                    }
+                    let texts = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+                    guard !Task.isCancelled, self.generation == token else { return }
+                    _ = self.receive(texts)
+                } catch {
+                    guard !Task.isCancelled, self.generation == token else { return }
+                    imageFailures += 1
+                    imageFailureMessage = (error as? QRCodeError)?.errorDescription ?? "无法读取二维码图片，请检查文件权限或改用其他图片。"
                 }
-                let texts = try await withTaskCancellationHandler {
-                    try await worker.value
-                } onCancel: {
-                    worker.cancel()
-                }
-                guard let self, !Task.isCancelled, self.generation == token else { return }
-                accept(texts)
-            } catch {
-                guard let self, !Task.isCancelled, self.generation == token else { return }
-                isReading = false
-                errorMessage = error.localizedDescription
+            }
+            guard let self, self.generation == token else { return }
+            self.isReading = false
+            self.readTask = nil
+            if imageFailures > 0 {
+                self.errorMessage = "有 \(imageFailures) 张图片未能识别，已保留其他图片的识别结果。" + (imageFailureMessage ?? "")
             }
         }
+    }
+
+    private func operation(for input: ImageInput) async throws -> @Sendable () throws -> [String] {
+        switch input {
+        case .url(let url):
+            guard url.isFileURL else { throw QRCodeError.imageUnreadable }
+            return {
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                let data = try handle.read(upToCount: QRCodeReader.maximumImageBytes + 1) ?? Data()
+                return try QRCodeReader.read(data)
+            }
+        case .data(let data): return { try QRCodeReader.read(data) }
+        case .provider(let provider):
+            let isURL = provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            let type = isURL ? UTType.fileURL.identifier : UTType.image.identifier
+            let data = await QRCodeProviderLoad().read(provider, type: type)
+            guard let data else { throw QRCodeError.imageUnreadable }
+            if isURL {
+                guard let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL else { throw QRCodeError.imageUnreadable }
+                return try await operation(for: .url(url))
+            }
+            return { try QRCodeReader.read(data) }
+        }
+    }
+}
+
+/// NSItemProvider may wait for a remote file. Finish the continuation on
+/// cancellation as well as cancelling its Progress; late callbacks are ignored.
+private final class QRCodeProviderLoad: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data?, Never>?
+    private var progress: Progress?
+    private var completed = false
+    private var cancelled = false
+
+    @MainActor
+    func read(_ provider: NSItemProvider, type: String) async -> Data? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let shouldStart = lock.withLock {
+                    guard !completed else { return false }
+                    self.continuation = continuation
+                    return true
+                }
+                guard shouldStart else { continuation.resume(returning: nil); return }
+                let progress = provider.loadDataRepresentation(forTypeIdentifier: type) { [self] data, _ in
+                    finish(data)
+                }
+                let shouldCancel = lock.withLock {
+                    if !completed { self.progress = progress }
+                    return cancelled
+                }
+                if shouldCancel { progress.cancel() }
+            }
+        } onCancel: { self.cancel() }
+    }
+
+    private func finish(_ data: Data?) {
+        let continuation = lock.withLock {
+            guard !completed else { return nil as CheckedContinuation<Data?, Never>? }
+            completed = true
+            let result = self.continuation
+            self.continuation = nil
+            progress = nil
+            return result
+        }
+        continuation?.resume(returning: data)
+    }
+
+    private func cancel() {
+        let pending = lock.withLock {
+            cancelled = true
+            guard !completed else { return (nil as CheckedContinuation<Data?, Never>?, nil as Progress?) }
+            completed = true
+            let result = (continuation, progress)
+            continuation = nil
+            progress = nil
+            return result
+        }
+        pending.1?.cancel()
+        pending.0?.resume(returning: nil)
     }
 }

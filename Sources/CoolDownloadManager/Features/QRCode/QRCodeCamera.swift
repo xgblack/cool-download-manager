@@ -12,13 +12,14 @@ final class QRCodeCameraController: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    @Published private(set) var observations: [QRCodeObservation] = []
     private let capture = QRCodeCameraCapture()
     private var generation: UUID?
     private var authorizationTask: Task<Void, Never>?
 
     var session: AVCaptureSession { capture.session }
 
-    func start(onTexts: @escaping @MainActor ([String]) -> Void) {
+    func start(onTexts: @escaping @MainActor ([String]) -> Bool) {
         stop()
         let token = UUID()
         generation = token
@@ -44,11 +45,11 @@ final class QRCodeCameraController: ObservableObject {
                     case .failure(let message): self.state = .failed(message)
                     }
                 }
-            }, onTexts: { [weak self] texts in
+            }, onObservations: { [weak self] observations in
                 Task { @MainActor in
                     guard let self, self.generation == token else { return }
-                    self.stop()
-                    onTexts(texts)
+                    self.observations = observations
+                    if !observations.isEmpty && onTexts(observations.map(\.text)) { self.stop() }
                 }
             })
         }
@@ -60,6 +61,7 @@ final class QRCodeCameraController: ObservableObject {
         authorizationTask = nil
         capture.stop()
         state = .idle
+        observations = []
     }
 
     deinit { capture.stop() }
@@ -80,7 +82,7 @@ private final class QRCodeCameraCapture: NSObject, AVCaptureVideoDataOutputSampl
     private let lock = NSLock()
     private struct Delivery {
         let token: UUID
-        let callback: @Sendable ([String]) -> Void
+        let callback: @Sendable ([QRCodeObservation]) -> Void
         let status: @Sendable (QRCodeCameraStartResult) -> Void
         var output: AVCaptureVideoDataOutput?
     }
@@ -106,10 +108,10 @@ private final class QRCodeCameraCapture: NSObject, AVCaptureVideoDataOutputSampl
 
     func start(
         onReady: @escaping @Sendable (QRCodeCameraStartResult) -> Void,
-        onTexts: @escaping @Sendable ([String]) -> Void
+        onObservations: @escaping @Sendable ([QRCodeObservation]) -> Void
     ) {
         let token = UUID()
-        lock.withLock { delivery = Delivery(token: token, callback: onTexts, status: onReady) }
+        lock.withLock { delivery = Delivery(token: token, callback: onObservations, status: onReady) }
         sessionQueue.async { [self] in
             guard lock.withLock({ delivery?.token == token }) else { return }
             session.beginConfiguration()
@@ -171,17 +173,12 @@ private final class QRCodeCameraCapture: NSObject, AVCaptureVideoDataOutputSampl
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastFrameTime = now
         do {
-            let texts = try QRCodeReader.read(pixelBuffer)
-            guard !texts.isEmpty else { return }
-            let callback = lock.withLock { () -> (@Sendable ([String]) -> Void)? in
+            let observations = try QRCodeReader.observations(pixelBuffer)
+            let callback = lock.withLock { () -> (@Sendable ([QRCodeObservation]) -> Void)? in
                 guard delivery?.token == token else { return nil }
-                let callback = delivery?.callback
-                delivery = nil
-                return callback
+                return delivery?.callback
             }
-            guard let callback else { return }
-            sessionQueue.async { [self] in if session.isRunning { session.stopRunning() } }
-            callback(texts)
+            callback?(observations)
         } catch {
             failCurrentCapture("无法识别摄像头画面，请重新打开摄像头或导入图片。", token: token)
         }
@@ -203,26 +200,34 @@ private final class QRCodeCameraCapture: NSObject, AVCaptureVideoDataOutputSampl
 
 struct QRCodeCameraPreview: NSViewRepresentable {
     let session: AVCaptureSession
+    let observations: [QRCodeObservation]
 
     func makeNSView(context: Context) -> QRCodeCameraPreviewView {
         let view = QRCodeCameraPreviewView()
         view.preview.session = session
+        view.updateObservations(observations)
         return view
     }
 
     func updateNSView(_ nsView: QRCodeCameraPreviewView, context: Context) {
         nsView.preview.session = session
+        nsView.updateObservations(observations)
     }
 }
 
 final class QRCodeCameraPreviewView: NSView {
     let preview = AVCaptureVideoPreviewLayer()
+    private let detectionLayer = CAShapeLayer()
+    private var detections: [QRCodeObservation] = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         preview.videoGravity = .resizeAspectFill
         layer?.addSublayer(preview)
+        detectionLayer.fillColor = NSColor.clear.cgColor
+        detectionLayer.lineWidth = 2
+        layer?.addSublayer(detectionLayer)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -230,5 +235,32 @@ final class QRCodeCameraPreviewView: NSView {
     override func layout() {
         super.layout()
         preview.frame = bounds
+        updateDetectionPath()
+    }
+
+    func updateObservations(_ observations: [QRCodeObservation]) {
+        detections = observations
+        updateDetectionPath()
+    }
+
+    private func updateDetectionPath() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        detectionLayer.frame = bounds
+        let path = CGMutablePath()
+        if detections.isEmpty {
+            let side = min(bounds.width, bounds.height) * 0.65
+            path.addRoundedRect(in: CGRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side), cornerWidth: 8, cornerHeight: 8)
+        } else {
+            for detection in detections {
+                let b = detection.bounds
+                let metadata = CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
+                let rect = preview.layerRectConverted(fromMetadataOutputRect: metadata).insetBy(dx: -6, dy: -6)
+                path.addRoundedRect(in: rect, cornerWidth: 8, cornerHeight: 8)
+            }
+        }
+        detectionLayer.strokeColor = (detections.isEmpty ? NSColor.white.withAlphaComponent(0.7) : NSColor.systemGreen).cgColor
+        detectionLayer.path = path
+        CATransaction.commit()
     }
 }

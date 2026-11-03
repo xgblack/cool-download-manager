@@ -118,6 +118,10 @@ struct CoolDownloadManagerApp: App {
                 }
             }
             AppUpdateCommands(controller: coordinator.updates, showMain: coordinator.showMainWindow)
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") { coordinator.presentSettings() }
+                    .keyboardShortcut(",", modifiers: [.command])
+            }
             CommandGroup(replacing: .newItem) {
                 Button("新建下载") {
                     coordinator.presentAddDownload()
@@ -190,10 +194,6 @@ struct CoolDownloadManagerApp: App {
                 Button("每主机设置") {
                     coordinator.presentPerHostSettings()
                 }
-                Button("设置") {
-                    coordinator.presentSettings()
-                }
-                .keyboardShortcut("s", modifiers: [.command, .option])
             }
             CommandGroup(after: .help) {
                 Button("支持") {

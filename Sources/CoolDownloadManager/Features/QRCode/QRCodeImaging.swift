@@ -66,6 +66,12 @@ enum QRCodeRenderer {
     }
 }
 
+struct QRCodeObservation: Sendable {
+    let text: String
+    /// Vision-normalized bounds, with a bottom-left origin.
+    let bounds: CGRect
+}
+
 enum QRCodeReader {
     static let maximumImageBytes = 32 * 1024 * 1024
 
@@ -92,11 +98,15 @@ enum QRCodeReader {
         return uniquePayloads(request.results?.compactMap(\.payloadStringValue) ?? [])
     }
 
-    static func read(_ pixelBuffer: CVPixelBuffer) throws -> [String] {
+    static func observations(_ pixelBuffer: CVPixelBuffer) throws -> [QRCodeObservation] {
         let request = VNDetectBarcodesRequest()
         request.symbologies = [.qr]
         try VNImageRequestHandler(cvPixelBuffer: pixelBuffer).perform([request])
-        return uniquePayloads(request.results?.compactMap(\.payloadStringValue) ?? [])
+        var seen: Set<String> = []
+        return (request.results ?? []).compactMap { result in
+            guard let text = result.payloadStringValue, !text.isEmpty, seen.insert(text).inserted else { return nil }
+            return QRCodeObservation(text: text, bounds: result.boundingBox)
+        }
     }
 
     private static func uniquePayloads(_ values: [String]) -> [String] {

@@ -326,6 +326,10 @@ struct MainView: View {
                     downloadList.selectAllVisible()
                 }
                 .disabled(downloadList.visibleDownloads.isEmpty)
+                Button("分享所选二维码…", systemImage: "qrcode") {
+                    coordinator.presentQRCodeShare(for: downloadList.selectedDownloads)
+                }
+                .disabled(!downloadList.hasSelection)
                 Button("清除选择", systemImage: "xmark.circle") {
                     downloadList.clearSelection()
                 }
@@ -931,7 +935,10 @@ private struct DownloadTableRow: View {
                 .disabled(record.status != .completed)
             OpenWithMenu(record: record, coordinator: coordinator)
             Button("查看详情", systemImage: "info.circle") { onOpenDetail() }
-            Button("分享二维码", systemImage: "qrcode") { coordinator.presentQRCodeShare(for: record) }
+            Button("分享二维码", systemImage: "qrcode") {
+                let selection = coordinator.store.downloadList
+                coordinator.presentQRCodeShare(for: selection.selectedIDs.contains(record.id) ? selection.selectedDownloads : [record])
+            }
             if canShowProgress {
                 Button("显示下载进度", systemImage: "chart.bar.xaxis", action: onShowProgress)
             }
