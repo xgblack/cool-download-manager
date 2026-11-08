@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Exposes the NSWindow created by SwiftUI's WindowGroup to the app coordinator.
+/// Exposes a hosted SwiftUI scene's NSWindow to the app coordinator.
 @MainActor
 struct WindowAccessor: NSViewRepresentable {
     let onWindowChange: (NSWindow?) -> Void

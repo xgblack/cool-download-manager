@@ -1,91 +1,146 @@
 import SwiftUI
 import AppKit
+import Carbon
+import Darwin
 import CoolDownloadCore
+import CoolDownloadIntegration
 
 enum AppLaunchContext {
-    static func shouldPresentMainWindow(arguments: [String]) -> Bool {
-        !arguments.contains(AppPaths.browserIntegrationLaunchArgument)
+    static func shouldPresentMainWindow(arguments: [String], isLoginItem: Bool = false,
+                                        isDefaultLaunch: Bool = true) -> Bool {
+        !arguments.contains(AppPaths.browserIntegrationLaunchArgument) && !isLoginItem && isDefaultLaunch
+    }
+
+    static func isLoginItem(_ event: NSAppleEventDescriptor?) -> Bool {
+        guard let properties = event?.paramDescriptor(forKeyword: keyAEPropData) else { return false }
+        return properties.forKeyword(keyAELaunchedAsLogInItem)?.booleanValue == true
+            || properties.forKeyword(keyAELaunchedAsServiceItem)?.booleanValue == true
+    }
+}
+
+@main
+enum CoolDownloadManagerApp {
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.regular)
+        do {
+            // Publish the control listener before database/configuration boot.
+            let instance = try AppInstanceController(socketURL: AppPaths.nativeMessagingSocketURL())
+            let delegate = CoolDownloadManagerAppDelegate(instance: instance)
+            application.delegate = delegate
+            withExtendedLifetime(delegate) { application.run() }
+        } catch AppInstanceError.alreadyRunning {
+            forwardToExistingInstance()
+        } catch PrivateSocketServer.PrivateSocketServerError.alreadyRunning {
+            // A pre-fix installed version may still own the existing socket.
+            forwardToExistingInstance()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "下载管理器无法启动"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    @MainActor
+    private static func forwardToExistingInstance() {
+        guard !CommandLine.arguments.contains(AppPaths.browserIntegrationLaunchArgument) else { return }
+        do {
+            try AppInstanceClient(socketURL: AppPaths.nativeMessagingSocketURL()).showMainWindow()
+        } catch {
+            // Opening through Launch Services also wakes an older installed
+            // instance that does not implement show-main yet.
+            let other = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? AppPaths.bundleIdentifier)
+                .first { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            if let url = other?.bundleURL {
+                NSWorkspace.shared.openApplication(at: url, configuration: .init())
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            } else {
+                fputs("CoolDownloadManager: \(error.localizedDescription)\n", stderr)
+            }
+        }
     }
 }
 
 @MainActor
 final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
-    var terminationHandler: (() async -> Void)?
-    weak var coordinator: AppCoordinator?
+    private let instance: AppInstanceController
+    private var store: AppStore?
+    private var coordinator: AppCoordinator?
+    private var scenes: NSHostingSceneRepresentation<CoolDownloadManagerScenes>?
     private var terminationInProgress = false
+    private var pendingReopen = false
+
+    init(instance: AppInstanceController) { self.instance = instance }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let store = AppStore()
+        let coordinator = AppCoordinator(store: store)
+        self.store = store
+        self.coordinator = coordinator
+        let scenes = NSHostingSceneRepresentation {
+            CoolDownloadManagerScenes(store: store, coordinator: coordinator)
+        }
+        self.scenes = scenes
+        NSApplication.shared.addSceneRepresentation(scenes)
+        coordinator.configureMainWindowOpener { [weak scenes] in scenes?.environment.openWindow(id: "main") }
+        coordinator.configureSettingsWindowOpener { [weak scenes] in scenes?.environment.openWindow(id: "settings") }
+        coordinator.configureAboutWindowOpener { [weak scenes] in scenes?.environment.openWindow(id: "about") }
+        coordinator.attachMenuBar()
+        instance.configureShowMain { [weak coordinator] in
+            await coordinator?.showMainWindow()
+        }
+        store.onStartupFinished = { [weak store, weak instance] failure in
+            guard let instance else { return }
+            if let failure { instance.setFailed(failure) }
+            else {
+                instance.setReady { [weak store] request in
+                    guard let store else { throw AppInstanceError.stopping }
+                    try await store.addFromBrowser(request)
+                }
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Keep the normal macOS application identity: Dock icon, Cmd+Tab, and
-        // a regular application menu remain available while the window is
-        // closed and downloads continue in the background.
-        NSApp.setActivationPolicy(.regular)
         coordinator?.startUpdaterIfConfigured()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(settingsWindowDidBecomeKey(_:)),
-            name: NSWindow.didBecomeKeyNotification,
-            object: nil
-        )
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
-
-    @objc private func settingsWindowDidBecomeKey(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window.identifier?.rawValue == "com.cooldownloadmanager.settings-window" else {
-            return
+        let isDefault = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
+        if pendingReopen || AppLaunchContext.shouldPresentMainWindow(
+            arguments: CommandLine.arguments,
+            isLoginItem: AppLaunchContext.isLoginItem(NSAppleEventManager.shared().currentAppleEvent),
+            isDefaultLaunch: isDefault
+        ) {
+            coordinator?.showMainWindow()
         }
-        window.title = "设置"
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // During very early launch SwiftUI may not have attached the scene
-        // content yet. Let its default behavior create the first window in
-        // that narrow interval; once the coordinator is wired, it owns all
-        // reopen/focus behavior to prevent a second WindowGroup instance.
-        guard let coordinator, coordinator.handleApplicationReopen() else {
-            return true
-        }
-        // The coordinator owns reopening. Returning true would also ask
-        // SwiftUI/AppKit to create a window and can produce a duplicate.
+        if let coordinator { coordinator.showMainWindow() }
+        else { pendingReopen = true }
         return false
     }
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationInProgress else { return .terminateLater }
-        guard let terminationHandler else { return .terminateNow }
+        guard let store, let coordinator else { return .terminateNow }
         terminationInProgress = true
-        Task { @MainActor [weak self] in
-            await terminationHandler()
-            self?.terminationHandler = nil
+        instance.beginStopping()
+        Task { @MainActor [self] in
+            await coordinator.fileActions.prepareForTermination()
+            await store.shutdown()
+            instance.stop()
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
 }
 
-@main
-struct CoolDownloadManagerApp: App {
-    @NSApplicationDelegateAdaptor(CoolDownloadManagerAppDelegate.self)
-    private var appDelegate
-    @Environment(\.openWindow)
-    private var openWindow
-    @StateObject private var store: AppStore
-    @StateObject private var coordinator: AppCoordinator
-
-    init() {
-        let store = AppStore()
-        _store = StateObject(wrappedValue: store)
-        let coordinator = AppCoordinator(store: store)
-        _coordinator = StateObject(wrappedValue: coordinator)
-        appDelegate.coordinator = coordinator
-        appDelegate.terminationHandler = { [store, coordinator] in
-            await coordinator.fileActions.prepareForTermination()
-            await store.shutdown()
-        }
-    }
+struct CoolDownloadManagerScenes: Scene {
+    @ObservedObject var store: AppStore
+    @ObservedObject var coordinator: AppCoordinator
 
     var body: some Scene {
         WindowGroup("酷的下载管理器", id: "main") {
@@ -95,26 +150,13 @@ struct CoolDownloadManagerApp: App {
                         coordinator.registerMainWindow(window)
                     }
                 }
-                .onAppear {
-                    appDelegate.coordinator = coordinator
-                    coordinator.configureMainWindowOpener {
-                        openWindow(id: "main")
-                    }
-                    coordinator.configureSettingsWindowOpener {
-                        openWindow(id: "settings")
-                    }
-                }
         }
         .defaultSize(width: 1_280, height: 760)
-        .defaultLaunchBehavior(
-            AppLaunchContext.shouldPresentMainWindow(arguments: CommandLine.arguments)
-                ? .presented
-                : .suppressed
-        )
+        .defaultLaunchBehavior(.suppressed)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("关于酷的下载管理器") {
-                    openWindow(id: "about")
+                    coordinator.showAboutWindow()
                 }
             }
             AppUpdateCommands(controller: coordinator.updates, showMain: coordinator.showMainWindow)
@@ -203,11 +245,11 @@ struct CoolDownloadManagerApp: App {
                     openExternal("https://github.com/xgblack/cool-download-manager")
                 }
                 Button("关于") {
-                    openWindow(id: "about")
+                    coordinator.showAboutWindow()
                 }
             }
         }
-        Window("关于酷的下载管理器", id: "about") {
+        WindowGroup("关于酷的下载管理器", id: "about") {
             AboutView(updates: coordinator.updates)
                 .appTheme(store.settings.theme)
                 .background {
@@ -223,18 +265,16 @@ struct CoolDownloadManagerApp: App {
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
-        Window("下载管理器", id: "settings") {
+        WindowGroup("下载管理器", id: "settings") {
             SettingsView(store: store, coordinator: coordinator)
                 .background {
                     WindowAccessor { window in
                         coordinator.registerSettingsWindow(window)
-                        coordinator.configureSettingsWindowOpener {
-                            openWindow(id: "settings")
-                        }
                     }
                 }
         }
         .defaultSize(width: 1_160, height: 760)
+        .defaultLaunchBehavior(.suppressed)
     }
 
     private func openExternal(_ string: String) {

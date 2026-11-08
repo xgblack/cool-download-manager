@@ -85,7 +85,6 @@ struct MainView: View {
             Text("已选中 \(store.downloadList.selectedIDs.count) 个任务")
         }
         .onAppear {
-            coordinator.updateMenuBar()
             if viewState.folderURL.path == FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Downloads", isDirectory: true).path {
                 viewState.folderURL = URL(fileURLWithPath: store.settings.defaultDownloadFolder, isDirectory: true)

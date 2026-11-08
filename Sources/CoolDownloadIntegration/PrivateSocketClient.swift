@@ -8,7 +8,7 @@ public final class PrivateSocketClient: @unchecked Sendable {
         self.socketURL = socketURL
     }
 
-    public func send(_ message: PrivateSocketMessage) throws -> PrivateSocketMessage {
+    public func send(_ message: PrivateSocketMessage, timeout: TimeInterval = 5) throws -> PrivateSocketMessage {
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw PrivateSocketClientError.system(errno)
@@ -18,7 +18,7 @@ public final class PrivateSocketClient: @unchecked Sendable {
         guard setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
             throw PrivateSocketClientError.system(errno)
         }
-        configureTimeouts(for: descriptor)
+        configureTimeouts(for: descriptor, seconds: timeout)
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -98,8 +98,9 @@ public final class PrivateSocketClient: @unchecked Sendable {
         return data
     }
 
-    private func configureTimeouts(for descriptor: Int32) {
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+    private func configureTimeouts(for descriptor: Int32, seconds: TimeInterval) {
+        let seconds = max(0.001, seconds)
+        var timeout = timeval(tv_sec: Int(seconds), tv_usec: Int32((seconds - floor(seconds)) * 1_000_000))
         _ = withUnsafePointer(to: &timeout) { pointer in
             Darwin.setsockopt(
                 descriptor,

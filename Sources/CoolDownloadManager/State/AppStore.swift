@@ -26,6 +26,8 @@ final class AppStore: ObservableObject {
     let service: DownloadService?
     var downloadList: DownloadListStore
     var onBrowserDownloadRequest: ((AddDownloadsRequest) -> Void)?
+    var onStartupFinished: ((String?) -> Void)?
+    private var browserIntegrationHandler: CoreDownloadIntegrationHandler?
     private let store: DownloadStore?
     private let settingsStore: SettingsStore?
     private let settingsStoreInitializationError: SettingsStoreError?
@@ -36,7 +38,6 @@ final class AppStore: ObservableObject {
     private let hostPerformanceStore: HostPerformanceStore?
     private var integrationServer: LoopbackHTTPServer?
     private var integrationGeneration = UUID()
-    private var privateSocketServer: PrivateSocketServer?
     private var queueScheduleTask: Task<Void, Never>?
     private var queueEventTask: Task<Void, Never>?
     private var downloadEventTask: Task<Void, Never>?
@@ -148,7 +149,6 @@ final class AppStore: ObservableObject {
         missingFileTask?.cancel()
         speedLimitUpdateTask?.cancel()
         integrationServer?.stop()
-        privateSocketServer?.stop()
     }
 
     func boot() async {
@@ -157,6 +157,7 @@ final class AppStore: ObservableObject {
             if errorMessage == nil {
                 errorMessage = "无法创建下载核心"
             }
+            onStartupFinished?(errorMessage)
             return
         }
 
@@ -235,9 +236,19 @@ final class AppStore: ObservableObject {
                 }
             }
             isReady = true
+            onStartupFinished?(nil)
         } catch {
             errorMessage = error.localizedDescription
+            onStartupFinished?(errorMessage)
         }
+    }
+
+    func addFromBrowser(_ request: AddDownloadsRequest) async throws {
+        guard !isShuttingDown else { throw AppInstanceError.stopping }
+        guard isReady, let browserIntegrationHandler else {
+            throw AppInstanceError.unavailable("下载核心尚未就绪")
+        }
+        try await browserIntegrationHandler.addFromBrowser(request)
     }
 
     func prepareForUpdateRestart(targetBuild: String) async throws {
@@ -268,12 +279,11 @@ final class AppStore: ObservableObject {
         missingFileTask?.cancel()
         missingFileTask = nil
 
-        // Stop accepting browser requests before cancelling downloads so quit
-        // cannot race a new add/start command with state persistence.
+        // The application controller has stopped accepting private requests;
+        // stop HTTP before persisting the core as well.
+        browserIntegrationHandler = nil
         integrationServer?.stop()
         integrationServer = nil
-        privateSocketServer?.stop()
-        privateSocketServer = nil
         if let service {
             await service.shutdown()
         }
@@ -981,51 +991,8 @@ final class AppStore: ObservableObject {
             }
         }
 
-        let socketURL = AppPaths.nativeMessagingSocketURL()
-        let socketServer = PrivateSocketServer(socketURL: socketURL) { message in
-            do {
-                switch message.action {
-                case "ping":
-                    return PrivateSocketMessage(requestId: message.requestId, action: "ping", payload: "true")
-                case "add":
-                    let request = try JSONDecoder().decode(
-                        AddDownloadsRequest.self,
-                        from: Data(message.payload.utf8)
-                    )
-                    try await coreHandler.addFromBrowser(request)
-                    return PrivateSocketMessage(requestId: message.requestId, action: "add", payload: "true")
-                default:
-                    return PrivateSocketMessage(
-                        requestId: message.requestId,
-                        action: message.action,
-                        payload: "{\"message\":\"不支持的操作\"}",
-                        isError: true
-                    )
-                }
-            } catch {
-                let payload = (try? String(
-                    data: JSONEncoder().encode(NativeMessagingErrorPayload(
-                        errorType: String(describing: type(of: error)),
-                        message: error.localizedDescription
-                    )),
-                    encoding: .utf8
-                )) ?? "{\"message\":\"请求失败\"}"
-                return PrivateSocketMessage(
-                    requestId: message.requestId,
-                    action: message.action,
-                    payload: payload,
-                    isError: true
-                )
-            }
-        }
-        do {
-            try socketServer.start()
-        } catch {
-            server?.stop()
-            throw error
-        }
+        browserIntegrationHandler = coreHandler
         integrationServer = server
-        privateSocketServer = socketServer
         installNativeMessagingManifestIfAvailable()
     }
 
@@ -1040,11 +1007,10 @@ final class AppStore: ObservableObject {
         integrationGeneration = UUID()
         integrationServer?.stop()
         integrationServer = nil
-        privateSocketServer?.stop()
-        privateSocketServer = nil
     }
 
     private func installNativeMessagingManifestIfAvailable() {
+        guard Bundle.main.bundleIdentifier == AppPaths.bundleIdentifier else { return }
         let environment = ProcessInfo.processInfo.environment["CDM_NATIVE_HOST_PATH"]
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/CoolDownloadManagerNativeMessagingHost")
@@ -1088,6 +1054,7 @@ final class AppStore: ObservableObject {
     }
 
     private func applyAutoStartOnBoot(_ enabled: Bool) throws {
+        guard Bundle.main.bundleIdentifier == AppPaths.bundleIdentifier else { return }
         if enabled {
             guard SMAppService.mainApp.status != .enabled else { return }
             try SMAppService.mainApp.register()

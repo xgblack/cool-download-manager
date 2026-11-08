@@ -59,7 +59,10 @@ final class AppCoordinator: NSObject, ObservableObject {
     private weak var aboutWindow: NSWindow?
     private var openMainWindowAction: (() -> Void)?
     private var openSettingsWindowAction: (() -> Void)?
+    private var openAboutWindowAction: (() -> Void)?
     private var mainWindowCreationInFlight = false
+    private var settingsWindowCreationInFlight = false
+    private var aboutWindowCreationInFlight = false
     private var focusMainWindowWhenRegistered = false
     private var focusSettingsWindowWhenRegistered = false
     private var browserRequests = BrowserDownloadRequestQueue()
@@ -151,10 +154,6 @@ final class AppCoordinator: NSObject, ObservableObject {
         )
     }
 
-    func updateMenuBar() {
-        attachMenuBar()
-    }
-
     func applyWindowSettings() {
         guard let window = mainWindow else { return }
         window.titlebarSeparatorStyle = .automatic
@@ -185,6 +184,7 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func registerAboutWindow(_ window: NSWindow?) {
         guard let window else { return }
+        aboutWindowCreationInFlight = false
         aboutWindow = window
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.about-window")
         applyTheme(store.settings.theme, to: window)
@@ -200,6 +200,26 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func configureSettingsWindowOpener(_ action: @escaping () -> Void) {
         openSettingsWindowAction = action
+    }
+
+    func configureAboutWindowOpener(_ action: @escaping () -> Void) {
+        openAboutWindowAction = action
+    }
+
+    func showAboutWindow() {
+        if let aboutWindow, aboutWindow.windowNumber != 0 {
+            NSApp.activate(ignoringOtherApps: true)
+            if aboutWindow.isMiniaturized { aboutWindow.deminiaturize(nil) }
+            aboutWindow.makeKeyAndOrderFront(nil)
+        } else {
+            guard !aboutWindowCreationInFlight, let openAboutWindowAction else { return }
+            aboutWindowCreationInFlight = true
+            openAboutWindowAction()
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.aboutWindowCreationInFlight = false
+            }
+        }
     }
 
     func registerMainWindow(_ window: NSWindow?) {
@@ -229,9 +249,8 @@ final class AppCoordinator: NSObject, ObservableObject {
         _ = handleApplicationReopen()
     }
 
-    /// Handles a Dock/application reopen event when the SwiftUI scene is
-    /// already wired. Returning false lets the application delegate fall back
-    /// to SwiftUI's default scene creation during the initial launch race.
+    /// Uses the scene opener registered at application launch, including when
+    /// the main window has never appeared. Repeated requests share one creation.
     func handleApplicationReopen() -> Bool {
         if let window = resolvedMainWindow() {
             focusMainWindow(window)
@@ -257,6 +276,7 @@ final class AppCoordinator: NSObject, ObservableObject {
 
     func registerSettingsWindow(_ window: NSWindow?) {
         guard let window else { return }
+        settingsWindowCreationInFlight = false
         settingsWindow = window
         window.identifier = NSUserInterfaceItemIdentifier("com.cooldownloadmanager.settings-window")
         window.title = "设置"
@@ -291,14 +311,20 @@ final class AppCoordinator: NSObject, ObservableObject {
     private func focusSettingsWindow(_ window: NSWindow? = nil) {
         guard let window = window ?? resolvedSettingsWindow() else { return }
         NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
     }
 
     func showSettingsWindow() {
         guard let window = resolvedSettingsWindow() else {
+            guard !settingsWindowCreationInFlight, let openSettingsWindowAction else { return }
+            settingsWindowCreationInFlight = true
             focusSettingsWindowWhenRegistered = true
-            openSettingsWindowAction?()
+            openSettingsWindowAction()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.settingsWindowCreationInFlight = false
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.focusSettingsWindow()
             }
@@ -321,6 +347,7 @@ final class AppCoordinator: NSObject, ObservableObject {
     private func focusMainWindow(_ window: NSWindow? = nil) {
         guard let window = window ?? resolvedMainWindow() else { return }
         NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
     }
