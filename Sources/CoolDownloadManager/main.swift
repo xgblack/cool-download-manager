@@ -69,6 +69,7 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
     private var store: AppStore?
     private var coordinator: AppCoordinator?
     private var scenes: NSHostingSceneRepresentation<CoolDownloadManagerScenes>?
+    private var mainMenuController: AppMainMenuController?
     private var terminationInProgress = false
     private var pendingReopen = false
 
@@ -87,6 +88,9 @@ final class CoolDownloadManagerAppDelegate: NSObject, NSApplicationDelegate {
         coordinator.configureMainWindowOpener { [weak scenes] in scenes?.environment.openWindow(id: "main") }
         coordinator.configureSettingsWindowOpener { [weak scenes] in scenes?.environment.openWindow(id: "settings") }
         coordinator.configureAboutWindowOpener { [weak scenes] in scenes?.environment.openWindow(id: "about") }
+        let mainMenu = AppMainMenuController(store: store, coordinator: coordinator)
+        self.mainMenuController = mainMenu
+        mainMenu.install()
         coordinator.attachMenuBar()
         instance.configureShowMain { [weak coordinator] in
             await coordinator?.showMainWindow()
@@ -153,102 +157,6 @@ struct CoolDownloadManagerScenes: Scene {
         }
         .defaultSize(width: 1_280, height: 760)
         .defaultLaunchBehavior(.suppressed)
-        .commands {
-            CommandGroup(replacing: .appInfo) {
-                Button("关于酷的下载管理器") {
-                    coordinator.showAboutWindow()
-                }
-            }
-            AppUpdateCommands(controller: coordinator.updates, showMain: coordinator.showMainWindow)
-            CommandGroup(replacing: .appSettings) {
-                Button("设置…") { coordinator.presentSettings() }
-                    .keyboardShortcut(",", modifiers: [.command])
-            }
-            CommandGroup(replacing: .newItem) {
-                Button("新建下载") {
-                    coordinator.presentAddDownload()
-                }
-                .keyboardShortcut("n", modifiers: [.command])
-                Button("从剪贴板新建") {
-                    coordinator.presentAddDownload(fromClipboard: true)
-                }
-            }
-            CommandGroup(after: .newItem) {
-                Button("批量下载") {
-                    coordinator.presentBatchDownload()
-                }
-                Button("队列") {
-                    coordinator.presentQueues()
-                }
-                Button("分类") {
-                    coordinator.presentCategories()
-                }
-            }
-            CommandMenu("任务") {
-                Button("继续") {
-                    store.downloadList.startSelected()
-                }
-                .keyboardShortcut("r", modifiers: [.command])
-                .disabled(!store.downloadList.canStartSelection)
-                Button("暂停") {
-                    store.downloadList.pauseSelected()
-                }
-                .keyboardShortcut("p", modifiers: [.command])
-                .disabled(!store.downloadList.canPauseSelection)
-                Button("重新下载") {
-                    store.downloadList.redownloadSelected()
-                }
-                .disabled(!store.downloadList.selectedDownloads.contains { $0.status == .completed })
-                Button("删除") {
-                    store.downloadList.removeSelected()
-                }
-                .keyboardShortcut(.delete, modifiers: [])
-                .disabled(!store.downloadList.hasSelection)
-                Button("删除已完成") {
-                    store.downloadList.removeCompleted()
-                }
-                Button("删除未完成") {
-                    store.downloadList.removeIncomplete()
-                }
-                Button("删除全部") {
-                    store.downloadList.removeAll()
-                }
-                Divider()
-                Button("启动队列") {
-                    if case .queue(let id) = store.downloadList.filter {
-                        store.startQueue(id)
-                    } else {
-                        coordinator.showNotice("请先在侧栏选择一个队列。")
-                    }
-                }
-                Button("停止队列") {
-                    if case .queue(let id) = store.downloadList.filter {
-                        store.stopQueue(id)
-                    } else {
-                        coordinator.showNotice("请先在侧栏选择一个队列。")
-                    }
-                }
-                Button("停止全部") {
-                    store.downloadList.stopAll()
-                }
-            }
-            CommandMenu("工具") {
-                Button("每主机设置") {
-                    coordinator.presentPerHostSettings()
-                }
-            }
-            CommandGroup(after: .help) {
-                Button("支持") {
-                    openExternal("https://github.com/xgblack/cool-download-manager/issues")
-                }
-                Button("捐赠") {
-                    openExternal("https://github.com/xgblack/cool-download-manager")
-                }
-                Button("关于") {
-                    coordinator.showAboutWindow()
-                }
-            }
-        }
         WindowGroup("关于酷的下载管理器", id: "about") {
             AboutView(updates: coordinator.updates)
                 .appTheme(store.settings.theme)
@@ -275,10 +183,5 @@ struct CoolDownloadManagerScenes: Scene {
         }
         .defaultSize(width: 1_160, height: 760)
         .defaultLaunchBehavior(.suppressed)
-    }
-
-    private func openExternal(_ string: String) {
-        guard let url = URL(string: string) else { return }
-        NSWorkspace.shared.open(url)
     }
 }

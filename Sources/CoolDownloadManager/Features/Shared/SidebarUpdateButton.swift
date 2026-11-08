@@ -53,18 +53,3 @@ struct SidebarUpdateButton: View {
         }
     }
 }
-
-struct AppUpdateCommands: Commands {
-    @ObservedObject var controller: AppUpdateController
-    let showMain: () -> Void
-
-    var body: some Commands {
-        CommandGroup(after: .appInfo) {
-            Button(controller.menuTitle) {
-                showMain()
-                controller.performAction()
-            }
-            .disabled(controller.state.isWorking)
-        }
-    }
-}
