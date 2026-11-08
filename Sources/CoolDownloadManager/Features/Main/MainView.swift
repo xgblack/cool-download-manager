@@ -443,7 +443,7 @@ struct MainView: View {
                 .frame(width: MainTableLayout.statusWidth, alignment: .leading)
             Text("大小")
                 .frame(width: MainTableLayout.sizeWidth, alignment: .trailing)
-            Text("时间")
+            Text("添加时间")
                 .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
         }
         .font(DownloadVisualStyle.metadata.weight(.medium))
@@ -900,14 +900,13 @@ private struct DownloadTableRow: View {
             }
             .frame(width: MainTableLayout.sizeWidth, alignment: .trailing)
 
-            VStack(alignment: .trailing, spacing: 3) {
-                timeRow("添加", record.createdAt)
-                timeRow("开始", record.startedAt)
-                timeRow("完成", record.completedAt)
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
+            DownloadDateLabel(date: record.createdAt, relative: relativeDate)
+                .font(DownloadVisualStyle.metadata)
+                .foregroundStyle(.secondary)
+                .frame(width: MainTableLayout.dateWidth, alignment: .trailing)
+                .help("添加时间：\(DownloadTimePresentation.full(record.createdAt))")
+                .accessibilityLabel("添加时间")
+                .accessibilityValue(DownloadTimePresentation.full(record.createdAt))
         }
         .contentShape(Rectangle())
         .padding(.horizontal, MainTableLayout.horizontalInset)
@@ -978,16 +977,6 @@ private struct DownloadTableRow: View {
             Divider()
             Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
         }
-    }
-
-    private func timeRow(_ label: String, _ date: Date?) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-            if let date { DownloadDateLabel(date: date, relative: relativeDate) }
-            else { Text("—") }
-        }
-        .help("\(label)：\(DownloadTimePresentation.full(date))")
-        .accessibilityElement(children: .combine)
     }
 
     private var statusText: String {
