@@ -86,11 +86,18 @@ public struct ApplicationBundleInfo: Sendable {
             let created = SecStaticCodeCreateWithPath(url as CFURL, [], &code)
             if created != errSecCSUnsigned {
                 guard created == errSecSuccess, let code else {
-                    throw FileActionFailure("无法验证 \(url.lastPathComponent) 的应用签名。")
+                    throw signatureFailure(url, status: created)
                 }
-                let checked = SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSCheckNestedCode), nil)
+                var checked = SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSCheckNestedCode), nil)
+                if checked == errSecCSResourcesNotFound, try hasOnlyLinkerSignature(code, at: url) {
+                    // Linker signatures seal executable bytes, not the surrounding
+                    // app bundle. Treat that bundle like unsigned code while still
+                    // rejecting modified executable pages in every architecture.
+                    checked = SecStaticCodeCheckValidity(code,
+                        SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSDoNotValidateResources), nil)
+                }
                 guard checked == errSecSuccess || checked == errSecCSUnsigned else {
-                    throw FileActionFailure("\(url.lastPathComponent) 的签名校验失败，应用可能不完整。")
+                    throw signatureFailure(url, status: checked)
                 }
             }
         }
@@ -100,6 +107,20 @@ public struct ApplicationBundleInfo: Sendable {
             version: values["CFBundleShortVersionString"] as? String ?? values["CFBundleVersion"] as? String ?? "未知版本"
         )
     }
+    private static func hasOnlyLinkerSignature(_ code: SecStaticCode, at url: URL) throws -> Bool {
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+              let flags = (information as? [String: Any])?[kSecCodeInfoFlags as String] as? NSNumber else { return false }
+        let linkerFlags = SecCodeSignatureFlags.adhoc.rawValue | SecCodeSignatureFlags.linkerSigned.rawValue
+        guard flags.uint32Value & linkerFlags == linkerFlags else { return false }
+        return try FileItemIdentity.read(url.appendingPathComponent("Contents/_CodeSignature/CodeResources")) == nil
+    }
+
+    private static func signatureFailure(_ url: URL, status: OSStatus) -> FileActionFailure {
+        let detail = SecCopyErrorMessageString(status, nil) as String? ?? "系统未提供详细原因"
+        return FileActionFailure("\(url.lastPathComponent) 的签名校验未通过（系统错误 \(status)）：\(detail)")
+    }
+
     public static func ensureNotRunning(_ destination: URL) throws {
         guard let identifier = Bundle(url: destination)?.bundleIdentifier else { return }
         let target = FileActionPath.canonical(destination).path

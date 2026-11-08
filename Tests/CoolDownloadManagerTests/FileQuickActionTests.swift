@@ -34,6 +34,24 @@ private struct QuickActionFixture {
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
     }
 
+    func prepareSignedApplication(sealBundle: Bool = false) async throws {
+        let executable = source.appendingPathComponent("Contents/MacOS/Example")
+        let program = "volatile const char fixtureMarker[] = \"cooldm-signature-fixture\"; int main(void) { return fixtureMarker[0]; }\n"
+        let compiled = try await FileActionProcess.run("/usr/bin/xcrun", [
+            "clang", "-arch", "arm64", "-Wl,-adhoc_codesign", "-x", "c", "-", "-o", executable.path
+        ], input: Data(program.utf8))
+        guard compiled.status == 0 else { throw FileActionFailure(compiled.error) }
+        if sealBundle {
+            let resources = source.appendingPathComponent("Contents/Resources", isDirectory: true)
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            try Data("original resource".utf8).write(to: resources.appendingPathComponent("fixture.txt"))
+            let signed = try await FileActionProcess.run("/usr/bin/codesign", [
+                "--force", "--sign", "-", "--timestamp=none", source.path
+            ])
+            guard signed.status == 0 else { throw FileActionFailure(signed.error) }
+        }
+    }
+
     func record(id: DownloadID = 1) -> DownloadRecord {
         .init(id: id, source: .init(kind: .http, link: "https://fixture.invalid/example.dmg"),
             folder: source.deletingLastPathComponent().path, name: source.lastPathComponent, status: .completed)
@@ -68,6 +86,50 @@ struct FileInstallationTests {
             validate: { _ = try ApplicationBundleInfo.read($0) })
         #expect(try FileItemIdentity.read(destination) != oldIdentity)
         #expect(try Data(contentsOf: destination.appendingPathComponent("Contents/MacOS/Example")) == Data(contentsOf: sourceExecutable))
+    }
+
+    @Test("Linker-signed apps install without bundle seals, but modified executable bytes remain rejected")
+    func linkerSignedApplication() async throws {
+        let fixture = try QuickActionFixture()
+        defer { fixture.recycle() }
+        try await fixture.prepareSignedApplication()
+        let destination = fixture.system.appendingPathComponent(fixture.source.lastPathComponent)
+        let result = try FileInstallation.perform(source: fixture.source, destination: destination, expectedIdentity: nil,
+            validate: { _ = try ApplicationBundleInfo.read($0) })
+        #expect(result.destination == destination)
+        #expect(try ApplicationBundleInfo.read(destination).identifier == "test.cooldm.example")
+        let identity = try FileItemIdentity.read(destination)
+        let executable = fixture.source.appendingPathComponent("Contents/MacOS/Example")
+        var bytes = try Data(contentsOf: executable)
+        let marker = try #require(bytes.range(of: Data("cooldm-signature-fixture".utf8)))
+        bytes[marker.lowerBound] ^= 1
+        try bytes.write(to: executable)
+        #expect(throws: FileActionFailure.self) {
+            try FileInstallation.perform(source: fixture.source, destination: destination, expectedIdentity: identity,
+                validate: { _ = try ApplicationBundleInfo.read($0) })
+        }
+        #expect(try FileItemIdentity.read(destination) == identity)
+        #expect(try ApplicationBundleInfo.read(destination).identifier == "test.cooldm.example")
+    }
+
+    @Test("Bundle signatures reject modified resources and missing seals", arguments: [false, true])
+    func sealedApplicationIntegrity(removeSeal: Bool) async throws {
+        let fixture = try QuickActionFixture()
+        defer { fixture.recycle() }
+        try await fixture.prepareSignedApplication(sealBundle: true)
+        #expect(try ApplicationBundleInfo.read(fixture.source).identifier == "test.cooldm.example")
+        if removeSeal {
+            try FileManager.default.moveItem(at: fixture.source.appendingPathComponent("Contents/_CodeSignature/CodeResources"),
+                to: fixture.root.appendingPathComponent("OriginalCodeResources"))
+        } else {
+            try Data("modified resource".utf8).write(to: fixture.source.appendingPathComponent("Contents/Resources/fixture.txt"))
+        }
+        let destination = fixture.system.appendingPathComponent(fixture.source.lastPathComponent)
+        #expect(throws: FileActionFailure.self) {
+            try FileInstallation.perform(source: fixture.source, destination: destination, expectedIdentity: nil,
+                validate: { _ = try ApplicationBundleInfo.read($0) })
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
     }
 
     @Test("Activation failure restores the previous file, and a failed first install leaves no destination", arguments: [false, true])
