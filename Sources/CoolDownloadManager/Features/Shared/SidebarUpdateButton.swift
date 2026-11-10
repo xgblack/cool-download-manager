@@ -5,7 +5,7 @@ struct SidebarUpdateButton: View {
     @State private var showsDetails = false
 
     var body: some View {
-        if let title = controller.state.title {
+        if let title = controller.state.sidebarTitle {
             HStack {
                 Spacer(minLength: 0)
                 Button {

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CryptoKit
 import Foundation
 import Sparkle
@@ -233,6 +234,152 @@ struct UpdateRoutingTests {
         #expect(AppUpdateController.retryableFailure(noUpdate, phase: .feed, staleFeed: true) == .feed)
     }
 
+    @Test("换线在完成回调内启动，不被框架随后进入的调度忙碌状态丢弃")
+    func retryStartsBeforeSparkleReschedules() async throws {
+        let fixture = try UpdateCycleFixture()
+        defer { fixture.close() }
+        fixture.controller.checkForUpdates()
+        var checks = fixture.engine.checkEvents.stream.makeAsyncIterator()
+        _ = await checks.next()
+        #expect(fixture.engine.checkCount == 1)
+        fixture.engine.finish(error: URLError(.timedOut))
+        #expect(fixture.engine.checkCount == 2)
+        #expect(fixture.controller.state == .retrying)
+        #expect(fixture.controller.state.sidebarTitle == nil)
+        #expect(fixture.controller.menuTitle == UpdatePresentationState.retrying.title)
+        fixture.engine.finish(error: nil)
+        #expect(fixture.controller.state == .unavailable)
+    }
+
+    @Test("框架调度尚未空闲时保留手动检查，并在空闲后启动")
+    func checkWaitsForSchedulerReadiness() async throws {
+        let fixture = try UpdateCycleFixture()
+        defer { fixture.close() }
+        var checks = fixture.engine.checkEvents.stream.makeAsyncIterator()
+        fixture.controller.checkForUpdates()
+        _ = await checks.next()
+        fixture.engine.finish(error: nil)
+        #expect(fixture.controller.state == .unavailable)
+        fixture.controller.checkForUpdates()
+        #expect(fixture.engine.checkCount == 1)
+        fixture.engine.setBusy(false)
+        _ = await checks.next()
+        #expect(fixture.engine.checkCount == 2)
+        #expect(fixture.controller.state == .checking)
+    }
+
+    @Test("每条更新线路超时都会真正取消，耗尽后恢复为可重试状态")
+    func stalledFeedRequestsCancelAndExhaustRoutes() async throws {
+        let fixture = try UpdateCycleFixture(timeouts: .init(feed: .zero))
+        defer { fixture.close() }
+        fixture.controller.checkForUpdates()
+        var completions = fixture.engine.finishEvents.stream.makeAsyncIterator()
+        for _ in GitHubUpdateRoute.builtIns { _ = await completions.next() }
+        #expect(fixture.engine.checkCount == GitHubUpdateRoute.builtIns.count)
+        #expect(fixture.engine.cancelCount == GitHubUpdateRoute.builtIns.count)
+        #expect(fixture.controller.state == .failed)
+        #expect(!fixture.controller.state.isWorking)
+        #expect(fixture.controller.state.sidebarTitle == nil)
+    }
+
+    @Test("整轮检查到达总时限后结束，不因切换线路重新计时")
+    func totalCheckDeadlineStopsRetries() async throws {
+        let fixture = try UpdateCycleFixture(timeouts: .init(checkCycle: .zero))
+        defer { fixture.close() }
+        let failed = AsyncStream<Void>.makeStream()
+        let observation = fixture.controller.$state.sink { state in
+            if state == .failed { failed.continuation.yield(()) }
+        }
+        defer { observation.cancel(); failed.continuation.finish() }
+        fixture.controller.checkForUpdates()
+        for await _ in failed.stream { break }
+        #expect(fixture.controller.state == .failed)
+        #expect(fixture.engine.checkCount <= 1)
+        #expect(!fixture.controller.state.isWorking)
+    }
+
+    @Test("框架迟迟不结束取消时也退出忙碌，晚到的完成回调不再重试")
+    func cancellationCleanupCannotLeaveBusyState() async throws {
+        let fixture = try UpdateCycleFixture(timeouts: .init(feed: .zero, cancellationGrace: .zero))
+        defer { fixture.close() }
+        fixture.engine.cancellationCompletes = false
+        let failed = AsyncStream<Void>.makeStream()
+        let observation = fixture.controller.$state.sink { state in
+            if state == .failed { failed.continuation.yield(()) }
+        }
+        defer { observation.cancel(); failed.continuation.finish() }
+        fixture.controller.checkForUpdates()
+        for await _ in failed.stream { break }
+        #expect(fixture.engine.cancelCount == 1)
+        #expect(fixture.engine.checkCount == 1)
+        #expect(!fixture.controller.state.isWorking)
+        fixture.engine.finish(error: nil)
+        #expect(fixture.controller.state == .failed)
+        #expect(fixture.engine.checkCount == 1)
+    }
+
+    @Test("下载停滞时取消请求并切换下载线路，准备完成前不进入重启状态")
+    func stalledArchiveAdvancesDownloadRoute() async throws {
+        let fixture = try UpdateCycleFixture(timeouts: .init(downloadIdle: .zero))
+        defer { fixture.close() }
+        fixture.controller.checkForUpdates()
+        var checks = fixture.engine.checkEvents.stream.makeAsyncIterator()
+        _ = await checks.next()
+        let item = try #require(SUAppcastItem(dictionary: [
+            "sparkle:version": "1106", "sparkle:shortVersionString": "1.1.6",
+            "enclosure": ["url": archive.absoluteString, "length": "524288"]
+        ]))
+        let request = NSMutableURLRequest(url: archive)
+        fixture.engine.beginDownload(item, request: request)
+        #expect(fixture.controller.state == .downloading(version: "1.1.6"))
+        var completions = fixture.engine.finishEvents.stream.makeAsyncIterator()
+        _ = await completions.next()
+        #expect(fixture.engine.cancelCount == 1)
+        #expect(fixture.engine.checkCount == 2)
+        #expect(fixture.controller.state == .retrying)
+        let retried = NSMutableURLRequest(url: archive)
+        fixture.engine.beginDownload(item, request: retried)
+        #expect(retried.url == GitHubUpdateRoute.builtIns[1].rewriting(archive))
+        fixture.controller.archiveDownloaded(UpdateRelease(item))
+        #expect(fixture.controller.state == .preparing(version: "1.1.6"))
+        fixture.controller.readyToInstall(UpdateRelease(item), handler: {})
+        #expect(fixture.controller.state == .ready(version: "1.1.6"))
+    }
+
+    @Test("自动检查沿用框架调度且切换到静默可取消检查，关闭开关能立即停止")
+    func automaticChecksAreCancelableAndRespectSettings() async throws {
+        let fixture = try UpdateCycleFixture()
+        defer { fixture.close() }
+        let initial = #expect(throws: NSError.self) {
+            try fixture.controller.updater(fixture.engine, mayPerform: .updatesInBackground)
+        }
+        fixture.engine.finish(error: initial)
+        var checks = fixture.engine.checkEvents.stream.makeAsyncIterator()
+        fixture.engine.setBusy(false)
+        _ = await checks.next()
+        #expect(fixture.engine.checkCount == 1)
+        #expect(fixture.engine.lastKind == .updates)
+        #expect(fixture.controller.canCancel)
+        var settings = fixture.controller.settings
+        settings.automaticallyChecksForUpdates = false
+        fixture.controller.applySettings(settings)
+        #expect(fixture.engine.cancelCount == 1)
+        #expect(fixture.controller.state == .unavailable)
+        #expect(!fixture.controller.canCancel)
+    }
+
+    @Test("侧栏仅展示可操作的新版本、下载准备和重启，技术状态留在菜单")
+    func sidebarOnlyShowsUpdateActions() {
+        for state in [UpdatePresentationState.unavailable, .checking, .retrying, .failed] {
+            #expect(state.sidebarTitle == nil)
+        }
+        for state in [UpdatePresentationState.available(version: "1.1.6"),
+                      .downloading(version: "1.1.6"), .preparing(version: "1.1.6"),
+                      .ready(version: "1.1.6"), .restarting] {
+            #expect(state.sidebarTitle != nil)
+        }
+    }
+
     @Test("下载完成后仍在准备阶段，不能提前触发重启")
     func archiveDownloadIsNotInstallReady() {
         let controller = AppUpdateController()
@@ -342,21 +489,53 @@ struct UpdateRoutingTests {
     }
 
     @Test("侧栏更新按钮浅深色渲染", .enabled(if: ProcessInfo.processInfo.environment["COOLDM_UPDATE_UI_SNAPSHOT"] == "1"))
-    func sidebarSnapshots() throws {
-        let controller = AppUpdateController()
-        let release = UpdateRelease(build: "1020", version: "1.0.20")
+    func sidebarSnapshots() async throws {
+        let fixture = try UpdateCycleFixture()
+        defer { fixture.close() }
+        fixture.controller.checkForUpdates()
+        var checks = fixture.engine.checkEvents.stream.makeAsyncIterator()
+        _ = await checks.next()
+        fixture.engine.finish(error: URLError(.timedOut))
+        let release = UpdateRelease(build: "1106", version: "1.1.6")
+        let available = AppUpdateController()
+        available.updateAvailable(release)
+        let preparing = AppUpdateController()
+        preparing.archiveDownloaded(release)
+        let ready = AppUpdateController()
+        ready.readyToInstall(release, handler: {})
+        let rows = [("切换线路：侧栏隐藏", fixture.controller), ("发现新版本", available),
+                    ("下载完成，正在准备", preparing), ("准备好安装", ready)]
+        let folder = ProcessInfo.processInfo.environment["COOLDM_UPDATE_UI_SNAPSHOT_DIR"] ?? "/tmp"
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         for scheme in [ColorScheme.light, .dark] {
-            controller.readyToInstall(release, handler: {})
-            let view = SidebarUpdateButton(controller: controller)
-                .frame(width: 210, height: 64)
-                .environment(\.colorScheme, scheme)
-                .background(scheme == .light ? Color(white: 0.94) : Color(white: 0.16))
-            let renderer = ImageRenderer(content: view)
-            renderer.scale = 2
-            let image = try #require(renderer.cgImage)
-            let png = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+            let view = VStack(alignment: .leading, spacing: 16) {
+                ForEach(rows.indices, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(rows[index].0).font(.caption).foregroundStyle(.secondary)
+                        SidebarUpdateButton(controller: rows[index].1)
+                    }
+                }
+            }
+            .padding(20)
+            .frame(width: 300)
+            .environment(\.colorScheme, scheme)
+            .background(scheme == .light ? Color(white: 0.94) : Color(white: 0.16))
+            // ProgressView contains an AppKit control, which ImageRenderer
+            // replaces with an unsupported-view symbol. Capture its native host.
+            _ = NSApplication.shared
+            let host = NSHostingView(rootView: view)
+            host.frame = NSRect(origin: .zero, size: host.fittingSize)
+            let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
+            window.contentView = host
+            defer { window.close() }
+            host.layoutSubtreeIfNeeded()
+            let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
             let name = scheme == .light ? "light" : "dark"
-            let path = URL(fileURLWithPath: "/tmp/cooldm-update-sidebar-\(name).png")
+            let path = URL(fileURLWithPath: folder).appendingPathComponent("cooldm-update-sidebar-\(name).png")
             try png.write(to: path)
             print("Update sidebar snapshot: \(path.path)")
         }
@@ -453,5 +632,110 @@ private final class BoundedProbeURLProtocol: URLProtocol, @unchecked Sendable {
                 self.sendNextChunk()
             }
         }
+    }
+}
+
+@MainActor
+private final class UpdateCycleFixture {
+    let root: URL
+    let defaults: UserDefaults
+    let identifier: String
+    let engine: ControlledUpdateEngine
+    let controller: AppUpdateController
+
+    init(timeouts: UpdateTimeouts = UpdateTimeouts()) throws {
+        identifier = "cooldm-update-cycle-tests-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: identifier)!
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(identifier + ".app")
+        let contents = root.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info: [String: Any] = [
+            "CFBundleIdentifier": identifier, "CFBundleName": "更新周期测试", "CFBundleVersion": "1105",
+            "SUFeedURL": "https://github.com/xgblack/cool-download-manager/releases/latest/download/appcast.xml",
+            "SUPublicEDKey": Data(repeating: 0, count: 32).base64EncodedString(),
+            "SUEnableAutomaticChecks": true, "SUAutomaticallyUpdate": true, "SUAllowsAutomaticUpdates": true
+        ]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        let bundle = try #require(Bundle(url: root))
+        var created: ControlledUpdateEngine?
+        controller = AppUpdateController(bundle: bundle,
+            router: GitHubUpdateRouter(defaults: defaults, transport: { _, _ in throw URLError(.notConnectedToInternet) }),
+            timeouts: timeouts, makeUpdater: { bundle, driver, delegate in
+                let updater = ControlledUpdateEngine(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: delegate)
+                updater.controller = delegate as? AppUpdateController
+                updater.driver = driver
+                created = updater
+                return updater
+            })
+        engine = try #require(created)
+    }
+
+    func close() {
+        controller.cancel()
+        engine.finish(error: URLError(.cancelled))
+        engine.controller = nil
+        engine.checkEvents.continuation.finish()
+        engine.finishEvents.continuation.finish()
+        defaults.removePersistentDomain(forName: identifier)
+        do { try FileManager.default.trashItem(at: root, resultingItemURL: nil) }
+        catch { Issue.record("无法回收更新周期测试文件：\(error)") }
+    }
+}
+
+@MainActor
+private final class ControlledUpdateEngine: SPUUpdater {
+    weak var controller: AppUpdateController?
+    var driver: (any SPUUserDriver)?
+    private var busy = false
+    private(set) var checkCount = 0
+    private(set) var cancelCount = 0
+    var cancellationCompletes = true
+    private(set) var lastKind: SPUUpdateCheck?
+    let checkEvents = AsyncStream<Void>.makeStream()
+    let finishEvents = AsyncStream<Void>.makeStream()
+
+    override var sessionInProgress: Bool { busy }
+    override func start() throws {}
+    override func checkForUpdates() { begin(.updates) }
+    override func checkForUpdatesInBackground() { begin(.updatesInBackground) }
+
+    private func begin(_ kind: SPUUpdateCheck) {
+        setBusy(true)
+        do { try controller?.updater(self, mayPerform: kind) }
+        catch { finish(error: error); return }
+        checkCount += 1
+        lastKind = kind
+        driver?.showUserInitiatedUpdateCheck { [weak self] in
+            guard let self else { return }
+            self.cancelCount += 1
+            if self.cancellationCompletes { self.finish(error: nil) }
+        }
+        checkEvents.continuation.yield(())
+    }
+
+    func beginDownload(_ item: SUAppcastItem, request: NSMutableURLRequest) {
+        controller?.updater(self, didFindValidUpdate: item)
+        controller?.updater(self, willDownloadUpdate: item, with: request)
+        driver?.showDownloadInitiated { [weak self] in
+            guard let self else { return }
+            self.cancelCount += 1
+            if self.cancellationCompletes { self.finish(error: nil) }
+        }
+    }
+
+    func finish(error: Error?) {
+        setBusy(false)
+        controller?.updater(self, didFinishUpdateCycleFor: .updates, error: error)
+        // Sparkle starts an asynchronous installer-status probe when no new
+        // check was started synchronously by its completion delegate.
+        if !busy { setBusy(true) }
+        finishEvents.continuation.yield(())
+    }
+
+    func setBusy(_ value: Bool) {
+        willChangeValue(forKey: "sessionInProgress")
+        busy = value
+        didChangeValue(forKey: "sessionInProgress")
     }
 }

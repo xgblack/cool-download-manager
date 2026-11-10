@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import Network
+import OSLog
 import Sparkle
 
 enum UpdatePresentationState: Equatable {
@@ -25,6 +26,13 @@ enum UpdatePresentationState: Equatable {
         case .restarting: "正在重启更新"
         case .retrying: "正在切换线路"
         case .failed: "更新失败，点击重试"
+        }
+    }
+
+    var sidebarTitle: String? {
+        switch self {
+        case .available, .downloading, .preparing, .ready, .restarting: title
+        case .unavailable, .checking, .retrying, .failed: nil
         }
     }
 
@@ -75,6 +83,14 @@ struct UpdateRelease: Equatable, Sendable {
     init(_ item: SUAppcastItem) { self.init(build: item.versionString, version: item.displayVersionString) }
 }
 
+struct UpdateTimeouts {
+    var feed: Duration = .seconds(20)
+    var checkCycle: Duration = .seconds(120)
+    var downloadIdle: Duration = .seconds(30)
+    var downloadTotal: Duration = .seconds(1_800)
+    var cancellationGrace: Duration = .seconds(5)
+}
+
 @MainActor
 final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
     @Published private(set) var settings = AppUpdateSettings.defaults
@@ -87,6 +103,12 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
 
     private let bundle: Bundle
     private let router: GitHubUpdateRouter
+    private let timeouts: UpdateTimeouts
+    private var timeoutTask: Task<Void, Never>?
+    private var checkDeadline: ContinuousClock.Instant?
+    private var downloadDeadline: ContinuousClock.Instant?
+    private var timeoutError: NSError?
+    private var pendingCheck: (userInitiated: Bool, retry: Bool)?
     private var updater: SPUUpdater?
     private var userDriver: SidebarUpdateDriver?
     private var settingsObservations: [NSKeyValueObservation] = []
@@ -115,28 +137,37 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     private var pathMonitor: NWPathMonitor?
     private var networkWasSatisfied: Bool?
 
+    private static let logger = Logger(subsystem: "com.cooldownloadmanager", category: "AppUpdate")
     private static let errorDomain = "CoolDownloadManager.Update"
     private static let refreshRequired = 1
     private static let staleFeedError = 2
     private static let automaticWorkDisabled = 3
+    private static let cancelableCheckRequired = 4
 
-    init(bundle: Bundle = .main, router: GitHubUpdateRouter = GitHubUpdateRouter()) {
+    init(bundle: Bundle = .main, router: GitHubUpdateRouter = GitHubUpdateRouter(),
+         timeouts: UpdateTimeouts = UpdateTimeouts(),
+         makeUpdater: (Bundle, any SPUUserDriver, any SPUUpdaterDelegate) -> SPUUpdater = {
+             SPUUpdater(hostBundle: $0, applicationBundle: $0, userDriver: $1, delegate: $2)
+         }) {
         self.bundle = bundle
         self.router = router
+        self.timeouts = timeouts
         super.init()
-        if isConfigured { configureUpdater() }
+        if isConfigured { configureUpdater(makeUpdater: makeUpdater) }
     }
+
+    deinit { timeoutTask?.cancel() }
 
     var isConfigured: Bool {
         feedURL != nil && (bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)
             .flatMap { Data(base64Encoded: $0) }?.count == 32
     }
 
-    private func configureUpdater() {
+    private func configureUpdater(makeUpdater: (Bundle, any SPUUserDriver, any SPUUpdaterDelegate) -> SPUUpdater) {
         let driver = SidebarUpdateDriver(hostBundle: bundle)
         driver.controller = self
         userDriver = driver
-        let updater = SPUUpdater(hostBundle: bundle, applicationBundle: bundle, userDriver: driver, delegate: self)
+        let updater = makeUpdater(bundle, driver, self)
         self.updater = updater
         settingsObservations = [
             updater.observe(\.automaticallyChecksForUpdates) { [weak self] _, _ in
@@ -147,6 +178,9 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
             },
             updater.observe(\.updateCheckInterval) { [weak self] _, _ in
                 Task { @MainActor in self?.readSettings() }
+            },
+            updater.observe(\.sessionInProgress) { [weak self] _, _ in
+                Task { @MainActor in self?.startPendingCheck() }
             }
         ]
         readSettings()
@@ -191,6 +225,17 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         }
         if !self.settings.automaticallyChecksForUpdates && !manualCheck && !manualCheckPending {
             deferredRefresh = false
+            pendingCheck = nil
+            retryPending = false
+            if state == .checking || state == .retrying {
+                stopTimeout()
+                checkDeadline = nil
+                userCancelled = true
+                let cancel = cancellation
+                cancellation = nil
+                cancel?()
+                state = .unavailable
+            }
         }
     }
 
@@ -239,7 +284,10 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         guard !updater.sessionInProgress else {
             if case .available = state { beginDownload() }
             else if case .ready = state { restartToUpdate() }
-            else if case .checking = state { manualCheck = true }
+            else if state == .checking || state == .retrying { manualCheck = true }
+            else if state == .failed || state == .unavailable {
+                beginCheck(userInitiated: true, retry: false)
+            }
             return
         }
         downloadRequested = false
@@ -270,9 +318,13 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         guard userInitiated || settings.automaticallyChecksForUpdates else { return }
         manualCheck = userInitiated
         errorMessage = nil
+        timeoutError = nil
+        checkDeadline = .now.advanced(by: timeouts.checkCycle)
+        downloadDeadline = nil
         state = .checking
+        armTimeout(after: timeouts.checkCycle)
         refreshTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             do {
                 self.routeSelection = try await self.router.refresh(
                     feedURL: feedURL, publicKey: key, currentBuild: self.currentBuild,
@@ -309,15 +361,30 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         catch {
             errorMessage = "更新服务启动失败，请检查应用安装位置后重试。"
             state = .failed
+            stopTimeout()
+            checkDeadline = nil
         }
     }
 
     private func beginCheck(userInitiated: Bool, retry: Bool) {
-        guard let updater, !updater.sessionInProgress else { return }
+        guard let updater else { return }
         guard userInitiated || settings.automaticallyChecksForUpdates else {
+            pendingCheck = nil
+            stopTimeout()
+            checkDeadline = nil
             if state == .checking || state == .retrying { state = .unavailable }
             return
         }
+        if checkDeadline == nil { checkDeadline = .now.advanced(by: timeouts.checkCycle) }
+        if updater.sessionInProgress {
+            pendingCheck = (userInitiated, retry)
+            manualCheck = userInitiated
+            if !retry { state = .checking }
+            armCheckTimeout()
+            return
+        }
+        pendingCheck = nil
+        timeoutError = nil
         manualCheck = userInitiated
         if !retry { attempt = UpdateRouteAttempt(selection: routeSelection) }
         retryPending = retry
@@ -328,21 +395,86 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         currentRelease = nil
         errorMessage = nil
         if !retry { state = .checking }
-        if userInitiated { updater.checkForUpdates() }
-        else { updater.checkForUpdatesInBackground() }
+        if !userInitiated { backgroundDownloadAtCheckStart = settings.allowsAutomaticDownload }
+        armCheckTimeout()
+        // The custom user driver remains silent for automatic checks, but this
+        // Sparkle path provides cancellation for both feed and archive requests.
+        updater.checkForUpdates()
+    }
+
+    private func startPendingCheck() {
+        guard let pending = pendingCheck, let updater, !updater.sessionInProgress else { return }
+        pendingCheck = nil
+        beginCheck(userInitiated: pending.userInitiated, retry: pending.retry)
+    }
+
+    private func armCheckTimeout() {
+        let remaining = checkDeadline.map { ContinuousClock.now.duration(to: $0) } ?? timeouts.checkCycle
+        armTimeout(after: min(timeouts.feed, remaining))
+    }
+
+    private func armDownloadTimeout() {
+        let remaining = downloadDeadline.map { ContinuousClock.now.duration(to: $0) } ?? timeouts.downloadTotal
+        armTimeout(after: min(timeouts.downloadIdle, remaining))
+    }
+
+    private func armTimeout(after duration: Duration) {
+        stopTimeout()
+        timeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: max(.zero, duration)) }
+            catch { return }
+            self?.updateWorkTimedOut()
+        }
+    }
+
+    private func stopTimeout() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+    }
+
+    private func updateWorkTimedOut() {
+        Self.logger.error("更新操作超时，阶段：\(self.phase == .feed ? "检查" : "下载", privacy: .public)")
+        timeoutError = URLError(.timedOut) as NSError
+        pendingCheck = nil
+        if let cancel = cancellation {
+            cancellation = nil
+            // Sparkle completes cancellation with a nil error. Retain the
+            // timeout until that completion so it can advance the route.
+            cancel()
+            if timeoutError != nil { armTimeout(after: timeouts.cancellationGrace) }
+        } else {
+            refreshTask?.cancel()
+            refreshTask = nil
+            failUpdate(message: phase == .feed ? "更新检查超时，请稍后重试。" : "更新下载超时，请稍后重试。")
+        }
+    }
+
+    private func failUpdate(message: String) {
+        stopTimeout()
+        checkDeadline = nil
+        downloadDeadline = nil
+        retryPending = false
+        pendingCheck = nil
+        progress = nil
+        errorMessage = message
+        state = .failed
     }
 
     private func beginDownload() {
         guard let reply = foundReply else { return }
         foundReply = nil
         downloadRequested = true
+        timeoutError = nil
+        checkDeadline = nil
+        downloadDeadline = .now.advanced(by: timeouts.downloadTotal)
+        armTimeout(after: min(timeouts.checkCycle, timeouts.downloadTotal))
         guard let feedURL,
               let keyText = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
               let key = Data(base64Encoded: keyText) else { reply(.install); return }
         if let release = currentRelease { state = .downloading(version: release.version) }
         // Manual-only users do not fetch ZIP samples until they choose Download.
         downloadRoutingTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             do {
                 self.routeSelection = try await self.router.refresh(
                     feedURL: feedURL, publicKey: key, currentBuild: self.currentBuild
@@ -435,6 +567,11 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
             deferredRefresh = true
             throw NSError(domain: Self.errorDomain, code: Self.refreshRequired)
         }
+        // Sparkle still owns automatic scheduling. Hand its background cycle
+        // to our silent, cancelable user-driver path before any network work.
+        if updateCheck == .updatesInBackground {
+            throw NSError(domain: Self.errorDomain, code: Self.cancelableCheckRequired)
+        }
         let isRetry = retryPending
         if !isRetry {
             downloadRequested = false
@@ -451,16 +588,18 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, didFinishLoading appcast: SUAppcast) {
+        cancellation = nil
         let build = appcast.items.filter { ($0.channel ?? "").isEmpty }.compactMap { Int($0.versionString) }.max() ?? 0
         staleFeed = build < routeSelection.latestBuild
     }
 
     func updater(_ updater: SPUUpdater, shouldProceedWithUpdate updateItem: SUAppcastItem, updateCheck: SPUUpdateCheck) throws {
+        if let timeoutError { throw timeoutError }
         guard !staleFeed, (Int(updateItem.versionString) ?? 0) >= routeSelection.latestBuild else {
             staleFeed = true
             throw NSError(domain: Self.errorDomain, code: Self.staleFeedError)
         }
-        if updateCheck == .updatesInBackground {
+        if updateCheck == .updatesInBackground || !manualCheck {
             guard settings.automaticallyChecksForUpdates else {
                 throw NSError(domain: Self.errorDomain, code: Self.automaticWorkDisabled)
             }
@@ -472,6 +611,7 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        guard timeoutError == nil, !userCancelled else { return }
         updateAvailable(UpdateRelease(item))
     }
 
@@ -485,6 +625,9 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         expectedBytes = item.contentLength
         progress = nil
         state = .downloading(version: item.displayVersionString)
+        checkDeadline = nil
+        if downloadDeadline == nil { downloadDeadline = .now.advanced(by: timeouts.downloadTotal) }
+        armDownloadTimeout()
     }
 
     func updater(_ updater: SPUUpdater, didDownloadUpdate item: SUAppcastItem) {
@@ -492,6 +635,7 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, willExtractUpdate item: SUAppcastItem) {
+        stopTimeout()
         state = .preparing(version: item.displayVersionString)
     }
 
@@ -501,11 +645,26 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
+        stopTimeout()
+        let timeoutAlreadyFailed = timeoutError != nil && state == .failed
+        let error = timeoutError ?? error
+        timeoutError = nil
         downloadRoutingTask?.cancel()
         downloadRoutingTask = nil
         cancellation = nil
         foundReply = nil
         if error != nil { abandonRelaunch() }
+        if let pending = pendingCheck {
+            pendingCheck = nil
+            beginCheck(userInitiated: pending.userInitiated, retry: pending.retry)
+            return
+        }
+        if timeoutAlreadyFailed { return }
+        if let error = error as NSError?, error.domain == Self.errorDomain,
+           error.code == Self.cancelableCheckRequired {
+            beginCheck(userInitiated: manualCheck || manualCheckPending, retry: retryPending)
+            return
+        }
         if deferredRefresh {
             deferredRefresh = false
             refreshAndStart(userInitiated: manualCheck || manualCheckPending)
@@ -513,33 +672,46 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
         }
         if let error = error as NSError?, error.domain == Self.errorDomain,
            [Self.automaticWorkDisabled, Self.refreshRequired].contains(error.code) {
+            checkDeadline = nil
             if state == .checking || state == .retrying { state = .unavailable }
             return
         }
         if userCancelled || Self.isCancellation(error) {
+            checkDeadline = nil
+            downloadDeadline = nil
             state = currentRelease.map { .available(version: $0.version) } ?? .unavailable
             return
         }
         if Self.isNoUpdate(error), !staleFeed {
+            checkDeadline = nil
+            downloadDeadline = nil
             state = .unavailable
             if manualCheck { onNotice?("当前已经是最新版本，或暂无适合此系统的更新。") }
             return
         }
         guard let error = error ?? (staleFeed ? NSError(domain: Self.errorDomain, code: Self.staleFeedError) : nil) else {
-            if case .checking = state { state = .unavailable }
+            checkDeadline = nil
+            downloadDeadline = nil
+            if state == .checking || state == .retrying { state = .unavailable }
             return
         }
+        if checkDeadline.map({ ContinuousClock.now >= $0 }) == true
+            || downloadDeadline.map({ ContinuousClock.now >= $0 }) == true {
+            failUpdate(message: "更新操作超时，请稍后重试。")
+            return
+        }
+        let value = error as NSError
+        let route = phase == .feed ? attempt?.feedRoute.id : attempt?.archiveRoute.id
+        Self.logger.error("更新线路失败：\(route ?? "unknown", privacy: .public)，错误：\(value.domain, privacy: .public)/\(value.code)")
         let failure = Self.retryableFailure(error, phase: phase, staleFeed: staleFeed)
         if let failure, (manualCheck || settings.automaticallyChecksForUpdates), attempt?.advance(after: failure) == true {
             state = .retrying
             let manual = manualCheck
-            // The completion callback is the point at which Sparkle has released
-            // its previous session. Never race it with a fixed-delay retry.
-            Task { @MainActor [weak self] in self?.beginCheck(userInitiated: manual, retry: true) }
+            // Start before returning to Sparkle: its next scheduling probe
+            // temporarily makes sessionInProgress true again after this callback.
+            beginCheck(userInitiated: manual, retry: true)
         } else {
-            progress = nil
-            errorMessage = phase == .feed ? "无法取得有效的更新信息，请稍后重试。" : "更新下载或准备失败，请稍后重试。"
-            state = .failed
+            failUpdate(message: phase == .feed ? "无法取得有效的更新信息，请稍后重试。" : "更新下载或准备失败，请稍后重试。")
         }
     }
 
@@ -568,11 +740,14 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updateAvailable(_ release: UpdateRelease) {
+        stopTimeout()
+        checkDeadline = nil
         currentRelease = release
         state = .available(version: release.version)
     }
 
     func archiveDownloaded(_ release: UpdateRelease) {
+        stopTimeout()
         currentRelease = release
         cancellation = nil
         progress = nil
@@ -580,15 +755,22 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func readyToInstall(_ release: UpdateRelease, handler: @escaping () -> Void) {
+        stopTimeout()
+        checkDeadline = nil
+        downloadDeadline = nil
         currentRelease = release
         installHandler = handler
         progress = nil
         state = .ready(version: release.version)
     }
 
-    // These callbacks come only from our user driver. Background automatic
-    // downloads use Sparkle's installation-ready delegate above instead.
+    // Both automatic and manual checks use this silent driver, so network work
+    // always has a public Sparkle cancellation callback.
     func userDriverFound(_ item: SUAppcastItem, stage: SPUUserUpdateStage, reply: @escaping (SPUUserUpdateChoice) -> Void) {
+        guard timeoutError == nil, !userCancelled else { reply(.dismiss); return }
+        stopTimeout()
+        checkDeadline = nil
+        cancellation = nil
         currentRelease = UpdateRelease(item)
         if stage == .installing {
             readyToInstall(UpdateRelease(item), handler: { reply(.install) })
@@ -601,15 +783,18 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     fileprivate func userDriverChecking(cancellation: @escaping () -> Void) {
-        self.cancellation = cancellation
+        if timeoutError != nil || userCancelled { cancellation() }
+        else { self.cancellation = cancellation }
     }
 
     fileprivate func userDriverDownloading(cancellation: @escaping () -> Void) {
-        self.cancellation = cancellation
+        if timeoutError != nil || userCancelled { cancellation() }
+        else { self.cancellation = cancellation }
     }
 
     fileprivate func userDriverReceived(_ bytes: UInt64) {
         receivedBytes += bytes
+        if bytes > 0, timeoutError == nil { armDownloadTimeout() }
         if expectedBytes > 0 { progress = min(Double(receivedBytes) / Double(expectedBytes), 1) }
     }
 
@@ -636,7 +821,7 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
 }
 
 /// Keeps standard permission/informational dialogs available while routing
-/// normal update status and retryable errors through the application sidebar.
+/// actionable update status through the sidebar and technical status through the menu.
 @MainActor
 private final class SidebarUpdateDriver: NSObject, SPUUserDriver {
     weak var controller: AppUpdateController?
