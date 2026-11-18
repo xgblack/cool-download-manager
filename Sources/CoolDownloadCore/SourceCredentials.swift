@@ -3,6 +3,7 @@ import Foundation
 public enum DownloadSourceSecurity {
     public static func validate(_ source: DownloadSource) throws {
         _ = try validatedURL(source.link)
+        if let entry = source.browserEntryLink { _ = try validatedURL(entry) }
         try validateHeaders(source.headers)
         _ = try validatedDownloadPage(source.downloadPage)
     }

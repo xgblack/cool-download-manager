@@ -66,7 +66,7 @@ public enum MetadataDatabaseError: Error, LocalizedError, Sendable, Equatable {
 /// in code so SwiftPM does not need to copy a model bundle. Known older models
 /// are migrated under the writer lock before any metadata façade is opened.
 public final class MetadataDatabase: @unchecked Sendable {
-    public static let modelVersion = "3"
+    public static let modelVersion = "4"
 
     private final class Registry: @unchecked Sendable {
         let lock = NSLock()
@@ -237,6 +237,23 @@ public final class MetadataDatabase: @unchecked Sendable {
     }
 
     static func makeModel() -> NSManagedObjectModel {
+        let model = makeVersion3Model()
+        let task = model.entitiesByName["DownloadTask"]!
+        let entry = NSAttributeDescription()
+        entry.name = "browserEntryLink"
+        entry.attributeType = .stringAttributeType
+        entry.isOptional = true
+        task.properties.append(entry)
+        let pending = NSAttributeDescription()
+        pending.name = "browserPendingStart"
+        pending.attributeType = .booleanAttributeType
+        pending.isOptional = true
+        task.properties.append(pending)
+        model.versionIdentifiers = [modelVersion]
+        return model
+    }
+
+    static func makeVersion3Model() -> NSManagedObjectModel {
         let model = makeVersion2Model()
         let task = model.entitiesByName["DownloadTask"]!
         for name in ["startedAt", "completedAt"] {
@@ -246,7 +263,7 @@ public final class MetadataDatabase: @unchecked Sendable {
             attribute.isOptional = true
             task.properties.append(attribute)
         }
-        model.versionIdentifiers = [modelVersion]
+        model.versionIdentifiers = ["3"]
         return model
     }
 

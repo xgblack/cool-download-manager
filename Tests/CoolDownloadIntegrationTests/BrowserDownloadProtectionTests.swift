@@ -29,6 +29,7 @@ struct BrowserDownloadProtectionTests {
             }
             try await group.waitForAll()
         }
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 1)
         await service.shutdown()
     }
@@ -42,6 +43,7 @@ struct BrowserDownloadProtectionTests {
         let cdn = silentRequest(cdnAsset, headers: ["Sec-Fetch-Site": "cross-site"], page: githubPage)
         try await handler.addFromBrowser(cdnFirst ? cdn : original)
         try await handler.addFromBrowser(cdnFirst ? original : cdn)
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 1)
         await service.shutdown()
     }
@@ -57,9 +59,11 @@ struct BrowserDownloadProtectionTests {
         await #expect(throws: DownloadCoreError.invalidName("invalid/name.bin")) {
             try await handler.addFromBrowser(AddDownloadsRequest(items: [first, invalid], options: options))
         }
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 1)
         let corrected = IntegrationDownloadCredential(link: invalid.link, suggestedName: "second.bin")
         try await handler.addFromBrowser(AddDownloadsRequest(items: [first, corrected], options: options))
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 2)
         await service.shutdown()
     }
@@ -79,6 +83,7 @@ struct BrowserDownloadProtectionTests {
         }
         #expect(await service.snapshot().downloads.first?.status == .completed)
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 1)
         await service.shutdown()
     }
@@ -90,6 +95,7 @@ struct BrowserDownloadProtectionTests {
         let handler = CoreDownloadIntegrationHandler(service: service)
         var request = silentRequest("https://fixture.invalid/start-retry.bin")
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         let id = try #require(await service.snapshot().downloads.first?.id)
         await service.shutdown()
         request.options.silentStart = true
@@ -98,6 +104,7 @@ struct BrowserDownloadProtectionTests {
         }
         try await service.boot()
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.map(\.id) == [id])
         await service.shutdown()
     }
@@ -110,9 +117,11 @@ struct BrowserDownloadProtectionTests {
         var request = silentRequest("https://fixture.invalid/paused.bin")
         request.options.silentStart = true
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         let id = try #require(await service.snapshot().downloads.first?.id)
         try await service.pause(ids: [id])
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         let downloads = await service.snapshot().downloads
         #expect(downloads.count == 1)
         #expect(downloads.first?.status == .paused)
@@ -126,9 +135,11 @@ struct BrowserDownloadProtectionTests {
         let handler = CoreDownloadIntegrationHandler(service: service)
         let request = silentRequest("https://fixture.invalid/removed.bin")
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         let id = try #require(await service.snapshot().downloads.first?.id)
         try await service.remove(ids: [id], removeFiles: false)
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         let downloads = await service.snapshot().downloads
         #expect(downloads.count == 1)
         #expect(downloads.first?.id != id)
@@ -161,12 +172,15 @@ struct BrowserDownloadProtectionTests {
         let handler = CoreDownloadIntegrationHandler(service: service)
         let request = silentRequest("https://fixture.invalid/repeat.bin")
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         _ = try await service.add(AddDownloadRequest(source: request.items[0].asCoreSource(), start: false))
         #expect(await service.snapshot().downloads.count == 2)
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 2)
         try await Task.sleep(for: .milliseconds(4_100))
         try await handler.addFromBrowser(request)
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == 3)
         await service.shutdown()
     }
@@ -189,6 +203,7 @@ struct BrowserDownloadProtectionTests {
             silentRequest(cdnAsset.replacingOccurrences(of: "release-assets.githubusercontent.com", with: "cdn.invalid"), page: githubPage)
         ]
         for request in requests { try await handler.addFromBrowser(request) }
+        await handler.waitForBrowserDownloads()
         #expect(await service.snapshot().downloads.count == requests.count)
         await service.shutdown()
     }

@@ -444,6 +444,7 @@ private final class URLSessionRequestContext: @unchecked Sendable {
     private var responseResolved = false
     private var isTerminal = false
     private var lifecycle = URLSessionRequestLifecycle()
+    private var effectiveRequest: URLRequest?
 
     private let outputChunkSize = 256 * 1024
 
@@ -460,6 +461,14 @@ private final class URLSessionRequestContext: @unchecked Sendable {
 
     func attach(task: URLSessionDataTask) {
         bodyChannel.attach(task: task)
+    }
+
+    func updateRequest(_ request: URLRequest) {
+        lock.withLock { effectiveRequest = request }
+    }
+
+    func currentRequest() -> URLRequest? {
+        lock.withLock { effectiveRequest }
     }
 
     func waitForResponse() async throws -> HTTPTransportResponse {
@@ -502,6 +511,7 @@ private final class URLSessionRequestContext: @unchecked Sendable {
                 result[String(describing: entry.key)] = String(describing: entry.value)
             },
             body: body,
+            effectiveRequest: lock.withLock { effectiveRequest },
             networkMetrics: networkMetrics,
             cancelBody: { [self] in cancelBody() }
         )
@@ -629,6 +639,18 @@ private final class URLSessionDelegateProxy: NSObject, URLSessionDataDelegate, @
         contextLock.withLock {
             contexts[task.taskIdentifier] = context
         }
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        let context = context(for: task)
+        let redirected = HTTPRequestHeaderPolicy.redirect(request, from: response.url, previousRequest: context?.currentRequest())
+        context?.updateRequest(redirected)
+        completionHandler(redirected)
     }
 
     func urlSession(
@@ -827,7 +849,9 @@ final class URLSessionHTTPTransport: HTTPTransport, @unchecked Sendable {
             responseBufferBudget: responseBufferBudget,
             responseBufferLease: responseBufferLease
         )
-        let task = session.dataTask(with: request)
+        let prepared = HTTPRequestHeaderPolicy.prepare(request)
+        context.updateRequest(prepared)
+        let task = session.dataTask(with: prepared)
         context.attach(task: task)
         delegate.register(context, for: task)
         task.resume()

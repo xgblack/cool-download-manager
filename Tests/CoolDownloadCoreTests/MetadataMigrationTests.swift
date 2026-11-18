@@ -70,6 +70,25 @@ struct MetadataMigrationTests {
         #expect(try backupDirectories(in: fixture.root) == backups)
     }
 
+    @Test("v3 startup preserves records and timestamps with no staged browser downloads")
+    func migrateVersion3() async throws {
+        let fixture = try Fixture(model: MetadataDatabase.makeVersion3Model())
+        try fixture.populate()
+        let started = Date(timeIntervalSince1970: 100)
+        try fixture.perform { context in
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+            for task in try context.fetch(request) { task.setValue(started, forKey: "startedAt") }
+            try context.save()
+        }
+        let original = try fixture.perform(Self.graph)
+        try fixture.close()
+        let database = try MetadataDatabase(rootURL: fixture.root)
+        #expect(try database.perform(Self.graph) == original)
+        let store = try DownloadStore(rootURL: fixture.root, database: database)
+        #expect(try await store.pendingBrowserDownloads().isEmpty)
+        #expect(try await store.load().allSatisfy { $0.startedAt == started && $0.source.browserEntryLink == nil })
+    }
+
     @Test("read-only startup preserves v2 and asks for a writable migration")
     func readOnlyDoesNotMigrate() throws {
         let fixture = try Fixture()
@@ -163,7 +182,7 @@ struct MetadataMigrationTests {
         ) { notification in
             let stores = notification.userInfo?[NSAddedPersistentStoresKey] as? [NSPersistentStore] ?? []
             if stores.contains(where: {
-                $0.url?.lastPathComponent == "metadata-v3.sqlite" && $0.url?.path.hasPrefix(rootPath) == true
+                $0.url?.lastPathComponent == "metadata-v\(MetadataDatabase.modelVersion).sqlite" && $0.url?.path.hasPrefix(rootPath) == true
             }) {
                 #expect(chflags(url.path, UInt32(UF_IMMUTABLE)) == 0)
             }
@@ -186,7 +205,7 @@ struct MetadataMigrationTests {
         try reader.close()
         let directory = try #require(try backupDirectories(in: fixture.root).first)
         for (name, model) in [("metadata-v2.sqlite", MetadataDatabase.makeVersion2Model()),
-                              ("metadata-v3.sqlite", MetadataDatabase.makeModel())] {
+                              ("metadata-v\(MetadataDatabase.modelVersion).sqlite", MetadataDatabase.makeModel())] {
             let snapshot = try Fixture(root: directory, name: name, model: model, readOnly: true)
             #expect(try snapshot.perform(Self.graph) == original)
             try snapshot.close()
@@ -260,7 +279,9 @@ struct MetadataMigrationTests {
         for entity in entities {
             var rows: [String: NSDictionary] = [:]
             for object in try context.fetch(NSFetchRequest<NSManagedObject>(entityName: entity)) {
-                let keys = object.entity.attributesByName.keys.filter { !["startedAt", "completedAt"].contains($0) }
+                let keys = object.entity.attributesByName.keys.filter {
+                    !["startedAt", "completedAt", "browserEntryLink", "browserPendingStart"].contains($0)
+                }
                 var values = object.dictionaryWithValues(forKeys: Array(keys))
                 for (name, relation) in object.entity.relationshipsByName {
                     if relation.isToMany {

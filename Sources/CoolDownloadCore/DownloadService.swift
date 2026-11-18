@@ -379,9 +379,74 @@ public actor DownloadService {
         return preview
     }
 
-    public func add(_ request: AddDownloadRequest, preview: DownloadPreview? = nil) async throws -> DownloadID {
+    public func stageBrowserDownload(_ source: DownloadSource, start: Bool) async throws -> PendingBrowserDownload {
         guard !shuttingDown else { throw DownloadCoreError.cancelled }
-        let id = try await store.reserveNextID()
+        let source = try DownloadSourceSecurity.validatedForPersistence(source)
+        if let name = source.suggestedName?.nilIfBlank { _ = try validatedName(name) }
+        return try await store.stageBrowserDownload(source, start: start)
+    }
+
+    public func pendingBrowserDownloads() async throws -> [PendingBrowserDownload] {
+        try await store.pendingBrowserDownloads()
+    }
+
+    public func discardPendingBrowserDownload(id: DownloadID) async throws {
+        try await store.discardPendingBrowserDownload(id: id)
+    }
+
+    public func resolveBrowserDownload(_ input: DownloadSource) async throws -> BrowserDownloadResolution {
+        let networkSource = try await effectiveSource(input)
+        let downloader = downloader
+        let budget = fileDescriptorBudget
+        let metadata = try await withThrowingTaskGroup(of: HTTPResourceMetadata.self) { group in
+            group.addTask { try await downloader.probe(source: networkSource, fileDescriptorBudget: budget) }
+            group.addTask {
+                try await Task.sleep(for: .seconds(3))
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+        let type = metadata.contentType?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespaces).lowercased()
+        let isPage = !metadata.isAttachment && (type == "text/html" || type == "application/xhtml+xml")
+        var source = input
+        if let request = metadata.effectiveRequest, let finalURL = request.url, !isPage {
+            source.link = finalURL.absoluteString
+            if source.link != input.link { source.browserEntryLink = input.link }
+            source.headers = HTTPRequestHeaderPolicy.prepare(request).allHTTPHeaderFields?
+                .filter { !["range", "if-range"].contains($0.key.lowercased()) }
+            try DownloadSourceSecurity.validate(source)
+        }
+        return .init(preview: DownloadPreview(source: source, fileName: metadata.fileName,
+                                               totalBytes: metadata.totalBytes, supportsResume: metadata.supportsRanges),
+                     verified: metadata.effectiveRequest != nil && !isPage, isPage: isPage)
+    }
+
+    public func rememberBrowserEntry(_ link: String, for id: DownloadID, finalLink: String) async throws {
+        guard var record = records[id], record.source.link == finalLink,
+              record.source.browserEntryLink == nil, !removingIDs.contains(id) else { return }
+        record.source.browserEntryLink = link
+        try DownloadSourceSecurity.validate(record.source)
+        record.revision += 1
+        records[id] = record
+        try await store.save(record)
+        if records[id]?.revision == record.revision { emit(.updated(record)) }
+    }
+
+    public func add(_ request: AddDownloadRequest, preview: DownloadPreview? = nil) async throws -> DownloadID {
+        try await addRecord(request, preview: preview, pendingID: nil)
+    }
+
+    public func promoteBrowserDownload(_ pending: PendingBrowserDownload, preview: DownloadPreview?) async throws -> DownloadID {
+        try await addRecord(.init(source: preview?.source ?? pending.source, start: false),
+                            preview: preview, pendingID: pending.id)
+    }
+
+    private func addRecord(_ request: AddDownloadRequest, preview: DownloadPreview?, pendingID: DownloadID?) async throws -> DownloadID {
+        guard !shuttingDown else { throw DownloadCoreError.cancelled }
+        let id: DownloadID
+        if let pendingID { id = pendingID } else { id = try await store.reserveNextID() }
         guard !shuttingDown else { throw DownloadCoreError.cancelled }
         var source = try DownloadSourceSecurity.validatedForPersistence(request.source)
 
@@ -2158,6 +2223,7 @@ public actor DownloadService {
         }
         if let downloadPage = source.downloadPage,
            !downloadPage.isEmpty,
+           source.browserEntryLink == nil || HTTPRequestHeaderPolicy.sameOrigin(URL(string: source.link), URL(string: downloadPage)),
            !hasHeader("Referer") {
             headers["Referer"] = downloadPage
         }

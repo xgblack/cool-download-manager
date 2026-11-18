@@ -109,6 +109,7 @@ public struct DownloadSource: Codable, Sendable, Equatable {
     /// Legacy marker retained for metadata model compatibility. New sources
     /// store their complete request data in task metadata and leave this nil.
     public var credentialReference: String?
+    public var browserEntryLink: String?
 
     public init(
         kind: DownloadKind,
@@ -116,7 +117,8 @@ public struct DownloadSource: Codable, Sendable, Equatable {
         headers: [String: String]? = nil,
         downloadPage: String? = nil,
         suggestedName: String? = nil,
-        credentialReference: String? = nil
+        credentialReference: String? = nil,
+        browserEntryLink: String? = nil
     ) {
         self.kind = kind
         self.link = link
@@ -124,6 +126,7 @@ public struct DownloadSource: Codable, Sendable, Equatable {
         self.downloadPage = downloadPage
         self.suggestedName = suggestedName
         self.credentialReference = credentialReference
+        self.browserEntryLink = browserEntryLink
     }
 }
 

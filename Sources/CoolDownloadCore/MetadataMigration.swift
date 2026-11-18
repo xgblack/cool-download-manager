@@ -21,18 +21,20 @@ enum MetadataMigration {
             )
             if model.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata) { return }
 
-            let source = MetadataDatabase.makeVersion2Model()
-            guard source.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata) else {
+            let sources = [("2", MetadataDatabase.makeVersion2Model()), ("3", MetadataDatabase.makeVersion3Model())]
+            guard let (version, source) = sources.first(where: {
+                $0.1.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata)
+            }) else {
                 throw MetadataDatabaseError.loadFailed(
                     url, "元数据库模型不受当前版本支持。旧数据已保留，请使用支持该模型的应用版本。"
                 )
             }
             guard !readOnly else {
                 throw MetadataDatabaseError.loadFailed(
-                    url, "元数据库需要从版本 2 升级到版本 3，请先正常启动应用完成迁移。只读模式未修改旧数据。"
+                    url, "元数据库需要从版本 \(version) 升级到版本 \(MetadataDatabase.modelVersion)，请先正常启动应用完成迁移。只读模式未修改旧数据。"
                 )
             }
-            try migrateVersion2(at: url, source: source, destination: model)
+            try migrate(at: url, source: source, destination: model, version: version)
         } catch let error as MetadataDatabaseError {
             throw error
         } catch {
@@ -40,14 +42,14 @@ enum MetadataMigration {
         }
     }
 
-    private static func migrateVersion2(
-        at url: URL, source: NSManagedObjectModel, destination: NSManagedObjectModel
+    private static func migrate(
+        at url: URL, source: NSManagedObjectModel, destination: NSManagedObjectModel, version: String
     ) throws {
         let directory = url.deletingLastPathComponent()
             .appendingPathComponent("metadata-backups", isDirectory: true)
-            .appendingPathComponent("v2-to-v3-\(UUID().uuidString)", isDirectory: true)
-        let backup = directory.appendingPathComponent("metadata-v2.sqlite")
-        let upgraded = directory.appendingPathComponent("metadata-v3.sqlite")
+            .appendingPathComponent("v\(version)-to-v\(MetadataDatabase.modelVersion)-\(UUID().uuidString)", isDirectory: true)
+        let backup = directory.appendingPathComponent("metadata-v\(version).sqlite")
+        let upgraded = directory.appendingPathComponent("metadata-v\(MetadataDatabase.modelVersion).sqlite")
         do {
             let mapping = try NSMappingModel.inferredMappingModel(
                 forSourceModel: source, destinationModel: destination
@@ -101,11 +103,10 @@ enum MetadataMigration {
                     url, "替换数据库失败，已恢复旧库：\(replacementError.localizedDescription)"
                 )
             }
-            // Retain both snapshots: the v2 backup permits an explicit rollback;
-            // the verified v3 snapshot can recover an interrupted replacement.
+            // Retain the original and verified upgraded snapshots.
         } catch {
             throw MetadataDatabaseError.loadFailed(
-                url, "版本 2 → 3 迁移未完成：\(error.localizedDescription)。迁移备份目录：\(directory.path)。未自动清空任何数据。"
+                url, "版本 \(version) → \(MetadataDatabase.modelVersion) 迁移未完成：\(error.localizedDescription)。迁移备份目录：\(directory.path)。未自动清空任何数据。"
             )
         }
     }

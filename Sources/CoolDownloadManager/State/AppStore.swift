@@ -215,7 +215,7 @@ final class AppStore: ObservableObject {
                 startQueueScheduleMonitor()
                 startQueueEventMonitor()
                 startDownloadEventMonitor()
-                try startIntegration(service: service, settings: settings)
+                try await startIntegration(service: service, settings: settings)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -281,9 +281,11 @@ final class AppStore: ObservableObject {
 
         // The application controller has stopped accepting private requests;
         // stop HTTP before persisting the core as well.
+        let browserHandler = browserIntegrationHandler
         browserIntegrationHandler = nil
         integrationServer?.stop()
         integrationServer = nil
+        await browserHandler?.stopBrowserDownloads()
         if let service {
             await service.shutdown()
         }
@@ -470,7 +472,7 @@ final class AppStore: ObservableObject {
                 missingFileTask = nil
             }
             stopIntegration()
-            try startIntegration(service: service, settings: saved)
+            try await startIntegration(service: service, settings: saved)
         } catch {
             refreshAutoStartStatus()
             throw error
@@ -938,10 +940,11 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func startIntegration(service: DownloadService, settings: AppSettingsModel) throws {
+    private func startIntegration(service: DownloadService, settings: AppSettingsModel) async throws {
         let queueStore = self.queueStore
         let categoryStore = self.categoryStore
-        let coreHandler = CoreDownloadIntegrationHandler(
+        let needsRecovery = browserIntegrationHandler == nil
+        let coreHandler = browserIntegrationHandler ?? CoreDownloadIntegrationHandler(
             service: service,
             queuesProvider: {
                 guard let queueStore else { return [] }
@@ -962,8 +965,15 @@ final class AppStore: ObservableObject {
                     throw DownloadIntegrationError.confirmationUnavailable
                 }
                 try await self.requestBrowserDownloadConfirmation(request)
+            },
+            browserErrorHandler: { [weak self] message in
+                await self?.reportBrowserDownloadError(message)
             }
         )
+        if needsRecovery {
+            do { try await coreHandler.restoreBrowserDownloads() }
+            catch { reportBrowserDownloadError("未能恢复待处理的浏览器下载。") }
+        }
         let generation = UUID()
         integrationGeneration = generation
         var server: LoopbackHTTPServer?
@@ -1001,6 +1011,10 @@ final class AppStore: ObservableObject {
             throw DownloadIntegrationError.confirmationUnavailable
         }
         onBrowserDownloadRequest(request)
+    }
+
+    private func reportBrowserDownloadError(_ message: String) {
+        errorMessage = message
     }
 
     private func stopIntegration() {

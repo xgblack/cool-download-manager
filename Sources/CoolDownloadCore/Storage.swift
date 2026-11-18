@@ -58,6 +58,7 @@ public actor DownloadStore {
         do {
             loadedRecords = try database.perform { context in
                 let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+                request.predicate = NSPredicate(format: "browserPendingStart == nil")
                 request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
                 return try context.fetch(request).map(Self.decodeRecord)
             }
@@ -108,6 +109,39 @@ public actor DownloadStore {
 
     public func lastMutationStats() -> DownloadStoreMutationStats {
         latestMutationStats
+    }
+
+    func stageBrowserDownload(_ source: DownloadSource, start: Bool) throws -> PendingBrowserDownload {
+        let id = try reserveNextID()
+        let now = Date()
+        try database.transaction { context in
+            let task = NSEntityDescription.insertNewObject(forEntityName: "DownloadTask", into: context)
+            _ = try Self.syncAttributes(.init(id: id, source: source, folder: "", name: "",
+                                              createdAt: now, updatedAt: now), into: task, context: context)
+            task.setValue(start, forKey: "browserPendingStart")
+        }
+        return PendingBrowserDownload(id: id, source: source, start: start)
+    }
+
+    func pendingBrowserDownloads() throws -> [PendingBrowserDownload] {
+        try database.perform { context in
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+            request.predicate = NSPredicate(format: "browserPendingStart != nil")
+            request.sortDescriptors = [NSSortDescriptor(key: "id", ascending: true)]
+            return try context.fetch(request).map { task in
+                let record = try Self.decodeRecord(task)
+                return PendingBrowserDownload(id: record.id, source: record.source,
+                                              start: (task.value(forKey: "browserPendingStart") as? NSNumber)?.boolValue == true)
+            }
+        }
+    }
+
+    func discardPendingBrowserDownload(id: DownloadID) throws {
+        try database.transaction { context in
+            let request = NSFetchRequest<NSManagedObject>(entityName: "DownloadTask")
+            request.predicate = NSPredicate(format: "id == %lld AND browserPendingStart != nil", id)
+            if let row = try context.fetch(request).first { context.delete(row) }
+        }
     }
 
     public func save(_ record: DownloadRecord) throws {
@@ -161,6 +195,9 @@ public actor DownloadStore {
                         into: task,
                         context: context
                     )
+                    if task.value(forKey: "browserPendingStart") != nil {
+                        task.setValue(nil, forKey: "browserPendingStart")
+                    }
                     if self.metricsEnabled {
                         self.metrics.record(.checkpointPhase(
                             id: record.id,
@@ -311,7 +348,8 @@ public actor DownloadStore {
             headers: headers,
             downloadPage: task.value(forKey: "downloadPage") as? String,
             suggestedName: task.value(forKey: "suggestedName") as? String,
-            credentialReference: task.value(forKey: "credentialReference") as? String
+            credentialReference: task.value(forKey: "credentialReference") as? String,
+            browserEntryLink: task.value(forKey: "browserEntryLink") as? String
         )
         let parts = ((task.value(forKey: "parts") as? NSSet)?.allObjects as? [NSManagedObject] ?? [])
             .sorted {
@@ -454,6 +492,7 @@ public actor DownloadStore {
         set(record.id, "id")
         set(record.source.kind.rawValue, "sourceKind")
         set(record.source.link, "link")
+        set(record.source.browserEntryLink, "browserEntryLink")
         set(try record.source.headers.map(MetadataJSON.encode), "headersJSON")
         set(record.source.downloadPage, "downloadPage")
         set(record.source.suggestedName, "suggestedName")

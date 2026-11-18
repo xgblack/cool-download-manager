@@ -38,12 +38,7 @@ public struct BrowserDownloadIdentity: Sendable, Equatable {
 
     public func isCompatible(with other: Self) -> Bool {
         guard kind == other.kind else { return false }
-        if link == other.link {
-            // One transport can omit optional metadata. Explicit conflicts
-            // still describe distinct download sources.
-            return (headers.isEmpty || other.headers.isEmpty || headers == other.headers)
-                && (page == nil || other.page == nil || page == other.page)
-        }
+        if link == other.link { return isSameRequest(as: other) }
         guard kind == .http,
               let lhs = githubAsset, let rhs = other.githubAsset,
               lhs.redirected != rhs.redirected,
@@ -53,6 +48,28 @@ public struct BrowserDownloadIdentity: Sendable, Equatable {
         let lhsAuthorization = headers.first { $0.name == "authorization" }?.value
         let rhsAuthorization = other.headers.first { $0.name == "authorization" }?.value
         return lhsAuthorization == nil || rhsAuthorization == nil || lhsAuthorization == rhsAuthorization
+    }
+
+    func isSameRequest(as other: Self) -> Bool {
+        kind == other.kind && link == other.link
+            && (headers.isEmpty || other.headers.isEmpty || headers == other.headers)
+            && (page == nil || other.page == nil || page == other.page)
+    }
+
+    static func sameResolvedFile(_ lhs: DownloadSource, _ rhs: DownloadSource) -> Bool {
+        func representationHeaders(_ source: DownloadSource) -> [String: String] {
+            (source.headers ?? [:]).reduce(into: [:]) { result, pair in
+                let name = pair.key.lowercased()
+                // Browser navigation diagnostics do not supply credentials.
+                if !name.hasPrefix("sec-fetch-"), !name.hasPrefix("sec-ch-"),
+                   !["host", "range", "if-range", "priority"].contains(name) {
+                    result[name] = pair.value
+                }
+            }
+        }
+        return lhs.kind == .http && rhs.kind == .http
+            && normalizedURL(lhs.link) == normalizedURL(rhs.link)
+            && representationHeaders(lhs) == representationHeaders(rhs)
     }
 
     private static func normalizedURL(_ value: String) -> String {

@@ -40,19 +40,28 @@ public struct HTTPResourceMetadata: Sendable, Equatable {
     public let etag: String?
     public let lastModified: String?
     public let fileName: String?
+    public let effectiveRequest: URLRequest?
+    public let contentType: String?
+    public let isAttachment: Bool
 
     public init(
         totalBytes: Int64?,
         supportsRanges: Bool,
         etag: String? = nil,
         lastModified: String? = nil,
-        fileName: String? = nil
+        fileName: String? = nil,
+        effectiveRequest: URLRequest? = nil,
+        contentType: String? = nil,
+        isAttachment: Bool = false
     ) {
         self.totalBytes = totalBytes
         self.supportsRanges = supportsRanges
         self.etag = etag
         self.lastModified = lastModified
         self.fileName = fileName
+        self.effectiveRequest = effectiveRequest
+        self.contentType = contentType
+        self.isAttachment = isAttachment
     }
 }
 
@@ -60,6 +69,7 @@ public struct HTTPTransportResponse: Sendable {
     public let statusCode: Int
     public let headers: [String: String]
     public let body: AsyncThrowingStream<Data, Error>
+    public let effectiveRequest: URLRequest?
     /// Live URLSession protocol metrics. The value may be populated after the
     /// response is returned and is therefore intentionally reference-backed.
     public let networkMetrics: HTTPTransportResponseMetrics
@@ -69,12 +79,14 @@ public struct HTTPTransportResponse: Sendable {
         statusCode: Int,
         headers: [String: String],
         body: AsyncThrowingStream<Data, Error>,
+        effectiveRequest: URLRequest? = nil,
         networkMetrics: HTTPTransportResponseMetrics = HTTPTransportResponseMetrics(),
         cancelBody: @escaping @Sendable () -> Void = {}
     ) {
         self.statusCode = statusCode
         self.headers = headers
         self.body = body
+        self.effectiveRequest = effectiveRequest
         self.networkMetrics = networkMetrics
         self.cancelBodyHandler = cancelBody
     }
@@ -594,7 +606,10 @@ public final class HTTPDownloader: @unchecked Sendable {
                     supportsRanges: true,
                     etag: etag,
                     lastModified: lastModified,
-                    fileName: fileName
+                    fileName: fileName,
+                    effectiveRequest: response.effectiveRequest,
+                    contentType: response.header("Content-Type"),
+                    isAttachment: Self.isAttachment(response)
                 )
             }
 
@@ -603,10 +618,18 @@ public final class HTTPDownloader: @unchecked Sendable {
                 supportsRanges: false,
                 etag: etag,
                 lastModified: lastModified,
-                fileName: fileName
+                fileName: fileName,
+                effectiveRequest: response.effectiveRequest,
+                contentType: response.header("Content-Type"),
+                isAttachment: Self.isAttachment(response)
             )
             }
         }
+    }
+
+    private static func isAttachment(_ response: HTTPTransportResponse) -> Bool {
+        response.header("Content-Disposition")?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespaces).lowercased() == "attachment"
     }
 
     private func probeSingleConnection(
@@ -647,7 +670,10 @@ public final class HTTPDownloader: @unchecked Sendable {
                 lastModified: response.header("Last-Modified"),
                 fileName: DownloadFileNameResolver.fromContentDisposition(
                     response.header("Content-Disposition")
-                )
+                ),
+                effectiveRequest: response.effectiveRequest,
+                contentType: response.header("Content-Type"),
+                isAttachment: Self.isAttachment(response)
             )
             }
         }

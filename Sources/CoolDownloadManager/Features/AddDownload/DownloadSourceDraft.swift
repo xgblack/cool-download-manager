@@ -16,6 +16,7 @@ enum DownloadSourceDraft {
         if let original, sameOrigin(link, original.link) {
             source = original.asCoreSource()
             source.link = link
+            if link != original.link { source.browserEntryLink = nil }
         } else {
             source = DownloadSource(
                 kind: URL(string: link)?.path.lowercased().hasSuffix(".m3u8") == true ? .hls : .http,
