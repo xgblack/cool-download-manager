@@ -10,8 +10,12 @@ struct LegacyBrowserRedirectTests {
         let fixture = try await Fixture()
         let handler = CoreDownloadIntegrationHandler(service: fixture.service)
         let router = IntegrationRouter(handler: handler, apiKey: "test-key")
-        let entry = fixture.request("entry")
-        let final = fixture.request("file.zip?version=1")
+        let entry = fixture.request("entry", headers: ["Accept": "*/*", "Accept-Language": "en"])
+        let final = fixture.request("file.zip?version=1", headers: [
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "zh-CN",
+            "Cookie": "capture=direct", "Referer": "https://entry.fixture.invalid/catalog",
+            "Sec-Fetch-Mode": "navigate", "Upgrade-Insecure-Requests": "1"
+        ])
         let first = finalFirst ? final : entry
         let second = finalFirst ? entry : final
         let response = await router.handle(try fixture.http(first))
@@ -82,6 +86,58 @@ struct LegacyBrowserRedirectTests {
         await fixture.service.shutdown()
     }
 
+    @Test("representation and credential conflicts remain separate even at the same resolved URL",
+          arguments: ["weak", "changed", "credentials"])
+    func differingRepresentations(variant: String) async throws {
+        let fixture = try await Fixture(variant: variant)
+        let handler = CoreDownloadIntegrationHandler(service: fixture.service)
+        try await handler.addFromBrowser(fixture.request("entry", headers: ["Cookie": "account=one"]))
+        try await handler.addFromBrowser(fixture.request("file.zip?version=1", headers: ["Cookie": "account=two"]))
+        await handler.waitForBrowserDownloads()
+        #expect(await fixture.service.snapshot().downloads.count == 2)
+        await handler.stopBrowserDownloads()
+        await fixture.service.shutdown()
+    }
+
+    @Test("a no-content handoff creates no task, while an explicit empty attachment downloads")
+    func noContent() async throws {
+        let fixture = try await Fixture()
+        let errors = Requests<String>()
+        let handler = CoreDownloadIntegrationHandler(service: fixture.service, browserErrorHandler: { await errors.record($0) })
+        for path in ["nocontent", "file.zip?version=1", "empty.txt"] {
+            try await handler.addFromBrowser(fixture.request(path))
+        }
+        await handler.waitForBrowserDownloads()
+        let records = await fixture.service.snapshot().downloads
+        #expect(records.count == 2)
+        #expect(!records.contains { $0.source.link == fixture.link("nocontent") })
+        #expect(await errors.values.count == 1)
+        try await fixture.wait {
+            let downloads = await fixture.service.snapshot().downloads
+            return downloads.first { $0.name == "empty.txt" }?.status == .completed
+                && downloads.contains { $0.name == "same.zip" && $0.status == .completed }
+        }
+        let empty = try #require(await fixture.service.snapshot().downloads.first { $0.name == "empty.txt" })
+        #expect(try Data(contentsOf: empty.destinationURL).isEmpty)
+        await handler.stopBrowserDownloads()
+        await fixture.service.shutdown()
+    }
+
+    @Test("a confirmed nonempty attachment that returns zero bytes cannot complete")
+    func emptyAfterProbe() async throws {
+        let fixture = try await Fixture()
+        let handler = CoreDownloadIntegrationHandler(service: fixture.service)
+        try await handler.addFromBrowser(fixture.request("empties.zip"))
+        try await fixture.wait {
+            await fixture.service.snapshot().downloads.first.map { [.failed, .completed].contains($0.status) } == true
+        }
+        let record = try #require(await fixture.service.snapshot().downloads.first)
+        #expect(record.status == .failed)
+        #expect(!FileManager.default.fileExists(atPath: record.destinationURL.path))
+        await handler.stopBrowserDownloads()
+        await fixture.service.shutdown()
+    }
+
     @Test("both browser URLs in one confirmation request produce only one file row")
     func confirmation() async throws {
         let fixture = try await Fixture()
@@ -106,10 +162,10 @@ struct LegacyBrowserRedirectTests {
         let root: URL
         let service: DownloadService
 
-        init(delay: Duration = .zero) async throws {
+        init(delay: Duration = .zero, variant: String = "") async throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("legacy-browser-\(UUID())")
             service = DownloadService(store: try DownloadStore(rootURL: root),
-                                      downloader: HTTPDownloader(transport: FixtureTransport(delay: delay)),
+                                      downloader: HTTPDownloader(transport: FixtureTransport(delay: delay, variant: variant)),
                                       defaultFolder: root)
             try await service.boot()
         }
@@ -141,23 +197,33 @@ struct LegacyBrowserRedirectTests {
     private struct FixtureTransport: HTTPTransport {
         static let contents = Data("fixture payload".utf8)
         var delay: Duration = .zero
+        var variant = ""
 
         func response(for request: URLRequest) async throws -> HTTPTransportResponse {
             if delay != .zero { try await Task.sleep(for: delay) }
             var final = request
             if request.url?.path == "/entry" {
                 final.url = URL(string: "https://cdn.fixture.invalid/file.zip?version=1")
+                if variant != "credentials" { final.setValue(nil, forHTTPHeaderField: "Cookie") }
             }
             let path = final.url?.path
             let html = path == "/login" || path == "/report.html"
-            var headers = ["Content-Length": "\(Self.contents.count)",
+            let noContent = path == "/nocontent"
+            let empty = noContent || path == "/empty.txt"
+                || (path == "/empties.zip" && request.value(forHTTPHeaderField: "Range") == nil)
+            let contents = empty ? Data() : Self.contents
+            let cookie = final.value(forHTTPHeaderField: "Cookie")
+            var etag = cookie == "account=two" && variant != "credentials" ? "\"two\"" : "\"fixture\""
+            if variant == "weak" { etag = "W/\"fixture\"" }
+            var headers = ["Content-Length": "\(contents.count)",
                            "Content-Type": html ? "text/html" : "application/zip",
-                           "ETag": "\"fixture\""]
-            if path != "/login" {
-                headers["Content-Disposition"] = "attachment; filename=\"\(html ? "report.html" : "same.zip")\""
+                           "ETag": etag]
+            if path != "/login" && !noContent {
+                let name = html ? "report.html" : (path == "/empty.txt" ? "empty.txt" : "same.zip")
+                headers["Content-Disposition"] = "attachment; filename=\"\(name)\""
             }
-            return HTTPTransportResponse(statusCode: 200, headers: headers, body: AsyncThrowingStream { stream in
-                stream.yield(Self.contents)
+            return HTTPTransportResponse(statusCode: noContent ? 204 : 200, headers: headers, body: AsyncThrowingStream { stream in
+                stream.yield(contents)
                 stream.finish()
             }, effectiveRequest: final)
         }

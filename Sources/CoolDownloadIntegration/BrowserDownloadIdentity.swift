@@ -56,7 +56,15 @@ public struct BrowserDownloadIdentity: Sendable, Equatable {
             && (page == nil || other.page == nil || page == other.page)
     }
 
-    static func sameResolvedFile(_ lhs: DownloadSource, _ rhs: DownloadSource) -> Bool {
+    static func sameResolvedFile(_ lhs: BrowserDownloadResolution, _ rhs: BrowserDownloadResolution) -> Bool {
+        let lhsSource = lhs.preview.source
+        let rhsSource = rhs.preview.source
+        guard lhs.verified, rhs.verified, normalizedURL(lhsSource.link) == normalizedURL(rhsSource.link) else {
+            return false
+        }
+        if let left = lhs.preview.totalBytes, let right = rhs.preview.totalBytes, left != right { return false }
+        if let left = lhs.etag, let right = rhs.etag, left != right { return false }
+
         func representationHeaders(_ source: DownloadSource) -> [String: String] {
             (source.headers ?? [:]).reduce(into: [:]) { result, pair in
                 let name = pair.key.lowercased()
@@ -67,9 +75,21 @@ public struct BrowserDownloadIdentity: Sendable, Equatable {
                 }
             }
         }
-        return lhs.kind == .http && rhs.kind == .http
-            && normalizedURL(lhs.link) == normalizedURL(rhs.link)
-            && representationHeaders(lhs) == representationHeaders(rhs)
+        var left = representationHeaders(lhsSource)
+        var right = representationHeaders(rhsSource)
+        if left == right { return true }
+
+        // The browser's direct capture and a replayed cross-origin redirect
+        // can send different navigation headers and only one can carry cookies.
+        // Relax their comparison only after the origin confirms the same bytes.
+        guard let tag = lhs.etag, tag == rhs.etag, tag.hasPrefix("\""), tag.hasSuffix("\""), tag.count >= 2,
+              let size = lhs.preview.totalBytes, size == rhs.preview.totalBytes else { return false }
+        if let cookie = left["cookie"], let other = right["cookie"], cookie != other { return false }
+        for name in ["accept", "accept-language", "accept-encoding", "cookie", "referer", "upgrade-insecure-requests"] {
+            left.removeValue(forKey: name)
+            right.removeValue(forKey: name)
+        }
+        return left == right
     }
 
     private static func normalizedURL(_ value: String) -> String {

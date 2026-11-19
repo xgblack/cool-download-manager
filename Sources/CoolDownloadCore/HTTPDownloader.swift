@@ -43,6 +43,7 @@ public struct HTTPResourceMetadata: Sendable, Equatable {
     public let effectiveRequest: URLRequest?
     public let contentType: String?
     public let isAttachment: Bool
+    public let isNoContent: Bool
 
     public init(
         totalBytes: Int64?,
@@ -52,7 +53,8 @@ public struct HTTPResourceMetadata: Sendable, Equatable {
         fileName: String? = nil,
         effectiveRequest: URLRequest? = nil,
         contentType: String? = nil,
-        isAttachment: Bool = false
+        isAttachment: Bool = false,
+        isNoContent: Bool = false
     ) {
         self.totalBytes = totalBytes
         self.supportsRanges = supportsRanges
@@ -62,6 +64,7 @@ public struct HTTPResourceMetadata: Sendable, Equatable {
         self.effectiveRequest = effectiveRequest
         self.contentType = contentType
         self.isAttachment = isAttachment
+        self.isNoContent = isNoContent
     }
 }
 
@@ -257,6 +260,9 @@ public final class HTTPDownloader: @unchecked Sendable {
             let statusCode = response.statusCode
             guard (200...299).contains(statusCode) else {
                 throw DownloadCoreError.httpStatus(statusCode)
+            }
+            guard statusCode != 204, statusCode != 205 else {
+                throw DownloadCoreError.responseMismatch("服务器返回了无内容响应")
             }
             let responseContentLength = try Self.validatedContentLength(response.header("Content-Length"))
 
@@ -621,7 +627,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 fileName: fileName,
                 effectiveRequest: response.effectiveRequest,
                 contentType: response.header("Content-Type"),
-                isAttachment: Self.isAttachment(response)
+                isAttachment: Self.isAttachment(response),
+                isNoContent: response.statusCode == 204 || response.statusCode == 205
             )
             }
         }
@@ -673,7 +680,8 @@ public final class HTTPDownloader: @unchecked Sendable {
                 ),
                 effectiveRequest: response.effectiveRequest,
                 contentType: response.header("Content-Type"),
-                isAttachment: Self.isAttachment(response)
+                isAttachment: Self.isAttachment(response),
+                isNoContent: response.statusCode == 204 || response.statusCode == 205
             )
             }
         }

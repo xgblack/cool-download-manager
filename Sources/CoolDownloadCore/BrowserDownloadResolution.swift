@@ -10,4 +10,6 @@ public struct BrowserDownloadResolution: Sendable {
     public let preview: DownloadPreview
     public let verified: Bool
     public let isPage: Bool
+    public let isNoContent: Bool
+    public let etag: String?
 }

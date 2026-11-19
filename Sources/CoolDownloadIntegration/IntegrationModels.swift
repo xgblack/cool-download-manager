@@ -220,7 +220,7 @@ public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
 
     private struct ResolvedBrowserItem {
         var inputs: [IntegrationDownloadCredential]
-        let preview: DownloadPreview?
+        let resolution: BrowserDownloadResolution?
         let taskID: DownloadID?
         var didStart = false
         let finishedAt: ContinuousClock.Instant
@@ -313,12 +313,18 @@ public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
                                history: [ResolvedBrowserItem]) -> ResolvedBrowserItem? {
         guard let resolution, resolution.verified else { return nil }
         return history.first { candidate in
-            guard let other = candidate.preview,
-                  other.source.browserEntryLink != nil || resolution.preview.source.browserEntryLink != nil,
+            guard let other = candidate.resolution,
+                  other.preview.source.browserEntryLink != nil || resolution.preview.source.browserEntryLink != nil,
                   candidate.inputs.contains(where: { $0.downloadPage == nil || item.downloadPage == nil || $0.downloadPage == item.downloadPage })
             else { return false }
-            return BrowserDownloadIdentity.sameResolvedFile(other.source, resolution.preview.source)
+            return BrowserDownloadIdentity.sameResolvedFile(other, resolution)
         }
+    }
+
+    private func nonFileMessage(_ resolution: BrowserDownloadResolution?) -> String? {
+        if resolution?.isNoContent == true { return "服务器未返回文件内容，请检查下载地址后重试。" }
+        if resolution?.isPage == true { return "浏览器下载地址返回的是网页，不是文件。请在浏览器中完成登录或确认后重试。" }
+        return nil
     }
 
     private func processBrowserDownload(_ pending: PendingBrowserDownload) async throws {
@@ -328,9 +334,9 @@ public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
         let exact = exactMatch(item, history: history)
         let resolution = exact == nil ? try await resolveBrowserItem(item) : nil
         try Task.checkCancellation()
-        if resolution?.isPage == true {
+        if let message = nonFileMessage(resolution) {
             try await service.discardPendingBrowserDownload(id: pending.id)
-            await browserErrorHandler("浏览器下载地址返回的是网页，不是文件。请在浏览器中完成登录或确认后重试。")
+            await browserErrorHandler(message)
             return
         }
         // Preserve compatibility with older GitHub redirects that produce a
@@ -341,9 +347,9 @@ public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
         if let candidate = exact ?? redirectMatch(item, resolution: resolution, history: history) ?? compatibilityMatch,
            let id = candidate.taskID,
            await service.snapshot().downloads.contains(where: { $0.id == id }) {
-            if let source = resolution?.preview.source, let entry = source.browserEntryLink,
-               let other = candidate.preview?.source, BrowserDownloadIdentity.sameResolvedFile(source, other) {
-                try await service.rememberBrowserEntry(entry, for: id, finalLink: source.link)
+            if let resolution, let entry = resolution.preview.source.browserEntryLink,
+               let other = candidate.resolution, BrowserDownloadIdentity.sameResolvedFile(resolution, other) {
+                try await service.rememberBrowserEntry(entry, for: id, finalLink: resolution.preview.source.link)
             }
             if pending.start && !candidate.didStart { try await startBrowserItem(id: id) }
             try await service.discardPendingBrowserDownload(id: pending.id)
@@ -353,9 +359,9 @@ public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
             }
             return
         }
-        let preview = resolution?.preview
+        let preview = resolution?.verified == true ? resolution?.preview : nil
         let id = try await service.promoteBrowserDownload(pending, preview: preview)
-        resolvedBrowserItems.append(.init(inputs: [item], preview: resolution?.verified == true ? preview : nil,
+        resolvedBrowserItems.append(.init(inputs: [item], resolution: resolution,
                                           taskID: id, finishedAt: .now))
         if pending.start { try await startBrowserItem(id: id) }
     }
@@ -369,10 +375,14 @@ public actor CoreDownloadIntegrationHandler: DownloadIntegrationHandler {
             if exactMatch(item, history: history) != nil { continue }
             let resolution = try await resolveBrowserItem(item)
             try Task.checkCancellation()
+            if resolution?.isNoContent == true, let message = nonFileMessage(resolution) {
+                await browserErrorHandler(message)
+                continue
+            }
             if redirectMatch(item, resolution: resolution, history: history) != nil { continue }
             let preview = resolution?.verified == true ? resolution?.preview : nil
             items.append(preview.map { IntegrationDownloadCredential(source: $0.source) } ?? item)
-            additions.append(.init(inputs: [item], preview: preview, taskID: nil, finishedAt: .now))
+            additions.append(.init(inputs: [item], resolution: resolution, taskID: nil, finishedAt: .now))
         }
         guard !items.isEmpty else { return }
         try await interactiveAddHandler(.init(items: items, options: request.options))

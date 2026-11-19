@@ -410,8 +410,9 @@ public actor DownloadService {
         let type = metadata.contentType?.split(separator: ";", maxSplits: 1).first?
             .trimmingCharacters(in: .whitespaces).lowercased()
         let isPage = !metadata.isAttachment && (type == "text/html" || type == "application/xhtml+xml")
+        let isFile = !isPage && !metadata.isNoContent
         var source = input
-        if let request = metadata.effectiveRequest, let finalURL = request.url, !isPage {
+        if let request = metadata.effectiveRequest, let finalURL = request.url, isFile {
             source.link = finalURL.absoluteString
             if source.link != input.link { source.browserEntryLink = input.link }
             source.headers = HTTPRequestHeaderPolicy.prepare(request).allHTTPHeaderFields?
@@ -420,7 +421,8 @@ public actor DownloadService {
         }
         return .init(preview: DownloadPreview(source: source, fileName: metadata.fileName,
                                                totalBytes: metadata.totalBytes, supportsResume: metadata.supportsRanges),
-                     verified: metadata.effectiveRequest != nil && !isPage, isPage: isPage)
+                     verified: metadata.effectiveRequest?.url != nil && isFile, isPage: isPage,
+                     isNoContent: metadata.isNoContent, etag: metadata.etag)
     }
 
     public func rememberBrowserEntry(_ link: String, for id: DownloadID, finalLink: String) async throws {
@@ -460,6 +462,7 @@ public actor DownloadService {
         let requestedName = request.name?.nilIfBlank
         let suggestedName = source.suggestedName?.nilIfBlank
         let previewName = preview?.source == source ? preview?.fileName?.nilIfBlank : nil
+        let browserFileSize = pendingID != nil && preview?.source == source ? preview?.totalBytes : nil
         // Persist the chosen name as the source hint as well. This lets later
         // HTTP metadata updates distinguish a user/browser-provided name from
         // an automatic URL fallback without adding a new record field.
@@ -480,6 +483,7 @@ public actor DownloadService {
             source: source,
             folder: folderURL.path,
             name: name,
+            totalBytes: browserFileSize.flatMap { $0 > 0 ? $0 : nil },
             queueID: request.queueID,
             categoryID: request.categoryID,
             createdAt: now,
@@ -1452,8 +1456,7 @@ public actor DownloadService {
                     totalBytes = try await writer.length()
                 }
                 if let expectedTotal = current?.totalBytes,
-                   let responseTotal = result.totalBytes,
-                   expectedTotal != responseTotal {
+                   expectedTotal != totalBytes {
                     throw DownloadCoreError.resourceChanged
                 }
                 if let retryLease {
