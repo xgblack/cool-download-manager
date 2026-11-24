@@ -370,47 +370,50 @@ struct MainView: View {
             } else {
                 GeometryReader { geometry in
                     ScrollView(store.settings.showDownloadLocation ? [.horizontal, .vertical] : [.vertical]) {
-                        LazyVStack(spacing: 0) {
-                            tableHeader
-                            ForEach(store.downloadList.visibleDownloads) { record in
-                                DownloadTableRow(
-                                    record: record,
-                                    isSelected: store.downloadList.selectedIDs.contains(record.id),
-                                    onSelect: { store.downloadList.toggleSelection(record.id) },
-                                    onOpen: { open(record) },
-                                    onOpenDetail: { coordinator.openDetail(for: record.id) },
-                                    onShowProgress: {
-                                        coordinator.showProgressPanel(for: record, focus: true)
-                                    },
-                                    onStart: { selectAndStart(record) },
-                                    onPause: { selectAndPause(record) },
-                                    onRetry: { selectAndRetry(record) },
-                                    onRedownload: {
-                                        store.downloadList.selectedIDs = [record.id]
-                                        store.downloadList.redownloadSelected()
-                                    },
-                                    onDelete: { selectAndDelete(record) },
-                                    onCopyLink: { coordinator.copy(record.source.link) },
-                                    onChecksum: { coordinator.presentChecksum(for: [record.id]) },
-                                    coordinator: coordinator,
-                                    categories: store.categories,
-                                    speed: store.downloadList.speed(
-                                        for: record.id,
-                                        average: store.settings.useAverageSpeed
-                                    ),
-                                    showLocation: store.settings.showDownloadLocation,
-                                    relativeDate: store.settings.useRelativeDateTime,
-                                    sizeUnit: store.settings.sizeUnit,
-                                    speedUnit: store.settings.speedUnit,
-                                    onMoveToCategory: { categoryID in
-                                        store.downloadList.selectedIDs = [record.id]
-                                        store.assignSelectedToCategory(categoryID, ids: [record.id])
-                                    }
-                                )
-                                Rectangle()
-                                    .fill(Color(nsColor: .separatorColor).opacity(0.4))
-                                    .frame(height: DownloadVisualStyle.hairline)
-                                    .padding(.leading, MainTableLayout.leadingInset)
+                        LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                            Section {
+                                ForEach(store.downloadList.visibleDownloads) { record in
+                                    DownloadTableRow(
+                                        record: record,
+                                        isSelected: store.downloadList.selectedIDs.contains(record.id),
+                                        onSelect: { store.downloadList.toggleSelection(record.id) },
+                                        onOpen: { open(record) },
+                                        onOpenDetail: { coordinator.openDetail(for: record.id) },
+                                        onShowProgress: {
+                                            coordinator.showProgressPanel(for: record, focus: true)
+                                        },
+                                        onStart: { selectAndStart(record) },
+                                        onPause: { selectAndPause(record) },
+                                        onRetry: { selectAndRetry(record) },
+                                        onRedownload: {
+                                            store.downloadList.selectedIDs = [record.id]
+                                            store.downloadList.redownloadSelected()
+                                        },
+                                        onDelete: { selectAndDelete(record) },
+                                        onCopyLink: { coordinator.copy(record.source.link) },
+                                        onChecksum: { coordinator.presentChecksum(for: [record.id]) },
+                                        coordinator: coordinator,
+                                        categories: store.categories,
+                                        speed: store.downloadList.speed(
+                                            for: record.id,
+                                            average: store.settings.useAverageSpeed
+                                        ),
+                                        showLocation: store.settings.showDownloadLocation,
+                                        relativeDate: store.settings.useRelativeDateTime,
+                                        sizeUnit: store.settings.sizeUnit,
+                                        speedUnit: store.settings.speedUnit,
+                                        onMoveToCategory: { categoryID in
+                                            store.downloadList.selectedIDs = [record.id]
+                                            store.assignSelectedToCategory(categoryID, ids: [record.id])
+                                        }
+                                    )
+                                    Rectangle()
+                                        .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                                        .frame(height: DownloadVisualStyle.hairline)
+                                        .padding(.leading, MainTableLayout.leadingInset)
+                                }
+                            } header: {
+                                tableHeader
                             }
                         }
                         .frame(width: max(geometry.size.width, store.settings.showDownloadLocation ? MainTableLayout.minimumLocationTableWidth : geometry.size.width))
