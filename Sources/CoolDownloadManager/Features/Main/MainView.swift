@@ -7,6 +7,7 @@ struct MainView: View {
     @ObservedObject var coordinator: AppCoordinator
 
     @StateObject private var submission = DownloadSubmissionState()
+    @State private var tableHorizontalOffset: CGFloat = 0
     @ObservedObject var viewState: MainViewState
 
     init(store: AppStore, coordinator: AppCoordinator, viewState: MainViewState) {
@@ -364,69 +365,96 @@ struct MainView: View {
     }
 
     private var downloadTable: some View {
-        Group {
-            if store.downloadList.visibleDownloads.isEmpty {
-                emptyState
-            } else {
-                GeometryReader { geometry in
+        GeometryReader { geometry in
+            let tableWidth = max(
+                geometry.size.width,
+                store.settings.showDownloadLocation ? MainTableLayout.minimumLocationTableWidth : geometry.size.width
+            )
+
+            VStack(spacing: 0) {
+                // The header owns its own space above the scrolling rows.
+                // Only horizontal movement is shared, so columns stay aligned.
+                tableHeader
+                    .frame(width: tableWidth)
+                    .offset(x: -tableHorizontalOffset)
+                    .frame(width: geometry.size.width, alignment: .leading)
+                    .clipped()
+
+                if store.downloadList.visibleDownloads.isEmpty {
+                    emptyState
+                } else {
                     ScrollView(store.settings.showDownloadLocation ? [.horizontal, .vertical] : [.vertical]) {
-                        LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                            Section {
-                                ForEach(store.downloadList.visibleDownloads) { record in
-                                    DownloadTableRow(
-                                        record: record,
-                                        isSelected: store.downloadList.selectedIDs.contains(record.id),
-                                        onSelect: { store.downloadList.toggleSelection(record.id) },
-                                        onOpen: { open(record) },
-                                        onOpenDetail: { coordinator.openDetail(for: record.id) },
-                                        onShowProgress: {
-                                            coordinator.showProgressPanel(for: record, focus: true)
-                                        },
-                                        onStart: { selectAndStart(record) },
-                                        onPause: { selectAndPause(record) },
-                                        onRetry: { selectAndRetry(record) },
-                                        onRedownload: {
-                                            store.downloadList.selectedIDs = [record.id]
-                                            store.downloadList.redownloadSelected()
-                                        },
-                                        onDelete: { selectAndDelete(record) },
-                                        onCopyLink: { coordinator.copy(record.source.link) },
-                                        onChecksum: { coordinator.presentChecksum(for: [record.id]) },
-                                        coordinator: coordinator,
-                                        categories: store.categories,
-                                        speed: store.downloadList.speed(
-                                            for: record.id,
-                                            average: store.settings.useAverageSpeed
-                                        ),
-                                        showLocation: store.settings.showDownloadLocation,
-                                        relativeDate: store.settings.useRelativeDateTime,
-                                        sizeUnit: store.settings.sizeUnit,
-                                        speedUnit: store.settings.speedUnit,
-                                        onMoveToCategory: { categoryID in
-                                            store.downloadList.selectedIDs = [record.id]
-                                            store.assignSelectedToCategory(categoryID, ids: [record.id])
-                                        }
-                                    )
-                                    Rectangle()
-                                        .fill(Color(nsColor: .separatorColor).opacity(0.4))
-                                        .frame(height: DownloadVisualStyle.hairline)
-                                        .padding(.leading, MainTableLayout.leadingInset)
-                                }
-                            } header: {
-                                tableHeader
+                        LazyVStack(spacing: 0) {
+                            ForEach(store.downloadList.visibleDownloads) { record in
+                                DownloadTableRow(
+                                    record: record,
+                                    isSelected: store.downloadList.selectedIDs.contains(record.id),
+                                    onSelect: { store.downloadList.toggleSelection(record.id) },
+                                    onOpen: { open(record) },
+                                    onOpenDetail: { coordinator.openDetail(for: record.id) },
+                                    onShowProgress: {
+                                        coordinator.showProgressPanel(for: record, focus: true)
+                                    },
+                                    onStart: { selectAndStart(record) },
+                                    onPause: { selectAndPause(record) },
+                                    onRetry: { selectAndRetry(record) },
+                                    onRedownload: {
+                                        store.downloadList.selectedIDs = [record.id]
+                                        store.downloadList.redownloadSelected()
+                                    },
+                                    onDelete: { selectAndDelete(record) },
+                                    onCopyLink: { coordinator.copy(record.source.link) },
+                                    onChecksum: { coordinator.presentChecksum(for: [record.id]) },
+                                    coordinator: coordinator,
+                                    categories: store.categories,
+                                    speed: store.downloadList.speed(
+                                        for: record.id,
+                                        average: store.settings.useAverageSpeed
+                                    ),
+                                    showLocation: store.settings.showDownloadLocation,
+                                    relativeDate: store.settings.useRelativeDateTime,
+                                    sizeUnit: store.settings.sizeUnit,
+                                    speedUnit: store.settings.speedUnit,
+                                    onMoveToCategory: { categoryID in
+                                        store.downloadList.selectedIDs = [record.id]
+                                        store.assignSelectedToCategory(categoryID, ids: [record.id])
+                                    }
+                                )
+                                Rectangle()
+                                    .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                                    .frame(height: DownloadVisualStyle.hairline)
+                                    .padding(.leading, MainTableLayout.leadingInset)
                             }
                         }
-                        .frame(width: max(geometry.size.width, store.settings.showDownloadLocation ? MainTableLayout.minimumLocationTableWidth : geometry.size.width))
+                        .frame(width: tableWidth)
                     }
-                }
-                .scrollContentBackground(.hidden)
-                .background(Color(nsColor: .textBackgroundColor))
-                .transaction { transaction in
-                    // Progress events arrive frequently; avoid implicit
-                    // layout animation making rows lag behind the source.
-                    transaction.animation = nil
+                    // Changing axes in place can retain AppKit's old content
+                    // origin instead of accounting for the sidebar inset.
+                    .id(store.settings.showDownloadLocation)
+                    .onScrollGeometryChange(for: CGFloat.self) { scroll in
+                        scroll.contentOffset.x + scroll.contentInsets.leading
+                    } action: { _, offset in
+                        tableHorizontalOffset = offset
+                    }
+                    // macOS scroll content can otherwise extend under window
+                    // chrome, even with a separate non-scrolling header.
+                    .clipped()
                 }
             }
+            .clipped()
+        }
+        .scrollContentBackground(.hidden)
+        .background(Color(nsColor: .textBackgroundColor))
+        .onChange(of: store.downloadList.visibleDownloads.isEmpty) {
+            tableHorizontalOffset = 0
+        }
+        .onChange(of: store.settings.showDownloadLocation) {
+            tableHorizontalOffset = 0
+        }
+        .transaction { transaction in
+            // Progress events arrive frequently; avoid implicit
+            // layout animation making rows lag behind the source.
+            transaction.animation = nil
         }
     }
 
